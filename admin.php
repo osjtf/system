@@ -156,6 +156,7 @@ function generateServiceCode($pdo, $prefix) {
 }
 
 function fetchAllData($pdo) {
+    ensureDelayedUnpaidNotifications($pdo);
     // الإجازات النشطة
     $leaves = $pdo->query(" 
         SELECT sl.*, p.name AS patient_name, p.identity_number, p.phone AS patient_phone,
@@ -225,6 +226,74 @@ function fetchAllData($pdo) {
     ")->fetchAll();
 
     return compact('leaves', 'archived', 'queries', 'notifications_payment', 'payments');
+}
+
+
+function fetchActiveOperationalData($pdo) {
+    ensureDelayedUnpaidNotifications($pdo);
+    $leaves = $pdo->query(" 
+        SELECT sl.*, p.name AS patient_name, p.identity_number, p.phone AS patient_phone,
+               d.name AS doctor_name, d.title AS doctor_title, d.note AS doctor_note,
+               COALESCE(lq.queries_count, 0) AS queries_count
+        FROM sick_leaves sl
+        LEFT JOIN patients p ON sl.patient_id = p.id
+        LEFT JOIN doctors d ON sl.doctor_id = d.id
+        LEFT JOIN (
+            SELECT leave_id, COUNT(*) AS queries_count
+            FROM leave_queries
+            GROUP BY leave_id
+        ) lq ON lq.leave_id = sl.id
+        WHERE sl.deleted_at IS NULL
+        ORDER BY sl.created_at DESC
+    ")->fetchAll();
+
+    $notifications_payment = $pdo->query(" 
+        SELECT n.*, sl.payment_amount, sl.service_code, sl.patient_id, p.name AS patient_name
+        FROM notifications n
+        LEFT JOIN sick_leaves sl ON n.leave_id = sl.id
+        LEFT JOIN patients p ON sl.patient_id = p.id
+        WHERE n.type = 'payment'
+        ORDER BY n.created_at DESC
+    ")->fetchAll();
+
+    $payments = $pdo->query(" 
+        SELECT p.id, p.name,
+               COUNT(sl.id) AS total,
+               SUM(CASE WHEN sl.is_paid = 1 THEN 1 ELSE 0 END) AS paid_count,
+               SUM(CASE WHEN sl.is_paid = 0 THEN 1 ELSE 0 END) AS unpaid_count,
+               COALESCE(SUM(CASE WHEN sl.is_paid = 1 THEN sl.payment_amount ELSE 0 END), 0) AS paid_amount,
+               COALESCE(SUM(CASE WHEN sl.is_paid = 0 THEN sl.payment_amount ELSE 0 END), 0) AS unpaid_amount
+        FROM patients p
+        LEFT JOIN sick_leaves sl ON p.id = sl.patient_id AND sl.deleted_at IS NULL
+        GROUP BY p.id, p.name
+        ORDER BY p.name
+    ")->fetchAll();
+
+    return compact('leaves', 'payments', 'notifications_payment');
+}
+
+function ensureDelayedUnpaidNotifications($pdo): void {
+    $stmt = $pdo->prepare("
+        SELECT sl.id, sl.service_code, sl.payment_amount
+        FROM sick_leaves sl
+        LEFT JOIN notifications n ON n.leave_id = sl.id AND n.type = 'payment'
+        WHERE sl.deleted_at IS NULL
+          AND sl.is_paid = 0
+          AND sl.payment_amount > 0
+          AND sl.created_at <= (NOW() - INTERVAL 5 MINUTE)
+          AND n.id IS NULL
+    ");
+    $stmt->execute();
+    $rows = $stmt->fetchAll();
+    if (!$rows) return;
+
+    $ins = $pdo->prepare("INSERT INTO notifications (type, leave_id, message) VALUES ('payment', ?, ?)");
+    foreach ($rows as $row) {
+        $ins->execute([
+            $row['id'],
+            "إجازة غير مدفوعة منذ أكثر من 5 دقائق برمز {$row['service_code']} بمبلغ {$row['payment_amount']}"
+        ]);
+    }
 }
 
 // ======================== معالجة تسجيل الدخول والخروج ========================
@@ -362,7 +431,7 @@ if (isset($_POST['action']) && $_POST['action'] !== 'login' && $_POST['action'] 
             $is_paid = isset($_POST['is_paid']) ? 1 : 0;
             $payment_amount = floatval($_POST['payment_amount'] ?? 0);
 
-            if (empty($issue_date) || empty($start_date) || empty($end_date) || $days_count <= 0) {
+            if (empty($issue_date) || empty($start_date) || empty($end_date) || $days_count <= 0 || $patient_id <= 0 || $doctor_id <= 0) {
                 echo json_encode(['success' => false, 'message' => 'يرجى تعبئة جميع الحقول المطلوبة.']);
                 exit;
             }
@@ -383,7 +452,7 @@ if (isset($_POST['action']) && $_POST['action'] !== 'login' && $_POST['action'] 
                 $stmt->execute([$leaveId, "إجازة جديدة غير مدفوعة برمز $service_code بمبلغ $payment_amount"]);
             }
 
-            $data = fetchAllData($pdo);
+            $data = fetchActiveOperationalData($pdo);
             $data['stats'] = getStats($pdo);
             $data['success'] = true;
             $data['message'] = "تمت إضافة الإجازة بنجاح. رمز الخدمة: $service_code";
@@ -435,7 +504,7 @@ if (isset($_POST['action']) && $_POST['action'] !== 'login' && $_POST['action'] 
                 ]);
             }
 
-            $data = fetchAllData($pdo);
+            $data = fetchActiveOperationalData($pdo);
             $data['stats'] = getStats($pdo);
             $data['success'] = true;
             $data['message'] = 'تم تعديل الإجازة بنجاح.';
@@ -502,7 +571,7 @@ if (isset($_POST['action']) && $_POST['action'] !== 'login' && $_POST['action'] 
                 $stmt->execute([$leaveId, "إجازة مكررة غير مدفوعة برمز $service_code بمبلغ $payment_amount"]);
             }
 
-            $data = fetchAllData($pdo);
+            $data = fetchActiveOperationalData($pdo);
             $data['stats'] = getStats($pdo);
             $data['success'] = true;
             $data['message'] = "تم تكرار الإجازة بنجاح. رمز الخدمة الجديد: $service_code";
@@ -564,7 +633,7 @@ if (isset($_POST['action']) && $_POST['action'] !== 'login' && $_POST['action'] 
             $stmt = $pdo->prepare("UPDATE sick_leaves SET is_paid = 1, payment_amount = ? WHERE id = ?");
             $stmt->execute([$amount, $leave_id]);
             $pdo->prepare("DELETE FROM notifications WHERE leave_id = ? AND type = 'payment'")->execute([$leave_id]);
-            $data = fetchAllData($pdo);
+            $data = fetchActiveOperationalData($pdo);
             $data['stats'] = getStats($pdo);
             $data['success'] = true;
             $data['message'] = 'تم تأكيد الدفع بنجاح.';
@@ -892,6 +961,26 @@ if (isset($_POST['action']) && $_POST['action'] !== 'login' && $_POST['action'] 
             ");
             $stmt->execute([$user_id]);
             echo json_encode(['success' => true, 'sessions' => $stmt->fetchAll()]);
+            break;
+
+        case 'delete_user_session':
+            if ($_SESSION['admin_role'] !== 'admin') {
+                echo json_encode(['success' => false, 'message' => 'ليس لديك صلاحية.']);
+                exit;
+            }
+            $session_id = intval($_POST['session_id'] ?? 0);
+            $pdo->prepare("DELETE FROM user_sessions WHERE id = ?")->execute([$session_id]);
+            echo json_encode(['success' => true, 'message' => 'تم حذف الجلسة.']);
+            break;
+
+        case 'delete_all_user_sessions':
+            if ($_SESSION['admin_role'] !== 'admin') {
+                echo json_encode(['success' => false, 'message' => 'ليس لديك صلاحية.']);
+                exit;
+            }
+            $user_id = intval($_POST['user_id'] ?? 0);
+            $pdo->prepare("DELETE FROM user_sessions WHERE user_id = ?")->execute([$user_id]);
+            echo json_encode(['success' => true, 'message' => 'تم حذف جميع جلسات المستخدم.']);
             break;
 
         default:
@@ -2050,6 +2139,8 @@ if ($loggedIn) {
                         <div class="btn-group btn-group-sm">
                             <button class="btn btn-outline-success" id="sortPaymentsPaid">الأكثر دفعاً</button>
                             <button class="btn btn-outline-danger" id="sortPaymentsUnpaid">الأكثر استحقاقاً</button>
+                            <button class="btn btn-outline-primary" id="sortPaymentsMostLeaves">الأكثر إجازات</button>
+                            <button class="btn btn-outline-primary" id="sortPaymentsLeastLeaves">الأقل إجازات</button>
                             <button class="btn btn-outline-secondary" id="sortPaymentsReset"><i class="bi bi-arrow-counterclockwise"></i></button>
                         </div>
                     </div>
@@ -2456,6 +2547,7 @@ if ($loggedIn) {
         <div class="modal-content">
             <div class="modal-header"><h5 class="modal-title"><i class="bi bi-clock-history text-info"></i> سجل الجلسات</h5><button type="button" class="btn-close" data-bs-dismiss="modal"></button></div>
             <div class="modal-body">
+                <div class="d-flex justify-content-end mb-2"><button class="btn btn-sm btn-danger-custom" id="btnDeleteAllSessionsForUser"><i class="bi bi-trash3"></i> حذف كل الجلسات</button></div>
                 <ul class="list-group" id="sessionsListContainer">
                     <li class="list-group-item text-center text-muted">لا توجد جلسات.</li>
                 </ul>
@@ -2502,6 +2594,15 @@ function htmlspecialchars(str) {
     const div = document.createElement('div');
     div.appendChild(document.createTextNode(String(str)));
     return div.innerHTML;
+}
+
+function formatWhatsAppLink(phone) {
+    if (!phone) return '';
+    let digits = String(phone).replace(/\D/g, '');
+    if (!digits) return '';
+    if (digits.startsWith('00')) digits = digits.slice(2);
+    else if (digits.startsWith('0')) digits = '966' + digits.slice(1);
+    return `https://wa.me/${digits}`;
 }
 
 function showToast(msg, type = 'success') {
@@ -2568,9 +2669,10 @@ function filterAndSortTable(tableEl, data, rowGenerator, filters = {}, sortCol =
 
     // البحث
     if (filters.search) {
-        const s = filters.search.toLowerCase();
+        const q = String(filters.search).toLowerCase().trim();
         filtered = filtered.filter(item => {
-            return Object.values(item).some(val => val !== null && String(val).toLowerCase().includes(s));
+            const searchText = JSON.stringify(item || {}).toLowerCase();
+            return searchText.includes(q);
         });
     }
 
@@ -2766,7 +2868,7 @@ function generatePatientRow(p) {
             <td class="row-num"></td>
             <td>${htmlspecialchars(p.name)}</td>
             <td>${htmlspecialchars(p.identity_number)}</td>
-            <td>${htmlspecialchars(p.phone || '')}</td>
+            <td>${p.phone ? `<a href="${formatWhatsAppLink(p.phone)}" target="_blank" class="text-decoration-none"><i class="bi bi-whatsapp text-success"></i> ${htmlspecialchars(p.phone)}</a>` : ''}</td>
             <td>
                 <button class="btn btn-sm btn-gradient action-btn btn-edit-patient" data-id="${p.id}" data-name="${htmlspecialchars(p.name)}" data-identity="${htmlspecialchars(p.identity_number)}" data-phone="${htmlspecialchars(p.phone || '')}"><i class="bi bi-pencil"></i></button>
                 <button class="btn btn-sm btn-danger-custom action-btn btn-delete-patient" data-id="${p.id}"><i class="bi bi-trash3"></i></button>
@@ -2898,6 +3000,7 @@ function updateDoctorSelects(doctors) {
         });
         if (manualOpt) sel.appendChild(manualOpt);
         sel.value = currentVal;
+        refreshSelectQuickSearchData(selId);
     });
 }
 
@@ -2917,6 +3020,7 @@ function updatePatientSelects(patients) {
     });
     if (manualOpt) sel.appendChild(manualOpt);
     sel.value = currentVal;
+    refreshSelectQuickSearchData('patient_select');
 }
 
 // ======================== الأحداث الرئيسية ========================
@@ -3012,6 +3116,7 @@ document.addEventListener('DOMContentLoaded', () => {
     let currentConfirmAction = null;
     let currentConfirmId = null;
     let currentDetailQueries = [];
+    let currentSessionsUserId = null;
 
     const currentTableData = {
         leaves: initialLeaves,
@@ -3024,15 +3129,24 @@ document.addEventListener('DOMContentLoaded', () => {
         users: initialUsers
     };
 
+    function syncTableDataFromResult(result) {
+        const keys = ['leaves', 'archived', 'queries', 'doctors', 'patients', 'payments', 'notifications_payment', 'users'];
+        keys.forEach((k) => {
+            if (Object.prototype.hasOwnProperty.call(result, k) && Array.isArray(result[k])) {
+                currentTableData[k] = result[k];
+            }
+        });
+    }
+
     // ====== دالة جلب جميع البيانات ======
     async function fetchAllLeaves() {
         const result = await sendAjaxRequest('fetch_all_leaves', {});
         if (result.success) {
-            currentTableData.leaves = result.leaves || [];
-            currentTableData.archived = result.archived || [];
-            currentTableData.queries = result.queries || [];
-            currentTableData.payments = result.payments || [];
-            currentTableData.notifications_payment = result.notifications_payment || [];
+            if (Array.isArray(result.leaves)) currentTableData.leaves = result.leaves;
+            if (Array.isArray(result.archived)) currentTableData.archived = result.archived;
+            if (Array.isArray(result.queries)) currentTableData.queries = result.queries;
+            if (Array.isArray(result.payments)) currentTableData.payments = result.payments;
+            if (Array.isArray(result.notifications_payment)) currentTableData.notifications_payment = result.notifications_payment;
 
             updateTable(leavesTable, currentTableData.leaves, generateLeaveRow);
             updateTable(archivedTable, currentTableData.archived, generateArchivedLeaveRow);
@@ -3159,12 +3273,13 @@ document.addEventListener('DOMContentLoaded', () => {
                 togglePatientManualFields();
                 toggleDoctorManualFields();
                 companionFields.forEach(f => f.classList.add('hidden-field'));
-                currentTableData.leaves = result.leaves || [];
-                currentTableData.archived = result.archived || [];
-                currentTableData.queries = result.queries || [];
-                currentTableData.payments = result.payments || [];
-                currentTableData.notifications_payment = result.notifications_payment || [];
-                updateTable(leavesTable, currentTableData.leaves, generateLeaveRow);
+                syncTableDataFromResult(result);
+                filtersState.leaves = { search: '', fromDate: '', toDate: '', typeFilter: '', sortCol: 'created_at', sortOrder: 'desc' };
+                document.getElementById('searchLeaves').value = '';
+                document.getElementById('filterFromDate').value = '';
+                document.getElementById('filterToDate').value = '';
+                document.getElementById('filterType').value = '';
+                applyLeavesFilters();
                 updateTable(archivedTable, currentTableData.archived, generateArchivedLeaveRow);
                 updateTable(queriesTable, currentTableData.queries, generateQueryRow);
                 updateTable(paymentsTable, currentTableData.payments, generatePaymentPatientRow);
@@ -3240,11 +3355,13 @@ document.addEventListener('DOMContentLoaded', () => {
             if (result.success) {
                 showToast(result.message, 'success');
                 editLeaveModal.hide();
-                currentTableData.leaves = result.leaves || [];
-                currentTableData.archived = result.archived || [];
-                currentTableData.queries = result.queries || [];
-                currentTableData.payments = result.payments || [];
-                updateTable(leavesTable, currentTableData.leaves, generateLeaveRow);
+                syncTableDataFromResult(result);
+                filtersState.leaves = { search: '', fromDate: '', toDate: '', typeFilter: '', sortCol: 'created_at', sortOrder: 'desc' };
+                document.getElementById('searchLeaves').value = '';
+                document.getElementById('filterFromDate').value = '';
+                document.getElementById('filterToDate').value = '';
+                document.getElementById('filterType').value = '';
+                applyLeavesFilters();
                 updateTable(archivedTable, currentTableData.archived, generateArchivedLeaveRow);
                 updateTable(queriesTable, currentTableData.queries, generateQueryRow);
                 updateTable(paymentsTable, currentTableData.payments, generatePaymentPatientRow);
@@ -3326,12 +3443,13 @@ document.addEventListener('DOMContentLoaded', () => {
             if (result.success) {
                 showToast(result.message, 'success');
                 duplicateLeaveModal.hide();
-                currentTableData.leaves = result.leaves || [];
-                currentTableData.archived = result.archived || [];
-                currentTableData.queries = result.queries || [];
-                currentTableData.payments = result.payments || [];
-                currentTableData.notifications_payment = result.notifications_payment || [];
-                updateTable(leavesTable, currentTableData.leaves, generateLeaveRow);
+                syncTableDataFromResult(result);
+                filtersState.leaves = { search: '', fromDate: '', toDate: '', typeFilter: '', sortCol: 'created_at', sortOrder: 'desc' };
+                document.getElementById('searchLeaves').value = '';
+                document.getElementById('filterFromDate').value = '';
+                document.getElementById('filterToDate').value = '';
+                document.getElementById('filterType').value = '';
+                applyLeavesFilters();
                 updateTable(archivedTable, currentTableData.archived, generateArchivedLeaveRow);
                 updateTable(queriesTable, currentTableData.queries, generateQueryRow);
                 updateTable(paymentsTable, currentTableData.payments, generatePaymentPatientRow);
@@ -3355,9 +3473,9 @@ document.addEventListener('DOMContentLoaded', () => {
             hideLoading();
             if (result.success) {
                 showToast(result.message, 'success');
-                currentTableData.leaves = result.leaves || [];
-                currentTableData.archived = result.archived || [];
-                currentTableData.payments = result.payments || [];
+                if (Array.isArray(result.leaves)) currentTableData.leaves = result.leaves;
+                if (Array.isArray(result.archived)) currentTableData.archived = result.archived;
+                if (Array.isArray(result.payments)) currentTableData.payments = result.payments;
                 updateTable(leavesTable, currentTableData.leaves, generateLeaveRow);
                 updateTable(archivedTable, currentTableData.archived, generateArchivedLeaveRow);
                 updateTable(paymentsTable, currentTableData.payments, generatePaymentPatientRow);
@@ -3381,9 +3499,9 @@ document.addEventListener('DOMContentLoaded', () => {
             hideLoading();
             if (result.success) {
                 showToast(result.message, 'success');
-                currentTableData.leaves = result.leaves || [];
-                currentTableData.archived = result.archived || [];
-                currentTableData.payments = result.payments || [];
+                if (Array.isArray(result.leaves)) currentTableData.leaves = result.leaves;
+                if (Array.isArray(result.archived)) currentTableData.archived = result.archived;
+                if (Array.isArray(result.payments)) currentTableData.payments = result.payments;
                 updateTable(leavesTable, currentTableData.leaves, generateLeaveRow);
                 updateTable(archivedTable, currentTableData.archived, generateArchivedLeaveRow);
                 updateTable(paymentsTable, currentTableData.payments, generatePaymentPatientRow);
@@ -3407,8 +3525,8 @@ document.addEventListener('DOMContentLoaded', () => {
             hideLoading();
             if (result.success) {
                 showToast(result.message, 'success');
-                currentTableData.leaves = result.leaves || [];
-                currentTableData.archived = result.archived || [];
+                if (Array.isArray(result.leaves)) currentTableData.leaves = result.leaves;
+                if (Array.isArray(result.archived)) currentTableData.archived = result.archived;
                 updateTable(leavesTable, currentTableData.leaves, generateLeaveRow);
                 updateTable(archivedTable, currentTableData.archived, generateArchivedLeaveRow);
                 if (result.stats) updateStats(result.stats);
@@ -3427,7 +3545,7 @@ document.addEventListener('DOMContentLoaded', () => {
             hideLoading();
             if (result.success) {
                 showToast(result.message, 'success');
-                currentTableData.archived = result.archived || [];
+                if (Array.isArray(result.archived)) currentTableData.archived = result.archived;
                 updateTable(archivedTable, currentTableData.archived, generateArchivedLeaveRow);
                 if (result.stats) updateStats(result.stats);
             }
@@ -3631,6 +3749,7 @@ document.addEventListener('DOMContentLoaded', () => {
             showToast(result.message, 'success');
             e.target.reset();
             currentTableData.doctors = result.doctors;
+            document.getElementById('searchDoctors').value = '';
             updateTable(doctorsTable, currentTableData.doctors, generateDoctorRow);
             updateDoctorSelects(currentTableData.doctors);
             if (result.stats) updateStats(result.stats);
@@ -3678,6 +3797,7 @@ document.addEventListener('DOMContentLoaded', () => {
             showToast(result.message, 'success');
             editDoctorModal.hide();
             currentTableData.doctors = result.doctors;
+            document.getElementById('searchDoctors').value = '';
             updateTable(doctorsTable, currentTableData.doctors, generateDoctorRow);
             updateDoctorSelects(currentTableData.doctors);
         } else { showToast(result.message, 'danger'); }
@@ -3697,6 +3817,7 @@ document.addEventListener('DOMContentLoaded', () => {
             showToast(result.message, 'success');
             e.target.reset();
             currentTableData.patients = result.patients;
+            document.getElementById('searchPatients').value = '';
             updateTable(patientsTable, currentTableData.patients, generatePatientRow);
             updatePatientSelects(currentTableData.patients);
             if (result.stats) updateStats(result.stats);
@@ -3744,6 +3865,7 @@ document.addEventListener('DOMContentLoaded', () => {
             showToast(result.message, 'success');
             editPatientModal.hide();
             currentTableData.patients = result.patients;
+            document.getElementById('searchPatients').value = '';
             updateTable(patientsTable, currentTableData.patients, generatePatientRow);
             updatePatientSelects(currentTableData.patients);
         } else { showToast(result.message, 'danger'); }
@@ -3806,6 +3928,7 @@ document.addEventListener('DOMContentLoaded', () => {
             }
             if (sessBtn) {
                 const userId = sessBtn.dataset.id;
+                currentSessionsUserId = userId;
                 const sessionsList = document.getElementById('sessionsListContainer');
                 sessionsList.innerHTML = '<li class="list-group-item text-center">جارٍ جلب البيانات...</li>';
                 sessionsModal.show();
@@ -3827,6 +3950,7 @@ document.addEventListener('DOMContentLoaded', () => {
                                             <br><small class="text-muted"><i class="bi bi-box-arrow-right"></i> خروج: ${s.logout_at ? htmlspecialchars(s.logout_at) : 'لم يسجل خروج'}</small>
                                             <br><small class="text-muted"><i class="bi bi-globe"></i> IP: ${htmlspecialchars(s.ip_address || 'غير متوفر')}</small>
                                         </div>
+                                        <button class="btn btn-sm btn-outline-danger btn-delete-session" data-session-id="${s.id}" title="حذف الجلسة"><i class="bi bi-trash3"></i></button>
                                     </div>
                                 </li>
                             `).join('');
@@ -3835,6 +3959,27 @@ document.addEventListener('DOMContentLoaded', () => {
                         sessionsList.innerHTML = '<li class="list-group-item text-center text-danger">فشل في جلب البيانات.</li>';
                     }
                 });
+            }
+        });
+
+
+        document.getElementById('sessionsListContainer').addEventListener('click', async (e) => {
+            const btn = e.target.closest('.btn-delete-session');
+            if (!btn) return;
+            const sessionId = btn.dataset.sessionId;
+            const result = await sendAjaxRequest('delete_user_session', { session_id: sessionId });
+            if (result.success) {
+                showToast(result.message, 'success');
+                btn.closest('li')?.remove();
+            }
+        });
+
+        document.getElementById('btnDeleteAllSessionsForUser').addEventListener('click', async () => {
+            if (!currentSessionsUserId) return;
+            const result = await sendAjaxRequest('delete_all_user_sessions', { user_id: currentSessionsUserId });
+            if (result.success) {
+                showToast(result.message, 'success');
+                document.getElementById('sessionsListContainer').innerHTML = '<li class="list-group-item text-center text-muted">لا توجد جلسات مسجلة.</li>';
             }
         });
 
@@ -4132,11 +4277,11 @@ document.addEventListener('DOMContentLoaded', () => {
     setInterval(async () => {
         const result = await sendAjaxRequest('fetch_all_leaves', {});
         if (result.success) {
-            currentTableData.leaves = result.leaves || [];
-            currentTableData.archived = result.archived || [];
-            currentTableData.queries = result.queries || [];
-            currentTableData.payments = result.payments || [];
-            currentTableData.notifications_payment = result.notifications_payment || [];
+            if (Array.isArray(result.leaves)) currentTableData.leaves = result.leaves;
+            if (Array.isArray(result.archived)) currentTableData.archived = result.archived;
+            if (Array.isArray(result.queries)) currentTableData.queries = result.queries;
+            if (Array.isArray(result.payments)) currentTableData.payments = result.payments;
+            if (Array.isArray(result.notifications_payment)) currentTableData.notifications_payment = result.notifications_payment;
             updateTable(leavesTable, currentTableData.leaves, generateLeaveRow);
             updateTable(archivedTable, currentTableData.archived, generateArchivedLeaveRow);
             updateTable(queriesTable, currentTableData.queries, generateQueryRow);
