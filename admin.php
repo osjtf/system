@@ -122,6 +122,7 @@ ensureColumn($pdo, 'user_messages', 'file_path', "VARCHAR(500) NULL AFTER file_n
 ensureColumn($pdo, 'user_messages', 'mime_type', "VARCHAR(150) NULL AFTER file_path");
 ensureColumn($pdo, 'user_messages', 'file_size', "INT NULL AFTER mime_type");
 ensureColumn($pdo, 'user_messages', 'deleted_at', "DATETIME NULL AFTER is_read");
+ensureColumn($pdo, 'user_messages', 'reply_to_id', "INT NULL AFTER deleted_at");
 ensureIndex($pdo, 'user_messages', 'idx_user_messages_deleted', 'deleted_at');
 
 // إنشاء مستخدم افتراضي إذا لم يوجد أي مستخدم
@@ -225,17 +226,20 @@ function generateServiceCode($pdo, $prefix, $issueDate = null) {
         $prefix = 'GSL';
     }
 
-    $stmt = $pdo->prepare("SELECT service_code FROM sick_leaves WHERE service_code LIKE ? ORDER BY id DESC LIMIT 1");
-    $stmt->execute([$prefix . '%']);
-    $last = $stmt->fetchColumn();
+    $issueDateObj = DateTime::createFromFormat('Y-m-d', (string)$issueDate, new DateTimeZone('Asia/Riyadh'));
+    if (!$issueDateObj) {
+        $issueDateObj = new DateTime('now', new DateTimeZone('Asia/Riyadh'));
+    }
+    $datePart = $issueDateObj->format('ymd');
 
-    if ($last && preg_match('/^(?:GSL|PSL)(\d+)$/', $last, $m)) {
+    $stmt = $pdo->query("SELECT service_code FROM sick_leaves ORDER BY id DESC LIMIT 1");
+    $last = $stmt->fetchColumn();
+    $num = 1;
+    if ($last && preg_match('/^(?:GSL|PSL)\d{6}(\d+)$/', $last, $m)) {
         $num = intval($m[1]) + 1;
-    } else {
-        $num = 1;
     }
 
-    return $prefix . str_pad((string)$num, 6, '0', STR_PAD_LEFT);
+    return $prefix . $datePart . str_pad((string)$num, 5, '0', STR_PAD_LEFT);
 }
 
 
@@ -1036,10 +1040,13 @@ if (isset($_POST['action']) && $_POST['action'] !== 'login' && $_POST['action'] 
             $stmt = $pdo->prepare("
                 SELECT um.*,
                        s.display_name AS sender_name,
-                       r.display_name AS receiver_name
+                       r.display_name AS receiver_name,
+                       rp.message_text AS reply_message_text,
+                       rp.file_name AS reply_file_name
                 FROM user_messages um
                 LEFT JOIN admin_users s ON um.sender_id = s.id
                 LEFT JOIN admin_users r ON um.receiver_id = r.id
+                LEFT JOIN user_messages rp ON um.reply_to_id = rp.id
                 WHERE um.deleted_at IS NULL AND ((um.sender_id = ? AND um.receiver_id = ?)
                    OR (um.sender_id = ? AND um.receiver_id = ?))
                 ORDER BY um.created_at ASC, um.id ASC
@@ -1067,6 +1074,7 @@ if (isset($_POST['action']) && $_POST['action'] !== 'login' && $_POST['action'] 
                 break;
             }
 
+            $replyToId = intval($_POST['reply_to_id'] ?? 0);
             $messageType = 'text';
             $fileName = null; $filePath = null; $mimeType = null; $fileSize = null;
             if (!empty($_FILES['chat_file']) && intval($_FILES['chat_file']['error']) === UPLOAD_ERR_OK) {
@@ -1101,8 +1109,8 @@ if (isset($_POST['action']) && $_POST['action'] !== 'login' && $_POST['action'] 
                 break;
             }
 
-            $ins = $pdo->prepare("INSERT INTO user_messages (sender_id, receiver_id, message_text, message_type, file_name, file_path, mime_type, file_size, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)");
-            $ins->execute([$me, $peerId, $messageText, $messageType, $fileName, $filePath, $mimeType, $fileSize, nowSaudi()]);
+            $ins = $pdo->prepare("INSERT INTO user_messages (sender_id, receiver_id, message_text, message_type, file_name, file_path, mime_type, file_size, reply_to_id, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)");
+            $ins->execute([$me, $peerId, $messageText, $messageType, $fileName, $filePath, $mimeType, $fileSize, $replyToId > 0 ? $replyToId : null, nowSaudi()]);
             echo json_encode(['success' => true, 'message' => 'تم إرسال الرسالة.']);
             break;
 
@@ -2435,9 +2443,12 @@ if ($loggedIn) {
                         </div>
                         <div class="col-lg-8">
                             <div id="chatMessagesBox" class="border rounded p-2 mb-2" style="height:320px; overflow:auto; background:#f8f9fa;"></div>
+                            <div id="chatReplyPreview" class="small text-muted mb-2 d-none"></div>
                             <div class="input-group mb-2">
                                 <input type="text" class="form-control" id="chatMessageInput" placeholder="اكتب رسالتك...">
                                 <button class="btn btn-gradient" id="sendChatMessageBtn"><i class="bi bi-send"></i> إرسال</button>
+                                <button class="btn btn-outline-danger" id="recordVoiceBtn" type="button"><i class="bi bi-mic"></i> فويس</button>
+                                <button class="btn btn-outline-secondary d-none" id="stopVoiceBtn" type="button"><i class="bi bi-stop-fill"></i> إيقاف</button>
                             </div>
                             <div class="input-group input-group-sm">
                                 <input type="file" class="form-control" id="chatFileInput" accept="image/*,audio/*,.pdf,.doc,.docx,.xls,.xlsx,.txt,.mp4">
@@ -4473,6 +4484,9 @@ document.addEventListener('DOMContentLoaded', () => {
 
     // ====== المراسلات ======
     let activeChatPeerId = null;
+    let currentReplyMessage = null;
+    let mediaRecorder = null;
+    let voiceChunks = [];
 
     function renderChatUsers(list) {
         const sel = document.getElementById('chatPeerSelect');
@@ -4498,8 +4512,10 @@ document.addEventListener('DOMContentLoaded', () => {
         const rows = (list || []).map(m => {
             const mine = String(m.sender_id) === me;
             const fileHtml = m.file_path ? (m.message_type === 'image' ? `<div><img src="${htmlspecialchars(m.file_path)}" style="max-width:220px;border-radius:8px;"></div>` : (m.message_type === 'voice' ? `<audio controls src="${htmlspecialchars(m.file_path)}" style="max-width:240px;"></audio>` : `<a href="${htmlspecialchars(m.file_path)}" target="_blank" class="btn btn-sm btn-outline-primary mt-1"><i class="bi bi-paperclip"></i> ${htmlspecialchars(m.file_name || 'ملف')}</a>`)) : '';
+            const replyHtml = m.reply_to_id ? `<div class="small text-muted border-end pe-2 mb-1"><i class="bi bi-reply"></i> ${htmlspecialchars(m.reply_message_text || m.reply_file_name || 'رسالة')}</div>` : '';
             const delBtn = mine || IS_ADMIN ? `<button class="btn btn-sm btn-outline-danger mt-1 btn-delete-chat-message" data-id="${m.id}"><i class="bi bi-trash3"></i></button>` : '';
-            return `<div class="mb-2 d-flex ${mine ? 'justify-content-start' : 'justify-content-end'}"><div class="p-2 rounded" style="max-width:78%; background:${mine ? '#d1e7dd' : '#e2e3e5'}"><div class="small fw-bold">${htmlspecialchars(m.sender_name || '')}</div><div>${htmlspecialchars(m.message_text || '')}</div>${fileHtml}<div class="small text-muted">${formatSaudiDateTime(m.created_at)}</div>${delBtn}</div></div>`;
+            const replyBtn = `<button class="btn btn-sm btn-outline-secondary mt-1 btn-reply-chat-message" data-id="${m.id}" data-text="${htmlspecialchars(m.message_text || m.file_name || 'رسالة')}"><i class="bi bi-reply"></i></button>`;
+            return `<div class="mb-2 d-flex ${mine ? 'justify-content-start' : 'justify-content-end'}"><div class="msg-bubble ${mine ? 'msg-mine' : 'msg-other'}" style="max-width:78%;"><div class="small fw-bold">${htmlspecialchars(m.sender_name || '')}</div>${replyHtml}<div>${htmlspecialchars(m.message_text || '')}</div>${fileHtml}<div class="small text-muted">${formatSaudiDateTime(m.created_at)}</div>${replyBtn} ${delBtn}</div></div>`;
         }).join('');
         box.innerHTML = rows || '<div class="text-muted text-center mt-4">لا توجد رسائل بعد.</div>';
         box.scrollTop = box.scrollHeight;
@@ -4837,12 +4853,14 @@ document.addEventListener('DOMContentLoaded', () => {
         const fileInput = document.getElementById('chatFileInput');
         const file = fileInput?.files?.[0] || null;
         if (!activeChatPeerId || (!text && !file)) return;
-        const payload = { peer_id: activeChatPeerId, message_text: text };
+        const payload = { peer_id: activeChatPeerId, message_text: text, reply_to_id: currentReplyMessage ? currentReplyMessage.id : '' };
         if (file) payload.chat_file = file;
         const result = await sendAjaxRequest('send_message', payload);
         if (result.success) {
             input.value = '';
             if (fileInput) fileInput.value = '';
+            currentReplyMessage = null;
+            const rp = document.getElementById('chatReplyPreview'); if (rp) { rp.classList.add('d-none'); rp.textContent = ''; }
             await loadChatMessages();
         }
     });
@@ -4854,15 +4872,49 @@ document.addEventListener('DOMContentLoaded', () => {
     });
     setInterval(() => { if (activeChatPeerId) loadChatMessages(); }, 7000);
 
+    
+    document.getElementById('recordVoiceBtn')?.addEventListener('click', async () => {
+        try {
+            const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+            mediaRecorder = new MediaRecorder(stream);
+            voiceChunks = [];
+            mediaRecorder.ondataavailable = e => { if (e.data.size > 0) voiceChunks.push(e.data); };
+            mediaRecorder.onstop = () => {
+                const blob = new Blob(voiceChunks, { type: 'audio/webm' });
+                const file = new File([blob], `voice_${Date.now()}.webm`, { type: 'audio/webm' });
+                const fileInput = document.getElementById('chatFileInput');
+                const dt = new DataTransfer(); dt.items.add(file); fileInput.files = dt.files;
+                document.getElementById('recordVoiceBtn')?.classList.remove('d-none');
+                document.getElementById('stopVoiceBtn')?.classList.add('d-none');
+            };
+            mediaRecorder.start();
+            document.getElementById('recordVoiceBtn')?.classList.add('d-none');
+            document.getElementById('stopVoiceBtn')?.classList.remove('d-none');
+        } catch (e) {
+            showToast('تعذر بدء تسجيل الفويس.', 'danger');
+        }
+    });
+    document.getElementById('stopVoiceBtn')?.addEventListener('click', () => {
+        if (mediaRecorder && mediaRecorder.state !== 'inactive') mediaRecorder.stop();
+    });
+
     document.getElementById('clearChatFileBtn')?.addEventListener('click', () => {
         const f = document.getElementById('chatFileInput');
         if (f) f.value = '';
     });
     document.getElementById('chatMessagesBox')?.addEventListener('click', async (e) => {
-        const btn = e.target.closest('.btn-delete-chat-message');
-        if (!btn) return;
-        const result = await sendAjaxRequest('delete_message', { message_id: btn.dataset.id });
-        if (result.success) await loadChatMessages();
+        const del = e.target.closest('.btn-delete-chat-message');
+        if (del) {
+            const result = await sendAjaxRequest('delete_message', { message_id: del.dataset.id });
+            if (result.success) await loadChatMessages();
+            return;
+        }
+        const rep = e.target.closest('.btn-reply-chat-message');
+        if (rep) {
+            currentReplyMessage = { id: rep.dataset.id, text: rep.dataset.text };
+            const rp = document.getElementById('chatReplyPreview');
+            if (rp) { rp.classList.remove('d-none'); rp.textContent = `رد على: ${rep.dataset.text}`; }
+        }
     });
     document.getElementById('saveChatRetentionBtn')?.addEventListener('click', async () => {
         const h = document.getElementById('chatRetentionHours')?.value || '0';
