@@ -57,6 +57,26 @@ $pdo->exec("CREATE TABLE IF NOT EXISTS user_sessions (
     FOREIGN KEY (user_id) REFERENCES admin_users(id) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci");
 
+function ensureIndex(PDO $pdo, string $table, string $indexName, string $columns): void {
+    $check = $pdo->prepare("SELECT COUNT(*) FROM information_schema.statistics WHERE table_schema = DATABASE() AND table_name = ? AND index_name = ?");
+    $check->execute([$table, $indexName]);
+    if ((int)$check->fetchColumn() === 0) {
+        $pdo->exec("CREATE INDEX $indexName ON $table ($columns)");
+    }
+}
+
+ensureIndex($pdo, 'sick_leaves', 'idx_sick_leaves_deleted_created', 'deleted_at, created_at');
+ensureIndex($pdo, 'sick_leaves', 'idx_sick_leaves_paid', 'is_paid');
+ensureIndex($pdo, 'sick_leaves', 'idx_sick_leaves_patient', 'patient_id');
+ensureIndex($pdo, 'sick_leaves', 'idx_sick_leaves_doctor', 'doctor_id');
+ensureIndex($pdo, 'notifications', 'idx_notifications_type_created', 'type, created_at');
+ensureIndex($pdo, 'notifications', 'idx_notifications_leave', 'leave_id');
+ensureIndex($pdo, 'leave_queries', 'idx_leave_queries_leave', 'leave_id');
+ensureIndex($pdo, 'leave_queries', 'idx_leave_queries_queried_at', 'queried_at');
+ensureIndex($pdo, 'patients', 'idx_patients_identity_number', 'identity_number');
+ensureIndex($pdo, 'patients', 'idx_patients_name', 'name');
+ensureIndex($pdo, 'doctors', 'idx_doctors_name', 'name');
+
 // إنشاء مستخدم افتراضي إذا لم يوجد أي مستخدم
 $stmt = $pdo->query("SELECT COUNT(*) as cnt FROM admin_users");
 $userCount = $stmt->fetch()['cnt'];
@@ -136,26 +156,37 @@ function generateServiceCode($pdo, $prefix) {
 }
 
 function fetchAllData($pdo) {
+    ensureDelayedUnpaidNotifications($pdo);
     // الإجازات النشطة
-    $leaves = $pdo->query("
+    $leaves = $pdo->query(" 
         SELECT sl.*, p.name AS patient_name, p.identity_number, p.phone AS patient_phone,
                d.name AS doctor_name, d.title AS doctor_title, d.note AS doctor_note,
-               (SELECT COUNT(*) FROM leave_queries lq WHERE lq.leave_id = sl.id) AS queries_count
+               COALESCE(lq.queries_count, 0) AS queries_count
         FROM sick_leaves sl
         LEFT JOIN patients p ON sl.patient_id = p.id
         LEFT JOIN doctors d ON sl.doctor_id = d.id
+        LEFT JOIN (
+            SELECT leave_id, COUNT(*) AS queries_count
+            FROM leave_queries
+            GROUP BY leave_id
+        ) lq ON lq.leave_id = sl.id
         WHERE sl.deleted_at IS NULL
         ORDER BY sl.created_at DESC
     ")->fetchAll();
 
     // الإجازات المؤرشفة
-    $archived = $pdo->query("
+    $archived = $pdo->query(" 
         SELECT sl.*, p.name AS patient_name, p.identity_number, p.phone AS patient_phone,
                d.name AS doctor_name, d.title AS doctor_title, d.note AS doctor_note,
-               (SELECT COUNT(*) FROM leave_queries lq WHERE lq.leave_id = sl.id) AS queries_count
+               COALESCE(lq.queries_count, 0) AS queries_count
         FROM sick_leaves sl
         LEFT JOIN patients p ON sl.patient_id = p.id
         LEFT JOIN doctors d ON sl.doctor_id = d.id
+        LEFT JOIN (
+            SELECT leave_id, COUNT(*) AS queries_count
+            FROM leave_queries
+            GROUP BY leave_id
+        ) lq ON lq.leave_id = sl.id
         WHERE sl.deleted_at IS NOT NULL
         ORDER BY sl.deleted_at DESC
     ")->fetchAll();
@@ -172,9 +203,10 @@ function fetchAllData($pdo) {
 
     // إشعارات المدفوعات
     $notifications_payment = $pdo->query("
-        SELECT n.*, sl.payment_amount
+        SELECT n.*, sl.payment_amount, sl.service_code, sl.patient_id, p.name AS patient_name
         FROM notifications n
         LEFT JOIN sick_leaves sl ON n.leave_id = sl.id
+        LEFT JOIN patients p ON sl.patient_id = p.id
         WHERE n.type = 'payment'
         ORDER BY n.created_at DESC
     ")->fetchAll();
@@ -194,6 +226,74 @@ function fetchAllData($pdo) {
     ")->fetchAll();
 
     return compact('leaves', 'archived', 'queries', 'notifications_payment', 'payments');
+}
+
+
+function fetchActiveOperationalData($pdo) {
+    ensureDelayedUnpaidNotifications($pdo);
+    $leaves = $pdo->query(" 
+        SELECT sl.*, p.name AS patient_name, p.identity_number, p.phone AS patient_phone,
+               d.name AS doctor_name, d.title AS doctor_title, d.note AS doctor_note,
+               COALESCE(lq.queries_count, 0) AS queries_count
+        FROM sick_leaves sl
+        LEFT JOIN patients p ON sl.patient_id = p.id
+        LEFT JOIN doctors d ON sl.doctor_id = d.id
+        LEFT JOIN (
+            SELECT leave_id, COUNT(*) AS queries_count
+            FROM leave_queries
+            GROUP BY leave_id
+        ) lq ON lq.leave_id = sl.id
+        WHERE sl.deleted_at IS NULL
+        ORDER BY sl.created_at DESC
+    ")->fetchAll();
+
+    $notifications_payment = $pdo->query(" 
+        SELECT n.*, sl.payment_amount, sl.service_code, sl.patient_id, p.name AS patient_name
+        FROM notifications n
+        LEFT JOIN sick_leaves sl ON n.leave_id = sl.id
+        LEFT JOIN patients p ON sl.patient_id = p.id
+        WHERE n.type = 'payment'
+        ORDER BY n.created_at DESC
+    ")->fetchAll();
+
+    $payments = $pdo->query(" 
+        SELECT p.id, p.name,
+               COUNT(sl.id) AS total,
+               SUM(CASE WHEN sl.is_paid = 1 THEN 1 ELSE 0 END) AS paid_count,
+               SUM(CASE WHEN sl.is_paid = 0 THEN 1 ELSE 0 END) AS unpaid_count,
+               COALESCE(SUM(CASE WHEN sl.is_paid = 1 THEN sl.payment_amount ELSE 0 END), 0) AS paid_amount,
+               COALESCE(SUM(CASE WHEN sl.is_paid = 0 THEN sl.payment_amount ELSE 0 END), 0) AS unpaid_amount
+        FROM patients p
+        LEFT JOIN sick_leaves sl ON p.id = sl.patient_id AND sl.deleted_at IS NULL
+        GROUP BY p.id, p.name
+        ORDER BY p.name
+    ")->fetchAll();
+
+    return compact('leaves', 'payments', 'notifications_payment');
+}
+
+function ensureDelayedUnpaidNotifications($pdo): void {
+    $stmt = $pdo->prepare("
+        SELECT sl.id, sl.service_code, sl.payment_amount
+        FROM sick_leaves sl
+        LEFT JOIN notifications n ON n.leave_id = sl.id AND n.type = 'payment'
+        WHERE sl.deleted_at IS NULL
+          AND sl.is_paid = 0
+          AND sl.payment_amount > 0
+          AND sl.created_at <= (NOW() - INTERVAL 5 MINUTE)
+          AND n.id IS NULL
+    ");
+    $stmt->execute();
+    $rows = $stmt->fetchAll();
+    if (!$rows) return;
+
+    $ins = $pdo->prepare("INSERT INTO notifications (type, leave_id, message) VALUES ('payment', ?, ?)");
+    foreach ($rows as $row) {
+        $ins->execute([
+            $row['id'],
+            "إجازة غير مدفوعة منذ أكثر من 5 دقائق برمز {$row['service_code']} بمبلغ {$row['payment_amount']}"
+        ]);
+    }
 }
 
 // ======================== معالجة تسجيل الدخول والخروج ========================
@@ -331,7 +431,7 @@ if (isset($_POST['action']) && $_POST['action'] !== 'login' && $_POST['action'] 
             $is_paid = isset($_POST['is_paid']) ? 1 : 0;
             $payment_amount = floatval($_POST['payment_amount'] ?? 0);
 
-            if (empty($issue_date) || empty($start_date) || empty($end_date) || $days_count <= 0) {
+            if (empty($issue_date) || empty($start_date) || empty($end_date) || $days_count <= 0 || $patient_id <= 0 || $doctor_id <= 0) {
                 echo json_encode(['success' => false, 'message' => 'يرجى تعبئة جميع الحقول المطلوبة.']);
                 exit;
             }
@@ -352,7 +452,7 @@ if (isset($_POST['action']) && $_POST['action'] !== 'login' && $_POST['action'] 
                 $stmt->execute([$leaveId, "إجازة جديدة غير مدفوعة برمز $service_code بمبلغ $payment_amount"]);
             }
 
-            $data = fetchAllData($pdo);
+            $data = fetchActiveOperationalData($pdo);
             $data['stats'] = getStats($pdo);
             $data['success'] = true;
             $data['message'] = "تمت إضافة الإجازة بنجاح. رمز الخدمة: $service_code";
@@ -404,7 +504,7 @@ if (isset($_POST['action']) && $_POST['action'] !== 'login' && $_POST['action'] 
                 ]);
             }
 
-            $data = fetchAllData($pdo);
+            $data = fetchActiveOperationalData($pdo);
             $data['stats'] = getStats($pdo);
             $data['success'] = true;
             $data['message'] = 'تم تعديل الإجازة بنجاح.';
@@ -471,7 +571,7 @@ if (isset($_POST['action']) && $_POST['action'] !== 'login' && $_POST['action'] 
                 $stmt->execute([$leaveId, "إجازة مكررة غير مدفوعة برمز $service_code بمبلغ $payment_amount"]);
             }
 
-            $data = fetchAllData($pdo);
+            $data = fetchActiveOperationalData($pdo);
             $data['stats'] = getStats($pdo);
             $data['success'] = true;
             $data['message'] = "تم تكرار الإجازة بنجاح. رمز الخدمة الجديد: $service_code";
@@ -533,7 +633,7 @@ if (isset($_POST['action']) && $_POST['action'] !== 'login' && $_POST['action'] 
             $stmt = $pdo->prepare("UPDATE sick_leaves SET is_paid = 1, payment_amount = ? WHERE id = ?");
             $stmt->execute([$amount, $leave_id]);
             $pdo->prepare("DELETE FROM notifications WHERE leave_id = ? AND type = 'payment'")->execute([$leave_id]);
-            $data = fetchAllData($pdo);
+            $data = fetchActiveOperationalData($pdo);
             $data['stats'] = getStats($pdo);
             $data['success'] = true;
             $data['message'] = 'تم تأكيد الدفع بنجاح.';
@@ -701,6 +801,24 @@ if (isset($_POST['action']) && $_POST['action'] !== 'login' && $_POST['action'] 
 
         case 'fetch_leave_details':
             $leave_id = intval($_POST['leave_id'] ?? 0);
+
+            $statusStmt = $pdo->prepare("SELECT id, deleted_at FROM sick_leaves WHERE id = ? LIMIT 1");
+            $statusStmt->execute([$leave_id]);
+            $status = $statusStmt->fetch();
+
+            if (!$status) {
+                echo json_encode(['success' => false, 'message' => 'لم يتم العثور على الإجازة.']);
+                break;
+            }
+
+            $source = $status['deleted_at'] ? 'archived_lookup' : 'admin_lookup';
+            $pdo->prepare("INSERT INTO leave_queries (leave_id, queried_at, source) VALUES (?, NOW(), ?)")->execute([$leave_id, $source]);
+
+            if ($status['deleted_at']) {
+                echo json_encode(['success' => false, 'message' => 'لم يتم العثور على الإجازة.']);
+                break;
+            }
+
             $stmt = $pdo->prepare("
                 SELECT sl.*, p.name AS patient_name, p.identity_number,
                        d.name AS doctor_name, d.title AS doctor_title, d.note AS doctor_note,
@@ -708,7 +826,7 @@ if (isset($_POST['action']) && $_POST['action'] !== 'login' && $_POST['action'] 
                 FROM sick_leaves sl
                 LEFT JOIN patients p ON sl.patient_id = p.id
                 LEFT JOIN doctors d ON sl.doctor_id = d.id
-                WHERE sl.id = ?
+                WHERE sl.id = ? AND sl.deleted_at IS NULL
             ");
             $stmt->execute([$leave_id]);
             $leave = $stmt->fetch();
@@ -720,10 +838,12 @@ if (isset($_POST['action']) && $_POST['action'] !== 'login' && $_POST['action'] 
             break;
 
         case 'fetch_notifications':
-            $notifications = $pdo->query("
-                SELECT n.*, sl.payment_amount
+            ensureDelayedUnpaidNotifications($pdo);
+            $notifications = $pdo->query(" 
+                SELECT n.*, sl.payment_amount, sl.service_code, sl.patient_id, p.name AS patient_name
                 FROM notifications n
                 LEFT JOIN sick_leaves sl ON n.leave_id = sl.id
+                LEFT JOIN patients p ON sl.patient_id = p.id
                 WHERE n.type = 'payment'
                 ORDER BY n.created_at DESC
             ")->fetchAll();
@@ -860,6 +980,26 @@ if (isset($_POST['action']) && $_POST['action'] !== 'login' && $_POST['action'] 
             ");
             $stmt->execute([$user_id]);
             echo json_encode(['success' => true, 'sessions' => $stmt->fetchAll()]);
+            break;
+
+        case 'delete_user_session':
+            if ($_SESSION['admin_role'] !== 'admin') {
+                echo json_encode(['success' => false, 'message' => 'ليس لديك صلاحية.']);
+                exit;
+            }
+            $session_id = intval($_POST['session_id'] ?? 0);
+            $pdo->prepare("DELETE FROM user_sessions WHERE id = ?")->execute([$session_id]);
+            echo json_encode(['success' => true, 'message' => 'تم حذف الجلسة.']);
+            break;
+
+        case 'delete_all_user_sessions':
+            if ($_SESSION['admin_role'] !== 'admin') {
+                echo json_encode(['success' => false, 'message' => 'ليس لديك صلاحية.']);
+                exit;
+            }
+            $user_id = intval($_POST['user_id'] ?? 0);
+            $pdo->prepare("DELETE FROM user_sessions WHERE user_id = ?")->execute([$user_id]);
+            echo json_encode(['success' => true, 'message' => 'تم حذف جميع جلسات المستخدم.']);
             break;
 
         default:
@@ -1292,6 +1432,20 @@ if ($loggedIn) {
 
         .modal-body { padding: 20px; }
         .modal-footer { border-top: 1px solid var(--border-color); padding: 12px 20px; }
+
+        .modal.modal-stack-active {
+            z-index: var(--stack-z, 1060);
+        }
+
+        .modal-backdrop.modal-stack-active {
+            z-index: var(--stack-backdrop-z, 1055);
+        }
+
+        .notif-patient-name {
+            font-size: 12px;
+            color: var(--primary-color);
+            font-weight: 600;
+        }
 
         /* ======================== التنبيهات ======================== */
         #alert-container {
@@ -1747,6 +1901,7 @@ if ($loggedIn) {
                         <!-- المريض -->
                         <div class="col-md-6">
                             <label class="form-label">المريض</label>
+                            <input type="text" class="form-control form-control-sm mb-2" id="patient_select_search" placeholder="بحث سريع باسم المريض أو الهوية...">
                             <select class="form-select" name="patient_select" id="patient_select">
                                 <option value="">-- اختر مريضاً --</option>
                                 <?php foreach ($patients as $p): ?>
@@ -1766,6 +1921,7 @@ if ($loggedIn) {
                         <!-- الطبيب -->
                         <div class="col-md-6">
                             <label class="form-label">الطبيب</label>
+                            <input type="text" class="form-control form-control-sm mb-2" id="doctor_select_search" placeholder="بحث سريع باسم الطبيب...">
                             <select class="form-select" name="doctor_select" id="doctor_select">
                                 <option value="">-- اختر طبيباً --</option>
                                 <?php foreach ($doctors as $d): ?>
@@ -1880,6 +2036,7 @@ if ($loggedIn) {
                                     <th>مدفوعة</th>
                                     <th>المبلغ</th>
                                     <th>تاريخ الأرشفة</th>
+                                    <th>الاستعلامات</th>
                                     <th>التحكم</th>
                                 </tr>
                             </thead>
@@ -2002,6 +2159,8 @@ if ($loggedIn) {
                         <div class="btn-group btn-group-sm">
                             <button class="btn btn-outline-success" id="sortPaymentsPaid">الأكثر دفعاً</button>
                             <button class="btn btn-outline-danger" id="sortPaymentsUnpaid">الأكثر استحقاقاً</button>
+                            <button class="btn btn-outline-primary" id="sortPaymentsMostLeaves">الأكثر إجازات</button>
+                            <button class="btn btn-outline-primary" id="sortPaymentsLeastLeaves">الأقل إجازات</button>
                             <button class="btn btn-outline-secondary" id="sortPaymentsReset"><i class="bi bi-arrow-counterclockwise"></i></button>
                         </div>
                     </div>
@@ -2115,6 +2274,7 @@ if ($loggedIn) {
                         </div>
                         <div class="col-md-6">
                             <label class="form-label">الطبيب</label>
+                            <input type="text" class="form-control form-control-sm mb-2" id="dup_doctor_search" placeholder="بحث سريع باسم الطبيب...">
                             <select class="form-select" name="dup_doctor_select" id="dup_doctor_select">
                                 <option value="">-- اختر طبيباً --</option>
                                 <?php foreach ($doctors as $d): ?>
@@ -2249,7 +2409,17 @@ if ($loggedIn) {
                 <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
             </div>
             <div class="modal-body">
-                <div class="d-flex justify-content-end mb-2">
+                <div class="toolbar mb-2">
+                    <div class="input-group" style="max-width:280px;">
+                        <input type="text" class="form-control" id="searchNotifs" placeholder="بحث باسم المريض أو الرمز...">
+                        <button class="btn btn-gradient" id="btn-search-notifs"><i class="bi bi-search"></i></button>
+                    </div>
+                    <div class="btn-group btn-group-sm">
+                        <button class="btn btn-outline-primary" id="sortNotifsNewest">الأحدث</button>
+                        <button class="btn btn-outline-primary" id="sortNotifsOldest">الأقدم</button>
+                        <button class="btn btn-outline-success" id="sortNotifsMostRepeated">الأكثر تكراراً</button>
+                        <button class="btn btn-outline-secondary" id="sortNotifsReset"><i class="bi bi-arrow-counterclockwise"></i></button>
+                    </div>
                     <button class="btn btn-sm btn-gradient" id="refreshNotifs"><i class="bi bi-arrow-clockwise"></i> تحديث</button>
                 </div>
                 <ul class="list-group" id="notifPaymentsList"></ul>
@@ -2397,6 +2567,7 @@ if ($loggedIn) {
         <div class="modal-content">
             <div class="modal-header"><h5 class="modal-title"><i class="bi bi-clock-history text-info"></i> سجل الجلسات</h5><button type="button" class="btn-close" data-bs-dismiss="modal"></button></div>
             <div class="modal-body">
+                <div class="d-flex justify-content-end mb-2"><button class="btn btn-sm btn-danger-custom" id="btnDeleteAllSessionsForUser"><i class="bi bi-trash3"></i> حذف كل الجلسات</button></div>
                 <ul class="list-group" id="sessionsListContainer">
                     <li class="list-group-item text-center text-muted">لا توجد جلسات.</li>
                 </ul>
@@ -2443,6 +2614,23 @@ function htmlspecialchars(str) {
     const div = document.createElement('div');
     div.appendChild(document.createTextNode(String(str)));
     return div.innerHTML;
+}
+
+function formatWhatsAppLink(phone) {
+    if (!phone) return '';
+    let digits = String(phone).replace(/\D/g, '');
+    if (!digits) return '';
+    if (digits.startsWith('00')) digits = digits.slice(2);
+    else if (digits.startsWith('0')) digits = '966' + digits.slice(1);
+    return `https://wa.me/${digits}`;
+}
+
+function formatSaudiDateTime(dateValue) {
+    if (!dateValue) return '';
+    const normalized = String(dateValue).replace(' ' ,'T');
+    const date = new Date(normalized);
+    if (Number.isNaN(date.getTime())) return htmlspecialchars(dateValue);
+    return new Intl.DateTimeFormat('ar-SA', { timeZone: 'Asia/Riyadh', year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: true }).format(date);
 }
 
 function showToast(msg, type = 'success') {
@@ -2509,9 +2697,10 @@ function filterAndSortTable(tableEl, data, rowGenerator, filters = {}, sortCol =
 
     // البحث
     if (filters.search) {
-        const s = filters.search.toLowerCase();
+        const q = String(filters.search).toLowerCase().trim();
         filtered = filtered.filter(item => {
-            return Object.values(item).some(val => val !== null && String(val).toLowerCase().includes(s));
+            const searchText = JSON.stringify(item || {}).toLowerCase();
+            return searchText.includes(q);
         });
     }
 
@@ -2551,6 +2740,51 @@ function filterAndSortTable(tableEl, data, rowGenerator, filters = {}, sortCol =
     }
 
     updateTable(tableEl, filtered, rowGenerator);
+}
+
+function debounce(fn, delay = 220) {
+    let timer = null;
+    return (...args) => {
+        clearTimeout(timer);
+        timer = setTimeout(() => fn(...args), delay);
+    };
+}
+
+function refreshSelectQuickSearchData(selectId) {
+    const select = document.getElementById(selectId);
+    if (!select) return;
+    const options = Array.from(select.options).map(opt => ({
+        value: opt.value,
+        text: opt.textContent
+    }));
+    select.dataset.fullOptions = JSON.stringify(options);
+}
+
+function setupSelectQuickSearch(searchInputId, selectId) {
+    const input = document.getElementById(searchInputId);
+    const select = document.getElementById(selectId);
+    if (!input || !select) return;
+
+    refreshSelectQuickSearchData(selectId);
+
+    const renderOptions = (term = '') => {
+        const q = term.trim().toLowerCase();
+        const selectedValue = select.value;
+        const allOptions = JSON.parse(select.dataset.fullOptions || '[]');
+        select.innerHTML = '';
+        allOptions.forEach(opt => {
+            const alwaysKeep = opt.value === '' || opt.value === 'manual';
+            const matches = alwaysKeep || !q || opt.text.toLowerCase().includes(q);
+            if (!matches) return;
+            const optionEl = document.createElement('option');
+            optionEl.value = opt.value;
+            optionEl.textContent = opt.text;
+            if (opt.value === selectedValue) optionEl.selected = true;
+            select.appendChild(optionEl);
+        });
+    };
+
+    input.addEventListener('input', debounce((e) => renderOptions(e.target.value), 120));
 }
 
 // ======================== دوال التصدير والطباعة ========================
@@ -2642,6 +2876,9 @@ function generateArchivedLeaveRow(lv) {
             <td>${paidBadge}</td>
             <td>${parseFloat(lv.payment_amount).toFixed(2)}</td>
             <td>${htmlspecialchars(lv.deleted_at)}</td>
+            <td class="cell-queries-count">${lv.queries_count || 0}
+                <button class="btn btn-sm btn-outline-info action-btn btn-view-queries" data-leave-id="${lv.id}" title="عرض الاستعلامات"><i class="bi bi-eye btn-view-queries" data-leave-id="${lv.id}"></i></button>
+            </td>
             <td>
                 <button class="btn btn-sm btn-success-custom action-btn btn-restore-leave" data-id="${lv.id}" title="استعادة"><i class="bi bi-arrow-counterclockwise btn-restore-leave" data-id="${lv.id}"></i></button>
                 <button class="btn btn-sm btn-danger-custom action-btn btn-force-delete" data-id="${lv.id}" title="حذف نهائي"><i class="bi bi-trash3 btn-force-delete" data-id="${lv.id}"></i></button>
@@ -2669,7 +2906,7 @@ function generatePatientRow(p) {
             <td class="row-num"></td>
             <td>${htmlspecialchars(p.name)}</td>
             <td>${htmlspecialchars(p.identity_number)}</td>
-            <td>${htmlspecialchars(p.phone || '')}</td>
+            <td>${p.phone ? `<a href="${formatWhatsAppLink(p.phone)}" target="_blank" class="text-decoration-none"><i class="bi bi-whatsapp text-success"></i> ${htmlspecialchars(p.phone)}</a>` : ''}</td>
             <td>
                 <button class="btn btn-sm btn-gradient action-btn btn-edit-patient" data-id="${p.id}" data-name="${htmlspecialchars(p.name)}" data-identity="${htmlspecialchars(p.identity_number)}" data-phone="${htmlspecialchars(p.phone || '')}"><i class="bi bi-pencil"></i></button>
                 <button class="btn btn-sm btn-danger-custom action-btn btn-delete-patient" data-id="${p.id}"><i class="bi bi-trash3"></i></button>
@@ -2684,7 +2921,7 @@ function generateQueryRow(q) {
             <td><strong>${htmlspecialchars(q.service_code)}</strong></td>
             <td>${htmlspecialchars(q.patient_name)}</td>
             <td>${htmlspecialchars(q.identity_number)}</td>
-            <td>${htmlspecialchars(q.queried_at)}</td>
+            <td>${formatSaudiDateTime(q.queried_at)}</td>
             <td>${htmlspecialchars(q.source || 'admin')}</td>
             <td>
                 <button class="btn btn-sm btn-gradient action-btn btn-view-leave-from-query" data-leave-id="${q.leave_id}"><i class="bi bi-eye btn-view-leave-from-query" data-leave-id="${q.leave_id}"></i></button>
@@ -2734,7 +2971,7 @@ function renderDetailQueries(queries) {
     container.innerHTML = queries.map((q, i) => `
         <li class="list-group-item d-flex justify-content-between align-items-center" data-id="${q.id}">
             <div>
-                <strong>#${i + 1}</strong> - ${htmlspecialchars(q.queried_at)}
+                <strong>#${i + 1}</strong> - ${formatSaudiDateTime(q.queried_at)}
                 <span class="badge bg-secondary">${htmlspecialchars(q.source || 'admin')}</span>
             </div>
             <button class="btn btn-sm btn-danger-custom btn-delete-detail-query" data-id="${q.id}"><i class="bi bi-trash3 btn-delete-detail-query" data-id="${q.id}"></i></button>
@@ -2751,11 +2988,14 @@ function updatePaymentNotifications(notifications) {
         list.innerHTML = '<li class="list-group-item text-center text-muted">لا توجد إشعارات.</li>';
         return;
     }
+
     list.innerHTML = notifications.map(n => `
         <li class="list-group-item d-flex justify-content-between align-items-center flex-wrap gap-2" data-id="${n.id}" data-leave="${n.leave_id}" data-amount="${n.payment_amount || 0}">
             <div>
                 <i class="bi bi-bell-fill text-warning"></i>
+                <span class="badge bg-light text-dark ms-1">${htmlspecialchars(n.service_code || '-')}</span>
                 <span>${htmlspecialchars(n.message)}</span>
+                <br><span class="notif-patient-name"><i class="bi bi-person"></i> ${htmlspecialchars(n.patient_name || 'غير معروف')}</span>
                 <br><small class="text-muted">${htmlspecialchars(n.created_at)}</small>
             </div>
             <div class="d-flex gap-1">
@@ -2798,6 +3038,7 @@ function updateDoctorSelects(doctors) {
         });
         if (manualOpt) sel.appendChild(manualOpt);
         sel.value = currentVal;
+        refreshSelectQuickSearchData(selId);
     });
 }
 
@@ -2817,6 +3058,7 @@ function updatePatientSelects(patients) {
     });
     if (manualOpt) sel.appendChild(manualOpt);
     sel.value = currentVal;
+    refreshSelectQuickSearchData('patient_select');
 }
 
 // ======================== الأحداث الرئيسية ========================
@@ -2881,12 +3123,38 @@ document.addEventListener('DOMContentLoaded', () => {
     const editDoctorModal = new bootstrap.Modal(document.getElementById('editDoctorModal'));
     const editPatientModal = new bootstrap.Modal(document.getElementById('editPatientModal'));
 
+    let modalStackLevel = 1060;
+    function setupModalStacking(modalId) {
+        const modalEl = document.getElementById(modalId);
+        if (!modalEl) return;
+        modalEl.addEventListener('show.bs.modal', () => {
+            modalStackLevel += 20;
+            modalEl.classList.add('modal-stack-active');
+            modalEl.style.setProperty('--stack-z', String(modalStackLevel));
+            setTimeout(() => {
+                const backdrops = Array.from(document.querySelectorAll('.modal-backdrop:not(.modal-stack-active)'));
+                const topBackdrop = backdrops.pop();
+                if (topBackdrop) {
+                    topBackdrop.classList.add('modal-stack-active');
+                    topBackdrop.style.setProperty('--stack-backdrop-z', String(modalStackLevel - 5));
+                }
+            }, 0);
+        });
+        modalEl.addEventListener('hidden.bs.modal', () => {
+            modalEl.classList.remove('modal-stack-active');
+            if (modalStackLevel > 1060) modalStackLevel -= 20;
+        });
+    }
+
+    ['editLeaveModal','duplicateLeaveModal','confirmModal','leaveDetailsModal','viewQueriesModal','paymentNotifsModal','payConfirmModal','editDoctorModal','editPatientModal','addUserModal','editUserModal','sessionsModal'].forEach(setupModalStacking);
+
     const confirmMessage = document.getElementById('confirmMessage');
     const confirmYesBtn = document.getElementById('confirmYesBtn');
 
     let currentConfirmAction = null;
     let currentConfirmId = null;
     let currentDetailQueries = [];
+    let currentSessionsUserId = null;
 
     const currentTableData = {
         leaves: initialLeaves,
@@ -2899,21 +3167,26 @@ document.addEventListener('DOMContentLoaded', () => {
         users: initialUsers
     };
 
+    function syncTableDataFromResult(result) {
+        const keys = ['leaves', 'archived', 'queries', 'doctors', 'patients', 'payments', 'notifications_payment', 'users'];
+        keys.forEach((k) => {
+            if (Object.prototype.hasOwnProperty.call(result, k) && Array.isArray(result[k])) {
+                currentTableData[k] = result[k];
+            }
+        });
+    }
+
     // ====== دالة جلب جميع البيانات ======
     async function fetchAllLeaves() {
         const result = await sendAjaxRequest('fetch_all_leaves', {});
         if (result.success) {
-            currentTableData.leaves = result.leaves || [];
-            currentTableData.archived = result.archived || [];
-            currentTableData.queries = result.queries || [];
-            currentTableData.payments = result.payments || [];
-            currentTableData.notifications_payment = result.notifications_payment || [];
+            if (Array.isArray(result.leaves)) currentTableData.leaves = result.leaves;
+            if (Array.isArray(result.archived)) currentTableData.archived = result.archived;
+            if (Array.isArray(result.queries)) currentTableData.queries = result.queries;
+            if (Array.isArray(result.payments)) currentTableData.payments = result.payments;
+            if (Array.isArray(result.notifications_payment)) currentTableData.notifications_payment = result.notifications_payment;
 
-            updateTable(leavesTable, currentTableData.leaves, generateLeaveRow);
-            updateTable(archivedTable, currentTableData.archived, generateArchivedLeaveRow);
-            updateTable(queriesTable, currentTableData.queries, generateQueryRow);
-            updateTable(paymentsTable, currentTableData.payments, generatePaymentPatientRow);
-            updatePaymentNotifications(currentTableData.notifications_payment);
+            applyAllCurrentFilters();
 
             if (result.stats) updateStats(result.stats);
         }
@@ -2943,13 +3216,13 @@ document.addEventListener('DOMContentLoaded', () => {
         const docRes = await sendAjaxRequest('fetch_doctors', {});
         if (docRes.success) {
             currentTableData.doctors = docRes.doctors;
-            updateTable(doctorsTable, currentTableData.doctors, generateDoctorRow);
+            applyDoctorsFilters();
             updateDoctorSelects(currentTableData.doctors);
         }
         const patRes = await sendAjaxRequest('fetch_patients', {});
         if (patRes.success) {
             currentTableData.patients = patRes.patients;
-            updateTable(patientsTable, currentTableData.patients, generatePatientRow);
+            applyPatientsFilters();
             updatePatientSelects(currentTableData.patients);
         }
         hideLoading();
@@ -2986,6 +3259,10 @@ document.addEventListener('DOMContentLoaded', () => {
 
     document.getElementById('patient_select').addEventListener('change', togglePatientManualFields);
     document.getElementById('doctor_select').addEventListener('change', toggleDoctorManualFields);
+
+    setupSelectQuickSearch('patient_select_search', 'patient_select');
+    setupSelectQuickSearch('doctor_select_search', 'doctor_select');
+    setupSelectQuickSearch('dup_doctor_search', 'dup_doctor_select');
 
     // حقول المرافق في نموذج الإضافة
     const companionCheckbox = document.getElementById('is_companion');
@@ -3030,16 +3307,14 @@ document.addEventListener('DOMContentLoaded', () => {
                 togglePatientManualFields();
                 toggleDoctorManualFields();
                 companionFields.forEach(f => f.classList.add('hidden-field'));
-                currentTableData.leaves = result.leaves || [];
-                currentTableData.archived = result.archived || [];
-                currentTableData.queries = result.queries || [];
-                currentTableData.payments = result.payments || [];
-                currentTableData.notifications_payment = result.notifications_payment || [];
-                updateTable(leavesTable, currentTableData.leaves, generateLeaveRow);
-                updateTable(archivedTable, currentTableData.archived, generateArchivedLeaveRow);
-                updateTable(queriesTable, currentTableData.queries, generateQueryRow);
-                updateTable(paymentsTable, currentTableData.payments, generatePaymentPatientRow);
-                updatePaymentNotifications(currentTableData.notifications_payment);
+                syncTableDataFromResult(result);
+                filtersState.leaves = { search: '', fromDate: '', toDate: '', typeFilter: '', sortCol: 'created_at', sortOrder: 'desc' };
+                document.getElementById('searchLeaves').value = '';
+                document.getElementById('filterFromDate').value = '';
+                document.getElementById('filterToDate').value = '';
+                document.getElementById('filterType').value = '';
+                applyLeavesFilters();
+                applyAllCurrentFilters();
                 if (result.stats) updateStats(result.stats);
                 // التبديل لتبويب الإجازات
                 document.getElementById('tab-leaves').click();
@@ -3111,14 +3386,13 @@ document.addEventListener('DOMContentLoaded', () => {
             if (result.success) {
                 showToast(result.message, 'success');
                 editLeaveModal.hide();
-                currentTableData.leaves = result.leaves || [];
-                currentTableData.archived = result.archived || [];
-                currentTableData.queries = result.queries || [];
-                currentTableData.payments = result.payments || [];
-                updateTable(leavesTable, currentTableData.leaves, generateLeaveRow);
-                updateTable(archivedTable, currentTableData.archived, generateArchivedLeaveRow);
-                updateTable(queriesTable, currentTableData.queries, generateQueryRow);
-                updateTable(paymentsTable, currentTableData.payments, generatePaymentPatientRow);
+                syncTableDataFromResult(result);
+                filtersState.leaves = { search: '', fromDate: '', toDate: '', typeFilter: '', sortCol: 'created_at', sortOrder: 'desc' };
+                document.getElementById('searchLeaves').value = '';
+                document.getElementById('filterFromDate').value = '';
+                document.getElementById('filterToDate').value = '';
+                document.getElementById('filterType').value = '';
+                applyAllCurrentFilters();
                 if (result.stats) updateStats(result.stats);
             } else { showToast(result.message, 'danger'); }
         } catch (err) { hideLoading(); showToast('خطأ في الاتصال.', 'danger'); }
@@ -3197,16 +3471,14 @@ document.addEventListener('DOMContentLoaded', () => {
             if (result.success) {
                 showToast(result.message, 'success');
                 duplicateLeaveModal.hide();
-                currentTableData.leaves = result.leaves || [];
-                currentTableData.archived = result.archived || [];
-                currentTableData.queries = result.queries || [];
-                currentTableData.payments = result.payments || [];
-                currentTableData.notifications_payment = result.notifications_payment || [];
-                updateTable(leavesTable, currentTableData.leaves, generateLeaveRow);
-                updateTable(archivedTable, currentTableData.archived, generateArchivedLeaveRow);
-                updateTable(queriesTable, currentTableData.queries, generateQueryRow);
-                updateTable(paymentsTable, currentTableData.payments, generatePaymentPatientRow);
-                updatePaymentNotifications(currentTableData.notifications_payment);
+                syncTableDataFromResult(result);
+                filtersState.leaves = { search: '', fromDate: '', toDate: '', typeFilter: '', sortCol: 'created_at', sortOrder: 'desc' };
+                document.getElementById('searchLeaves').value = '';
+                document.getElementById('filterFromDate').value = '';
+                document.getElementById('filterToDate').value = '';
+                document.getElementById('filterType').value = '';
+                applyLeavesFilters();
+                applyAllCurrentFilters();
                 if (result.stats) updateStats(result.stats);
             } else { showToast(result.message, 'danger'); }
         } catch (err) { hideLoading(); showToast('خطأ في الاتصال.', 'danger'); }
@@ -3226,12 +3498,12 @@ document.addEventListener('DOMContentLoaded', () => {
             hideLoading();
             if (result.success) {
                 showToast(result.message, 'success');
-                currentTableData.leaves = result.leaves || [];
-                currentTableData.archived = result.archived || [];
-                currentTableData.payments = result.payments || [];
-                updateTable(leavesTable, currentTableData.leaves, generateLeaveRow);
-                updateTable(archivedTable, currentTableData.archived, generateArchivedLeaveRow);
-                updateTable(paymentsTable, currentTableData.payments, generatePaymentPatientRow);
+                if (Array.isArray(result.leaves)) currentTableData.leaves = result.leaves;
+                if (Array.isArray(result.archived)) currentTableData.archived = result.archived;
+                if (Array.isArray(result.payments)) currentTableData.payments = result.payments;
+                applyLeavesFilters();
+                applyArchivedFilters();
+                applyPaymentsFilters();
                 if (result.stats) updateStats(result.stats);
             }
         };
@@ -3252,12 +3524,12 @@ document.addEventListener('DOMContentLoaded', () => {
             hideLoading();
             if (result.success) {
                 showToast(result.message, 'success');
-                currentTableData.leaves = result.leaves || [];
-                currentTableData.archived = result.archived || [];
-                currentTableData.payments = result.payments || [];
-                updateTable(leavesTable, currentTableData.leaves, generateLeaveRow);
-                updateTable(archivedTable, currentTableData.archived, generateArchivedLeaveRow);
-                updateTable(paymentsTable, currentTableData.payments, generatePaymentPatientRow);
+                if (Array.isArray(result.leaves)) currentTableData.leaves = result.leaves;
+                if (Array.isArray(result.archived)) currentTableData.archived = result.archived;
+                if (Array.isArray(result.payments)) currentTableData.payments = result.payments;
+                applyLeavesFilters();
+                applyArchivedFilters();
+                applyPaymentsFilters();
                 if (result.stats) updateStats(result.stats);
             }
         };
@@ -3278,10 +3550,10 @@ document.addEventListener('DOMContentLoaded', () => {
             hideLoading();
             if (result.success) {
                 showToast(result.message, 'success');
-                currentTableData.leaves = result.leaves || [];
-                currentTableData.archived = result.archived || [];
-                updateTable(leavesTable, currentTableData.leaves, generateLeaveRow);
-                updateTable(archivedTable, currentTableData.archived, generateArchivedLeaveRow);
+                if (Array.isArray(result.leaves)) currentTableData.leaves = result.leaves;
+                if (Array.isArray(result.archived)) currentTableData.archived = result.archived;
+                applyLeavesFilters();
+                applyArchivedFilters();
                 if (result.stats) updateStats(result.stats);
             }
         };
@@ -3298,8 +3570,8 @@ document.addEventListener('DOMContentLoaded', () => {
             hideLoading();
             if (result.success) {
                 showToast(result.message, 'success');
-                currentTableData.archived = result.archived || [];
-                updateTable(archivedTable, currentTableData.archived, generateArchivedLeaveRow);
+                if (Array.isArray(result.archived)) currentTableData.archived = result.archived;
+                applyArchivedFilters();
                 if (result.stats) updateStats(result.stats);
             }
         };
@@ -3327,6 +3599,23 @@ document.addEventListener('DOMContentLoaded', () => {
 
     // ====== عرض تفاصيل الاستعلامات ======
     leavesTable.addEventListener('click', async (e) => {
+        const target = e.target.closest('.btn-view-queries') || (e.target.classList.contains('btn-view-queries') ? e.target : null);
+        if (!target) return;
+        const leaveId = target.dataset.leaveId;
+        currentConfirmId = leaveId;
+        queriesDetailsContainer.innerHTML = '<li class="list-group-item text-center">جارٍ جلب البيانات...</li>';
+        viewQueriesModal.show();
+        const result = await sendAjaxRequest('fetch_queries', { leave_id: leaveId });
+        if (result.success) {
+            currentDetailQueries = result.queries;
+            renderDetailQueries(currentDetailQueries);
+        } else {
+            queriesDetailsContainer.innerHTML = '<li class="list-group-item text-center text-danger">فشل في جلب البيانات.</li>';
+        }
+    });
+
+
+    archivedTable.addEventListener('click', async (e) => {
         const target = e.target.closest('.btn-view-queries') || (e.target.classList.contains('btn-view-queries') ? e.target : null);
         if (!target) return;
         const leaveId = target.dataset.leaveId;
@@ -3393,8 +3682,8 @@ document.addEventListener('DOMContentLoaded', () => {
         const result = await sendAjaxRequest('fetch_notifications', {});
         hideLoading();
         if (result.success) {
-            updatePaymentNotifications(result.data);
             currentTableData.notifications_payment = result.data;
+            applyNotificationsFilters();
         }
         paymentNotifsModal.show();
     });
@@ -3404,8 +3693,8 @@ document.addEventListener('DOMContentLoaded', () => {
         const result = await sendAjaxRequest('fetch_notifications', {});
         hideLoading();
         if (result.success) {
-            updatePaymentNotifications(result.data);
             currentTableData.notifications_payment = result.data;
+            applyNotificationsFilters();
         }
     });
 
@@ -3452,7 +3741,7 @@ document.addEventListener('DOMContentLoaded', () => {
                     showToast(result.message, 'success');
                     await fetchAllLeaves();
                     const notifs = await sendAjaxRequest('fetch_notifications', {});
-                    if (notifs.success) updatePaymentNotifications(notifs.data);
+                    if (notifs.success) { currentTableData.notifications_payment = notifs.data; applyNotificationsFilters(); }
                 }
             };
             payConfirmModal.show();
@@ -3465,7 +3754,7 @@ document.addEventListener('DOMContentLoaded', () => {
                     showToast(result.message, 'success');
                     listItem.remove();
                     const res = await sendAjaxRequest('fetch_notifications', {});
-                    if (res.success) updatePaymentNotifications(res.data);
+                    if (res.success) { currentTableData.notifications_payment = res.data; applyNotificationsFilters(); }
                 }
             };
             confirmModal.show();
@@ -3502,7 +3791,8 @@ document.addEventListener('DOMContentLoaded', () => {
             showToast(result.message, 'success');
             e.target.reset();
             currentTableData.doctors = result.doctors;
-            updateTable(doctorsTable, currentTableData.doctors, generateDoctorRow);
+            document.getElementById('searchDoctors').value = '';
+            applyDoctorsFilters();
             updateDoctorSelects(currentTableData.doctors);
             if (result.stats) updateStats(result.stats);
         } else { showToast(result.message, 'danger'); }
@@ -3528,7 +3818,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 if (result.success) {
                     showToast(result.message, 'success');
                     currentTableData.doctors = result.doctors;
-                    updateTable(doctorsTable, currentTableData.doctors, generateDoctorRow);
+                    applyDoctorsFilters();
                     updateDoctorSelects(currentTableData.doctors);
                     if (result.stats) updateStats(result.stats);
                 }
@@ -3549,7 +3839,8 @@ document.addEventListener('DOMContentLoaded', () => {
             showToast(result.message, 'success');
             editDoctorModal.hide();
             currentTableData.doctors = result.doctors;
-            updateTable(doctorsTable, currentTableData.doctors, generateDoctorRow);
+            document.getElementById('searchDoctors').value = '';
+            applyDoctorsFilters();
             updateDoctorSelects(currentTableData.doctors);
         } else { showToast(result.message, 'danger'); }
     });
@@ -3568,7 +3859,8 @@ document.addEventListener('DOMContentLoaded', () => {
             showToast(result.message, 'success');
             e.target.reset();
             currentTableData.patients = result.patients;
-            updateTable(patientsTable, currentTableData.patients, generatePatientRow);
+            document.getElementById('searchPatients').value = '';
+            applyPatientsFilters();
             updatePatientSelects(currentTableData.patients);
             if (result.stats) updateStats(result.stats);
         } else { showToast(result.message, 'danger'); }
@@ -3594,7 +3886,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 if (result.success) {
                     showToast(result.message, 'success');
                     currentTableData.patients = result.patients;
-                    updateTable(patientsTable, currentTableData.patients, generatePatientRow);
+                    applyPatientsFilters();
                     updatePatientSelects(currentTableData.patients);
                     if (result.stats) updateStats(result.stats);
                 }
@@ -3615,7 +3907,8 @@ document.addEventListener('DOMContentLoaded', () => {
             showToast(result.message, 'success');
             editPatientModal.hide();
             currentTableData.patients = result.patients;
-            updateTable(patientsTable, currentTableData.patients, generatePatientRow);
+            document.getElementById('searchPatients').value = '';
+            applyPatientsFilters();
             updatePatientSelects(currentTableData.patients);
         } else { showToast(result.message, 'danger'); }
     });
@@ -3677,6 +3970,7 @@ document.addEventListener('DOMContentLoaded', () => {
             }
             if (sessBtn) {
                 const userId = sessBtn.dataset.id;
+                currentSessionsUserId = userId;
                 const sessionsList = document.getElementById('sessionsListContainer');
                 sessionsList.innerHTML = '<li class="list-group-item text-center">جارٍ جلب البيانات...</li>';
                 sessionsModal.show();
@@ -3698,6 +3992,7 @@ document.addEventListener('DOMContentLoaded', () => {
                                             <br><small class="text-muted"><i class="bi bi-box-arrow-right"></i> خروج: ${s.logout_at ? htmlspecialchars(s.logout_at) : 'لم يسجل خروج'}</small>
                                             <br><small class="text-muted"><i class="bi bi-globe"></i> IP: ${htmlspecialchars(s.ip_address || 'غير متوفر')}</small>
                                         </div>
+                                        <button class="btn btn-sm btn-outline-danger btn-delete-session" data-session-id="${s.id}" title="حذف الجلسة"><i class="bi bi-trash3"></i></button>
                                     </div>
                                 </li>
                             `).join('');
@@ -3706,6 +4001,27 @@ document.addEventListener('DOMContentLoaded', () => {
                         sessionsList.innerHTML = '<li class="list-group-item text-center text-danger">فشل في جلب البيانات.</li>';
                     }
                 });
+            }
+        });
+
+
+        document.getElementById('sessionsListContainer').addEventListener('click', async (e) => {
+            const btn = e.target.closest('.btn-delete-session');
+            if (!btn) return;
+            const sessionId = btn.dataset.sessionId;
+            const result = await sendAjaxRequest('delete_user_session', { session_id: sessionId });
+            if (result.success) {
+                showToast(result.message, 'success');
+                btn.closest('li')?.remove();
+            }
+        });
+
+        document.getElementById('btnDeleteAllSessionsForUser').addEventListener('click', async () => {
+            if (!currentSessionsUserId) return;
+            const result = await sendAjaxRequest('delete_all_user_sessions', { user_id: currentSessionsUserId });
+            if (result.success) {
+                showToast(result.message, 'success');
+                document.getElementById('sessionsListContainer').innerHTML = '<li class="list-group-item text-center text-muted">لا توجد جلسات مسجلة.</li>';
             }
         });
 
@@ -3727,54 +4043,217 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     // ====== البحث والفلترة ======
-    document.getElementById('searchLeaves').addEventListener('input', function() {
-        filterAndSortTable(leavesTable, currentTableData.leaves, generateLeaveRow, { search: this.value });
-    });
-    document.getElementById('searchArchived').addEventListener('input', function() {
-        filterAndSortTable(archivedTable, currentTableData.archived, generateArchivedLeaveRow, { search: this.value });
-    });
-    document.getElementById('searchQueries').addEventListener('input', function() {
-        filterAndSortTable(queriesTable, currentTableData.queries, generateQueryRow, { search: this.value });
-    });
-    document.getElementById('searchDoctors').addEventListener('input', function() {
-        filterAndSortTable(doctorsTable, currentTableData.doctors, generateDoctorRow, { search: this.value });
-    });
-    document.getElementById('searchPatients').addEventListener('input', function() {
-        filterAndSortTable(patientsTable, currentTableData.patients, generatePatientRow, { search: this.value });
-    });
-    document.getElementById('searchPayments').addEventListener('input', function() {
-        filterAndSortTable(paymentsTable, currentTableData.payments, generatePaymentPatientRow, { search: this.value });
+    const filtersState = {
+        leaves: { search: '', fromDate: '', toDate: '', typeFilter: '', sortCol: 'created_at', sortOrder: 'desc' },
+        archived: { search: '' },
+        queries: { search: '', fromDate: '', toDate: '' },
+        doctors: { search: '' },
+        patients: { search: '' },
+        payments: { search: '', sortCol: '', sortOrder: 'desc' },
+        notifications: { search: '', sortMode: 'newest' }
+    };
+
+    function applyLeavesFilters() {
+        filterAndSortTable(leavesTable, currentTableData.leaves, generateLeaveRow, {
+            search: filtersState.leaves.search,
+            fromDate: filtersState.leaves.fromDate,
+            toDate: filtersState.leaves.toDate,
+            typeFilter: filtersState.leaves.typeFilter
+        }, filtersState.leaves.sortCol, filtersState.leaves.sortOrder);
+    }
+
+    function applyPaymentsFilters() {
+        filterAndSortTable(paymentsTable, currentTableData.payments, generatePaymentPatientRow, {
+            search: filtersState.payments.search
+        }, filtersState.payments.sortCol, filtersState.payments.sortOrder);
+    }
+
+    function applyArchivedFilters() {
+        filterAndSortTable(archivedTable, currentTableData.archived, generateArchivedLeaveRow, { search: filtersState.archived.search });
+    }
+
+    function applyQueriesFilters() {
+        filterAndSortTable(queriesTable, currentTableData.queries, generateQueryRow, {
+            search: filtersState.queries.search,
+            fromDate: filtersState.queries.fromDate,
+            toDate: filtersState.queries.toDate
+        });
+    }
+
+    function applyDoctorsFilters() {
+        filterAndSortTable(doctorsTable, currentTableData.doctors, generateDoctorRow, { search: filtersState.doctors.search });
+    }
+
+    function applyPatientsFilters() {
+        filterAndSortTable(patientsTable, currentTableData.patients, generatePatientRow, { search: filtersState.patients.search });
+    }
+
+    function applyAllCurrentFilters() {
+        applyLeavesFilters();
+        applyArchivedFilters();
+        applyQueriesFilters();
+        applyDoctorsFilters();
+        applyPatientsFilters();
+        applyPaymentsFilters();
+        applyNotificationsFilters();
+    }
+
+    function applyNotificationsFilters() {
+        let data = [...(currentTableData.notifications_payment || [])];
+        const search = (filtersState.notifications.search || '').toLowerCase();
+        if (search) {
+            data = data.filter(n => JSON.stringify(n || {}).toLowerCase().includes(search));
+        }
+
+        if (filtersState.notifications.sortMode === 'oldest') {
+            data.sort((a, b) => new Date(a.created_at) - new Date(b.created_at));
+        } else if (filtersState.notifications.sortMode === 'mostRepeated') {
+            const repeats = currentTableData.leaves.reduce((acc, lv) => {
+                const key = lv.patient_id;
+                acc[key] = (acc[key] || 0) + 1;
+                return acc;
+            }, {});
+            data.sort((a, b) => {
+                const ca = repeats[a.patient_id] || 0;
+                const cb = repeats[b.patient_id] || 0;
+                return cb - ca || new Date(b.created_at) - new Date(a.created_at);
+            });
+        } else {
+            data.sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
+        }
+
+        updatePaymentNotifications(data);
+    }
+
+    document.getElementById('searchLeaves').addEventListener('input', debounce(function() {
+        filtersState.leaves.search = this.value;
+        applyLeavesFilters();
+    }));
+
+    document.getElementById('searchArchived').addEventListener('input', debounce(function() {
+        filtersState.archived.search = this.value;
+        applyArchivedFilters();
+    }));
+
+    document.getElementById('searchQueries').addEventListener('input', debounce(function() {
+        filtersState.queries.search = this.value;
+        applyQueriesFilters();
+    }));
+
+    document.getElementById('searchDoctors').addEventListener('input', debounce(function() {
+        filtersState.doctors.search = this.value;
+        applyDoctorsFilters();
+    }));
+
+    document.getElementById('searchPatients').addEventListener('input', debounce(function() {
+        filtersState.patients.search = this.value;
+        applyPatientsFilters();
+    }));
+
+    document.getElementById('searchPayments').addEventListener('input', debounce(function() {
+        filtersState.payments.search = this.value;
+        applyPaymentsFilters();
+    }));
+
+    document.getElementById('showPaidLeaves').addEventListener('click', () => { filtersState.leaves.typeFilter = 'paid'; applyLeavesFilters(); });
+    document.getElementById('showUnpaidLeaves').addEventListener('click', () => { filtersState.leaves.typeFilter = 'unpaid'; applyLeavesFilters(); });
+    document.getElementById('showAllLeaves').addEventListener('click', () => { filtersState.leaves.typeFilter = ''; applyLeavesFilters(); });
+    document.getElementById('sortLeavesNewest').addEventListener('click', () => { filtersState.leaves.sortCol = 'created_at'; filtersState.leaves.sortOrder = 'desc'; applyLeavesFilters(); });
+    document.getElementById('sortLeavesOldest').addEventListener('click', () => { filtersState.leaves.sortCol = 'created_at'; filtersState.leaves.sortOrder = 'asc'; applyLeavesFilters(); });
+    document.getElementById('sortLeavesReset').addEventListener('click', () => {
+        filtersState.leaves = { search: '', fromDate: '', toDate: '', typeFilter: '', sortCol: 'created_at', sortOrder: 'desc' };
+        document.getElementById('searchLeaves').value = '';
+        document.getElementById('filterFromDate').value = '';
+        document.getElementById('filterToDate').value = '';
+        document.getElementById('filterType').value = '';
+        applyLeavesFilters();
     });
 
     // فلترة بالتاريخ
     document.getElementById('filterLeavesBtn').addEventListener('click', () => {
-        const from = document.getElementById('filterFromDate').value;
-        const to = document.getElementById('filterToDate').value;
-        const type = document.getElementById('filterType').value;
-        const search = document.getElementById('searchLeaves').value;
-        filterAndSortTable(leavesTable, currentTableData.leaves, generateLeaveRow, { search, fromDate: from, toDate: to, typeFilter: type });
+        filtersState.leaves.fromDate = document.getElementById('filterFromDate').value;
+        filtersState.leaves.toDate = document.getElementById('filterToDate').value;
+        filtersState.leaves.typeFilter = document.getElementById('filterType').value;
+        filtersState.leaves.search = document.getElementById('searchLeaves').value;
+        applyLeavesFilters();
     });
+
     document.getElementById('resetFilterBtn').addEventListener('click', () => {
+        filtersState.leaves = { search: '', fromDate: '', toDate: '', typeFilter: '', sortCol: 'created_at', sortOrder: 'desc' };
         document.getElementById('filterFromDate').value = '';
         document.getElementById('filterToDate').value = '';
         document.getElementById('filterType').value = '';
         document.getElementById('searchLeaves').value = '';
-        updateTable(leavesTable, currentTableData.leaves, generateLeaveRow);
+        applyLeavesFilters();
+    });
+
+    document.getElementById('sortPaymentsPaid').addEventListener('click', () => {
+        filtersState.payments.sortCol = 'paid_amount';
+        filtersState.payments.sortOrder = 'desc';
+        applyPaymentsFilters();
+    });
+    document.getElementById('sortPaymentsUnpaid').addEventListener('click', () => {
+        filtersState.payments.sortCol = 'unpaid_amount';
+        filtersState.payments.sortOrder = 'desc';
+        applyPaymentsFilters();
+    });
+    document.getElementById('sortPaymentsMostLeaves').addEventListener('click', () => {
+        filtersState.payments.sortCol = 'total';
+        filtersState.payments.sortOrder = 'desc';
+        applyPaymentsFilters();
+    });
+    document.getElementById('sortPaymentsLeastLeaves').addEventListener('click', () => {
+        filtersState.payments.sortCol = 'total';
+        filtersState.payments.sortOrder = 'asc';
+        applyPaymentsFilters();
+    });
+    document.getElementById('sortPaymentsReset').addEventListener('click', () => {
+        filtersState.payments.sortCol = 'total';
+        filtersState.payments.sortOrder = 'desc';
+        applyPaymentsFilters();
     });
 
     // فلترة الاستعلامات بالتاريخ
     document.getElementById('filterQueriesBtn').addEventListener('click', () => {
-        const from = document.getElementById('filterQueriesFrom').value;
-        const to = document.getElementById('filterQueriesTo').value;
-        const search = document.getElementById('searchQueries').value;
-        filterAndSortTable(queriesTable, currentTableData.queries, generateQueryRow, { search, fromDate: from, toDate: to });
+        filtersState.queries.fromDate = document.getElementById('filterQueriesFrom').value;
+        filtersState.queries.toDate = document.getElementById('filterQueriesTo').value;
+        filtersState.queries.search = document.getElementById('searchQueries').value;
+        applyQueriesFilters();
     });
+
     document.getElementById('resetQueriesFilterBtn').addEventListener('click', () => {
+        filtersState.queries = { search: '', fromDate: '', toDate: '' };
         document.getElementById('filterQueriesFrom').value = '';
         document.getElementById('filterQueriesTo').value = '';
         document.getElementById('searchQueries').value = '';
-        updateTable(queriesTable, currentTableData.queries, generateQueryRow);
+        applyQueriesFilters();
     });
+
+    document.getElementById('searchNotifs').addEventListener('input', debounce(function() {
+        filtersState.notifications.search = this.value;
+        applyNotificationsFilters();
+    }));
+    document.getElementById('sortNotifsNewest').addEventListener('click', () => { filtersState.notifications.sortMode = 'newest'; applyNotificationsFilters(); });
+    document.getElementById('sortNotifsOldest').addEventListener('click', () => { filtersState.notifications.sortMode = 'oldest'; applyNotificationsFilters(); });
+    document.getElementById('sortNotifsMostRepeated').addEventListener('click', () => { filtersState.notifications.sortMode = 'mostRepeated'; applyNotificationsFilters(); });
+    document.getElementById('sortNotifsReset').addEventListener('click', () => {
+        filtersState.notifications = { search: '', sortMode: 'newest' };
+        document.getElementById('searchNotifs').value = '';
+        applyNotificationsFilters();
+    });
+
+
+    document.getElementById('btn-search-leaves').addEventListener('click', () => applyLeavesFilters());
+    document.getElementById('btn-search-archived').addEventListener('click', () => {
+        filtersState.archived.search = document.getElementById('searchArchived').value;
+        applyArchivedFilters();
+    });
+    document.getElementById('btn-search-queries').addEventListener('click', () => {
+        filtersState.queries.search = document.getElementById('searchQueries').value;
+        applyQueriesFilters();
+    });
+    document.getElementById('btn-search-payments').addEventListener('click', () => applyPaymentsFilters());
+    document.getElementById('btn-search-notifs').addEventListener('click', () => applyNotificationsFilters());
 
     // ====== التصدير والطباعة ======
     document.getElementById('exportLeavesPdf').addEventListener('click', () => exportTableToPdf(leavesTable, 'leaves.pdf', 'الإجازات الطبية'));
@@ -3868,13 +4347,7 @@ document.addEventListener('DOMContentLoaded', () => {
     });
 
     // ====== التحميل الأولي ======
-    updateTable(leavesTable, currentTableData.leaves, generateLeaveRow);
-    updateTable(archivedTable, currentTableData.archived, generateArchivedLeaveRow);
-    updateTable(doctorsTable, currentTableData.doctors, generateDoctorRow);
-    updateTable(patientsTable, currentTableData.patients, generatePatientRow);
-    updateTable(queriesTable, currentTableData.queries, generateQueryRow);
-    updateTable(paymentsTable, currentTableData.payments, generatePaymentPatientRow);
-    updatePaymentNotifications(currentTableData.notifications_payment);
+    applyAllCurrentFilters();
     updateDoctorSelects(currentTableData.doctors);
     updatePatientSelects(currentTableData.patients);
 
@@ -3882,16 +4355,12 @@ document.addEventListener('DOMContentLoaded', () => {
     setInterval(async () => {
         const result = await sendAjaxRequest('fetch_all_leaves', {});
         if (result.success) {
-            currentTableData.leaves = result.leaves || [];
-            currentTableData.archived = result.archived || [];
-            currentTableData.queries = result.queries || [];
-            currentTableData.payments = result.payments || [];
-            currentTableData.notifications_payment = result.notifications_payment || [];
-            updateTable(leavesTable, currentTableData.leaves, generateLeaveRow);
-            updateTable(archivedTable, currentTableData.archived, generateArchivedLeaveRow);
-            updateTable(queriesTable, currentTableData.queries, generateQueryRow);
-            updateTable(paymentsTable, currentTableData.payments, generatePaymentPatientRow);
-            updatePaymentNotifications(currentTableData.notifications_payment);
+            if (Array.isArray(result.leaves)) currentTableData.leaves = result.leaves;
+            if (Array.isArray(result.archived)) currentTableData.archived = result.archived;
+            if (Array.isArray(result.queries)) currentTableData.queries = result.queries;
+            if (Array.isArray(result.payments)) currentTableData.payments = result.payments;
+            if (Array.isArray(result.notifications_payment)) currentTableData.notifications_payment = result.notifications_payment;
+            applyAllCurrentFilters();
             if (result.stats) updateStats(result.stats);
         }
     }, 60000);
@@ -3900,4 +4369,3 @@ document.addEventListener('DOMContentLoaded', () => {
 </script>
 </body>
 </html>
-
