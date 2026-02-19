@@ -70,6 +70,17 @@ $pdo->exec("CREATE TABLE IF NOT EXISTS user_sessions (
     FOREIGN KEY (user_id) REFERENCES admin_users(id) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci");
 
+$pdo->exec("CREATE TABLE IF NOT EXISTS user_messages (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    sender_id INT NOT NULL,
+    receiver_id INT NOT NULL,
+    message_text TEXT NOT NULL,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    is_read TINYINT(1) DEFAULT 0,
+    FOREIGN KEY (sender_id) REFERENCES admin_users(id) ON DELETE CASCADE,
+    FOREIGN KEY (receiver_id) REFERENCES admin_users(id) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci");
+
 function ensureIndex(PDO $pdo, string $table, string $indexName, string $columns): void {
     $check = $pdo->prepare("SELECT COUNT(*) FROM information_schema.statistics WHERE table_schema = DATABASE() AND table_name = ? AND index_name = ?");
     $check->execute([$table, $indexName]);
@@ -89,6 +100,8 @@ ensureIndex($pdo, 'leave_queries', 'idx_leave_queries_queried_at', 'queried_at')
 ensureIndex($pdo, 'patients', 'idx_patients_identity_number', 'identity_number');
 ensureIndex($pdo, 'patients', 'idx_patients_name', 'name');
 ensureIndex($pdo, 'doctors', 'idx_doctors_name', 'name');
+ensureIndex($pdo, 'user_messages', 'idx_user_messages_pair_created', 'sender_id, receiver_id, created_at');
+ensureIndex($pdo, 'user_messages', 'idx_user_messages_receiver_read', 'receiver_id, is_read');
 
 // إنشاء مستخدم افتراضي إذا لم يوجد أي مستخدم
 $stmt = $pdo->query("SELECT COUNT(*) as cnt FROM admin_users");
@@ -162,17 +175,23 @@ function generateServiceCode($pdo, $prefix, $issueDate = null) {
         $prefix = 'GSL';
     }
 
+    $issueDateObj = DateTime::createFromFormat('Y-m-d', (string)$issueDate, new DateTimeZone('Asia/Riyadh'));
+    if (!$issueDateObj) {
+        $issueDateObj = new DateTime('now', new DateTimeZone('Asia/Riyadh'));
+    }
+    $datePart = $issueDateObj->format('ymd');
+
     $stmt = $pdo->prepare("SELECT service_code FROM sick_leaves WHERE service_code LIKE ? ORDER BY id DESC LIMIT 1");
-    $stmt->execute([$prefix . '%']);
+    $stmt->execute([$prefix . $datePart . '%']);
     $last = $stmt->fetchColumn();
 
-    if ($last && preg_match('/^(?:GSL|PSL)(\d+)$/', $last, $m)) {
+    if ($last && preg_match('/^(?:GSL|PSL)\d{6}(\d+)$/', $last, $m)) {
         $num = intval($m[1]) + 1;
     } else {
         $num = 1;
     }
 
-    return $prefix . str_pad((string)$num, 6, '0', STR_PAD_LEFT);
+    return $prefix . $datePart . str_pad((string)$num, 4, '0', STR_PAD_LEFT);
 }
 
 function fetchAllData($pdo) {
@@ -947,6 +966,64 @@ if (isset($_POST['action']) && $_POST['action'] !== 'login' && $_POST['action'] 
             echo json_encode(['success' => true, 'patients' => $patients, 'stats' => getStats($pdo)]);
             break;
 
+
+        case 'fetch_chat_users':
+            $currentUserId = intval($_SESSION['admin_user_id'] ?? 0);
+            if ($_SESSION['admin_role'] === 'admin') {
+                $stmt = $pdo->prepare("SELECT id, username, display_name, role FROM admin_users WHERE is_active = 1 AND id <> ? ORDER BY display_name");
+                $stmt->execute([$currentUserId]);
+            } else {
+                $stmt = $pdo->prepare("SELECT id, username, display_name, role FROM admin_users WHERE is_active = 1 AND role = 'admin' ORDER BY display_name");
+                $stmt->execute();
+            }
+            echo json_encode(['success' => true, 'users' => $stmt->fetchAll()]);
+            break;
+
+        case 'fetch_messages':
+            $peerId = intval($_POST['peer_id'] ?? 0);
+            $me = intval($_SESSION['admin_user_id'] ?? 0);
+            if ($peerId <= 0 || $me <= 0) {
+                echo json_encode(['success' => false, 'message' => 'مستخدم غير صالح.']);
+                break;
+            }
+            $stmt = $pdo->prepare("
+                SELECT um.*,
+                       s.display_name AS sender_name,
+                       r.display_name AS receiver_name
+                FROM user_messages um
+                LEFT JOIN admin_users s ON um.sender_id = s.id
+                LEFT JOIN admin_users r ON um.receiver_id = r.id
+                WHERE (um.sender_id = ? AND um.receiver_id = ?)
+                   OR (um.sender_id = ? AND um.receiver_id = ?)
+                ORDER BY um.created_at ASC, um.id ASC
+                LIMIT 500
+            ");
+            $stmt->execute([$me, $peerId, $peerId, $me]);
+            $messages = $stmt->fetchAll();
+            $pdo->prepare("UPDATE user_messages SET is_read = 1 WHERE receiver_id = ? AND sender_id = ? AND is_read = 0")
+                ->execute([$me, $peerId]);
+            echo json_encode(['success' => true, 'messages' => $messages]);
+            break;
+
+        case 'send_message':
+            $peerId = intval($_POST['peer_id'] ?? 0);
+            $messageText = trim($_POST['message_text'] ?? '');
+            $me = intval($_SESSION['admin_user_id'] ?? 0);
+            if ($peerId <= 0 || $me <= 0 || $messageText === '') {
+                echo json_encode(['success' => false, 'message' => 'بيانات الرسالة غير مكتملة.']);
+                break;
+            }
+            $check = $pdo->prepare("SELECT id FROM admin_users WHERE id = ? AND is_active = 1");
+            $check->execute([$peerId]);
+            if (!$check->fetch()) {
+                echo json_encode(['success' => false, 'message' => 'المستخدم غير موجود أو غير مفعل.']);
+                break;
+            }
+            $ins = $pdo->prepare("INSERT INTO user_messages (sender_id, receiver_id, message_text, created_at) VALUES (?, ?, ?, ?)");
+            $ins->execute([$me, $peerId, $messageText, nowSaudi()]);
+            echo json_encode(['success' => true, 'message' => 'تم إرسال الرسالة.']);
+            break;
+
         // ======================== إدارة المستخدمين ========================
         case 'add_user':
             if ($_SESSION['admin_role'] !== 'admin') {
@@ -1121,11 +1198,16 @@ if ($loggedIn) {
     $stats = getStats($pdo);
     
     $users = [];
+    $chat_users_stmt = ($_SESSION['admin_role'] === 'admin')
+        ? $pdo->prepare("SELECT id, username, display_name, role FROM admin_users WHERE is_active = 1 AND id <> ? ORDER BY display_name")
+        : $pdo->prepare("SELECT id, username, display_name, role FROM admin_users WHERE is_active = 1 AND role = 'admin' ORDER BY display_name");
+    if ($_SESSION['admin_role'] === 'admin') { $chat_users_stmt->execute([intval($_SESSION['admin_user_id'])]); } else { $chat_users_stmt->execute(); }
+    $chat_users = $chat_users_stmt->fetchAll();
     if ($_SESSION['admin_role'] === 'admin') {
         $users = $pdo->query("SELECT id, username, display_name, role, is_active, created_at FROM admin_users ORDER BY created_at DESC")->fetchAll();
     }
 } else {
-    $doctors = $patients = $leaves = $archived = $queries = $notifications_payment = $payments = $users = [];
+    $doctors = $patients = $leaves = $archived = $queries = $notifications_payment = $payments = $users = $chat_users = [];
     $stats = ['total' => 0, 'active' => 0, 'archived' => 0, 'patients' => 0, 'doctors' => 0, 'paid' => 0, 'unpaid' => 0, 'paid_amount' => 0, 'unpaid_amount' => 0];
 }
 ?>
@@ -1901,6 +1983,11 @@ if ($loggedIn) {
             </button>
         </li>
         <li class="nav-item" role="presentation">
+            <button class="nav-link" id="tab-chat" data-bs-toggle="tab" data-bs-target="#pane-chat" type="button" role="tab">
+                <i class="bi bi-chat-dots"></i> المراسلات
+            </button>
+        </li>
+        <li class="nav-item" role="presentation">
             <button class="nav-link" id="tab-queries" data-bs-toggle="tab" data-bs-target="#pane-queries" type="button" role="tab">
                 <i class="bi bi-search"></i> سجل الاستعلامات
             </button>
@@ -2196,6 +2283,28 @@ if ($loggedIn) {
                             <thead><tr><th>#</th><th>الاسم</th><th>رقم الهوية</th><th>الهاتف</th><th>التحكم</th></tr></thead>
                             <tbody></tbody>
                         </table>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <div class="tab-pane fade" id="pane-chat" role="tabpanel">
+            <div class="card-custom">
+                <div class="card-header"><i class="bi bi-chat-dots text-primary"></i> مراسلة المستخدمين</div>
+                <div class="card-body">
+                    <div class="row g-3">
+                        <div class="col-lg-4">
+                            <input type="text" class="form-control mb-2" id="chatUsersSearch" placeholder="بحث مستخدم...">
+                            <select class="form-select mb-2" id="chatPeerSelect"></select>
+                            <button class="btn btn-sm btn-outline-secondary" id="refreshChatUsersBtn"><i class="bi bi-arrow-repeat"></i> تحديث المستخدمين</button>
+                        </div>
+                        <div class="col-lg-8">
+                            <div id="chatMessagesBox" class="border rounded p-2 mb-2" style="height:320px; overflow:auto; background:#f8f9fa;"></div>
+                            <div class="input-group">
+                                <input type="text" class="form-control" id="chatMessageInput" placeholder="اكتب رسالتك...">
+                                <button class="btn btn-gradient" id="sendChatMessageBtn"><i class="bi bi-send"></i> إرسال</button>
+                            </div>
+                        </div>
                     </div>
                 </div>
             </div>
@@ -2715,8 +2824,9 @@ const initialPatients = <?php echo json_encode($patients); ?>;
 const initialPayments = <?php echo json_encode($payments); ?>;
 const initialNotifications = <?php echo json_encode($notifications_payment); ?>;
 const initialUsers = <?php echo json_encode($users); ?>;
+const initialChatUsers = <?php echo json_encode($chat_users ?? []); ?>;
 <?php else: ?>
-const initialLeaves = [], initialArchived = [], initialQueries = [], initialDoctors = [], initialPatients = [], initialPayments = [], initialNotifications = [], initialUsers = [];
+const initialLeaves = [], initialArchived = [], initialQueries = [], initialDoctors = [], initialPatients = [], initialPayments = [], initialNotifications = [], initialUsers = [], initialChatUsers = [];
 <?php endif; ?>
 
 // ======================== دوال مساعدة ========================
@@ -2741,13 +2851,19 @@ function formatSaudiDateTime(dateValue) {
     const str = String(dateValue).trim();
     const m = str.match(/^(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2})(?::(\d{2}))?$/);
     if (!m) return htmlspecialchars(str);
-    let hour = parseInt(m[4], 10);
+    const dt = new Date(Date.UTC(parseInt(m[1], 10), parseInt(m[2], 10) - 1, parseInt(m[3], 10), parseInt(m[4], 10), parseInt(m[5], 10), parseInt(m[6] || '0', 10)));
+    const parts = new Intl.DateTimeFormat('en-GB', {
+        timeZone: 'Asia/Riyadh',
+        year: 'numeric', month: '2-digit', day: '2-digit',
+        hour: '2-digit', minute: '2-digit', second: '2-digit',
+        hour12: false
+    }).formatToParts(dt).reduce((acc, part) => (acc[part.type] = part.value, acc), {});
+    let hour = parseInt(parts.hour || '0', 10);
     const ampm = hour >= 12 ? 'م' : 'ص';
     hour = hour % 12;
     if (hour === 0) hour = 12;
     const hh = String(hour).padStart(2, '0');
-    const ss = m[6] || '00';
-    return `${m[3]}/${m[2]}/${m[1]} ${hh}:${m[5]}:${ss} ${ampm} (السعودية)`;
+    return `${parts.day}/${parts.month}/${parts.year} ${hh}:${parts.minute}:${parts.second} ${ampm} (السعودية)`;
 }
 
 function showToast(msg, type = 'success') {
@@ -2819,8 +2935,28 @@ function normalizeSearchText(value) {
         .replace(/[ئ]/g, 'ي')
         .replace(/[ة]/g, 'ه')
         .replace(/[٠-٩]/g, d => String('٠١٢٣٤٥٦٧٨٩'.indexOf(d)))
+        .replace(/[^\p{L}\p{N}\s]/gu, ' ')
         .replace(/\s+/g, ' ')
         .trim();
+}
+
+function extractSearchText(value, bag = []) {
+    if (value === null || value === undefined) return bag;
+    if (typeof value === 'object') {
+        Object.values(value).forEach(v => extractSearchText(v, bag));
+        return bag;
+    }
+    bag.push(String(value));
+    return bag;
+}
+
+function matchesSearch(item, query) {
+    const normalizedQuery = normalizeSearchText(query);
+    if (!normalizedQuery) return true;
+    const tokens = normalizedQuery.split(' ').filter(Boolean);
+    const haystack = normalizeSearchText(extractSearchText(item).join(' '));
+    const compactHaystack = haystack.replace(/\s+/g, '');
+    return tokens.every(t => haystack.includes(t) || compactHaystack.includes(t.replace(/\s+/g, '')));
 }
 
 function filterAndSortTable(tableEl, data, rowGenerator, filters = {}, sortCol = '', sortOrder = 'desc') {
@@ -2830,8 +2966,7 @@ function filterAndSortTable(tableEl, data, rowGenerator, filters = {}, sortCol =
     if (filters.search) {
         const q = normalizeSearchText(filters.search);
         filtered = filtered.filter(item => {
-            const searchText = normalizeSearchText(JSON.stringify(item || {}));
-            return searchText.includes(q);
+            return matchesSearch(item || {}, q);
         });
     }
 
@@ -3084,7 +3219,7 @@ function generateUserRow(u) {
             <td>${htmlspecialchars(u.display_name)}</td>
             <td>${roleBadge}</td>
             <td>${statusBadge}</td>
-            <td>${htmlspecialchars(u.created_at)}</td>
+            <td>${formatSaudiDateTime(u.created_at)}</td>
             <td>
                 <button class="btn btn-sm btn-gradient action-btn btn-edit-user" data-id="${u.id}" data-name="${htmlspecialchars(u.display_name)}" data-role="${u.role}" data-active="${u.is_active}"><i class="bi bi-pencil"></i></button>
                 <button class="btn btn-sm btn-info action-btn btn-view-sessions" data-id="${u.id}" title="سجل الجلسات"><i class="bi bi-clock-history"></i></button>
@@ -3127,7 +3262,7 @@ function updatePaymentNotifications(notifications) {
                 <span class="badge bg-light text-dark ms-1">${htmlspecialchars(n.service_code || '-')}</span>
                 <span>${htmlspecialchars(n.message)}</span>
                 <br><span class="notif-patient-name"><i class="bi bi-person"></i> ${htmlspecialchars(n.patient_name || 'غير معروف')}</span>
-                <br><small class="text-muted">${htmlspecialchars(n.created_at)}</small>
+                <br><small class="text-muted">${formatSaudiDateTime(n.created_at)}</small>
             </div>
             <div class="d-flex gap-1">
                 <button class="btn btn-sm btn-gradient btn-view-leave" title="عرض"><i class="bi bi-eye"></i></button>
@@ -3295,11 +3430,13 @@ document.addEventListener('DOMContentLoaded', () => {
         patients: initialPatients,
         payments: initialPayments,
         notifications_payment: initialNotifications,
-        users: initialUsers
+        users: initialUsers,
+        chat_users: initialChatUsers,
+        chat_messages: []
     };
 
     function syncTableDataFromResult(result) {
-        const keys = ['leaves', 'archived', 'queries', 'doctors', 'patients', 'payments', 'notifications_payment', 'users'];
+        const keys = ['leaves', 'archived', 'queries', 'doctors', 'patients', 'payments', 'notifications_payment', 'users', 'chat_users', 'chat_messages'];
         keys.forEach((k) => {
             if (Object.prototype.hasOwnProperty.call(result, k) && Array.isArray(result[k])) {
                 currentTableData[k] = result[k];
@@ -3883,7 +4020,7 @@ document.addEventListener('DOMContentLoaded', () => {
                     <p><strong>النوع:</strong> ${lv.is_companion == 1 ? 'مرافق: ' + htmlspecialchars(lv.companion_name) + ' (' + htmlspecialchars(lv.companion_relation) + ')' : 'أساسي'}</p>
                     <p><strong>مدفوعة:</strong> ${lv.is_paid == 1 ? 'نعم' : 'لا'}</p>
                     <p><strong>المبلغ:</strong> ${parseFloat(lv.payment_amount).toFixed(2)}</p>
-                    <p><strong>تاريخ الإضافة:</strong> ${htmlspecialchars(lv.created_at)}</p>
+                    <p><strong>تاريخ الإضافة:</strong> ${formatSaudiDateTime(lv.created_at)}</p>
                     <p><strong>تاريخ التعديل:</strong> ${htmlspecialchars(lv.updated_at || 'غير متوفر')}</p>
                     <p><strong>عدد الاستعلامات:</strong> ${lv.queries_count}</p>`;
                 leaveDetailsModal.show();
@@ -4201,6 +4338,55 @@ document.addEventListener('DOMContentLoaded', () => {
         });
     }
 
+    // ====== المراسلات ======
+    let activeChatPeerId = null;
+
+    function renderChatUsers(list) {
+        const sel = document.getElementById('chatPeerSelect');
+        if (!sel) return;
+        const users = Array.isArray(list) ? list : [];
+        if (users.length === 0) {
+            sel.innerHTML = '<option value="">لا يوجد مستخدمون</option>';
+            activeChatPeerId = null;
+            return;
+        }
+        const prev = activeChatPeerId || sel.value;
+        sel.innerHTML = '<option value="">اختر المستخدم</option>' + users.map(u => `<option value="${u.id}">${htmlspecialchars(u.display_name)} (${htmlspecialchars(u.username)})</option>`).join('');
+        if (prev && users.some(u => String(u.id) === String(prev))) {
+            sel.value = prev;
+            activeChatPeerId = String(prev);
+        }
+    }
+
+    function renderChatMessages(list) {
+        const box = document.getElementById('chatMessagesBox');
+        if (!box) return;
+        const me = String(<?php echo intval($_SESSION['admin_user_id'] ?? 0); ?>);
+        const rows = (list || []).map(m => {
+            const mine = String(m.sender_id) === me;
+            return `<div class="mb-2 d-flex ${mine ? 'justify-content-start' : 'justify-content-end'}"><div class="p-2 rounded" style="max-width:78%; background:${mine ? '#d1e7dd' : '#e2e3e5'}"><div class="small fw-bold">${htmlspecialchars(m.sender_name || '')}</div><div>${htmlspecialchars(m.message_text || '')}</div><div class="small text-muted">${formatSaudiDateTime(m.created_at)}</div></div></div>`;
+        }).join('');
+        box.innerHTML = rows || '<div class="text-muted text-center mt-4">لا توجد رسائل بعد.</div>';
+        box.scrollTop = box.scrollHeight;
+    }
+
+    async function refreshChatUsers() {
+        const result = await sendAjaxRequest('fetch_chat_users', {});
+        if (result.success) {
+            currentTableData.chat_users = result.users || [];
+            renderChatUsers(currentTableData.chat_users);
+        }
+    }
+
+    async function loadChatMessages() {
+        if (!activeChatPeerId) return;
+        const result = await sendAjaxRequest('fetch_messages', { peer_id: activeChatPeerId });
+        if (result.success) {
+            currentTableData.chat_messages = result.messages || [];
+            renderChatMessages(currentTableData.chat_messages);
+        }
+    }
+
     // ====== البحث والفلترة ======
     const filtersState = {
         leaves: { search: '', fromDate: '', toDate: '', typeFilter: '', sortCol: 'created_at', sortOrder: 'desc' },
@@ -4235,7 +4421,7 @@ document.addEventListener('DOMContentLoaded', () => {
         let queries = [...(currentTableData.queries || [])];
         const search = normalizeSearchText(filtersState.queries.search || '');
         if (search) {
-            queries = queries.filter(q => normalizeSearchText(JSON.stringify(q || {})).includes(search));
+            queries = queries.filter(q => matchesSearch(q || {}, search));
         }
         if (filtersState.queries.fromDate && filtersState.queries.toDate) {
             const from = new Date(filtersState.queries.fromDate);
@@ -4276,7 +4462,7 @@ document.addEventListener('DOMContentLoaded', () => {
         let data = [...(currentTableData.notifications_payment || [])];
         const search = normalizeSearchText(filtersState.notifications.search || '');
         if (search) {
-            data = data.filter(n => normalizeSearchText(JSON.stringify(n || {})).includes(search));
+            data = data.filter(n => matchesSearch(n || {}, search));
         }
 
         if (filtersState.notifications.sortMode === 'oldest') {
@@ -4496,6 +4682,36 @@ document.addEventListener('DOMContentLoaded', () => {
             confirmModal.show();
         });
     }
+
+    renderChatUsers(currentTableData.chat_users || []);
+    document.getElementById('chatUsersSearch')?.addEventListener('input', debounce(function() {
+        const q = this.value;
+        const filtered = (currentTableData.chat_users || []).filter(u => matchesSearch(u, q));
+        renderChatUsers(filtered);
+    }, 120));
+    document.getElementById('chatPeerSelect')?.addEventListener('change', async function() {
+        activeChatPeerId = this.value || null;
+        await loadChatMessages();
+    });
+    document.getElementById('refreshChatUsersBtn')?.addEventListener('click', async () => { await refreshChatUsers(); });
+    document.getElementById('sendChatMessageBtn')?.addEventListener('click', async () => {
+        const input = document.getElementById('chatMessageInput');
+        const text = (input?.value || '').trim();
+        if (!activeChatPeerId || !text) return;
+        const result = await sendAjaxRequest('send_message', { peer_id: activeChatPeerId, message_text: text });
+        if (result.success) {
+            input.value = '';
+            await loadChatMessages();
+        }
+    });
+    document.getElementById('chatMessageInput')?.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter') {
+            e.preventDefault();
+            document.getElementById('sendChatMessageBtn')?.click();
+        }
+    });
+    setInterval(() => { if (activeChatPeerId) loadChatMessages(); }, 7000);
+
 
     // ====== التصدير والطباعة ======
     document.getElementById('exportLeavesPdf').addEventListener('click', () => exportTableToPdf(leavesTable, 'leaves.pdf', 'الإجازات الطبية'));
