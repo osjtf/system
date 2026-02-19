@@ -13,6 +13,8 @@
 
 session_start();
 
+date_default_timezone_set('Asia/Riyadh');
+
 // ======================== إعدادات قاعدة البيانات ========================
 $db_host = 'mysql.railway.internal';
 $db_user = 'root';
@@ -34,6 +36,8 @@ try {
 } catch (PDOException $e) {
     die(json_encode(['success' => false, 'message' => 'فشل الاتصال بقاعدة البيانات: ' . $e->getMessage()]));
 }
+
+$pdo->exec("SET time_zone = '+03:00'");
 
 // ======================== إنشاء جداول المستخدمين والجلسات ========================
 $pdo->exec("CREATE TABLE IF NOT EXISTS admin_users (
@@ -139,20 +143,27 @@ function getStats($pdo) {
     return $stats;
 }
 
-function generateServiceCode($pdo, $prefix) {
+function generateServiceCode($pdo, $prefix, $issueDate = null) {
     $prefix = strtoupper(trim($prefix));
     if (!in_array($prefix, ['GSL', 'PSL'])) {
         $prefix = 'GSL';
     }
+
+    $dateObj = DateTime::createFromFormat('Y-m-d', (string)$issueDate) ?: new DateTime('now', new DateTimeZone('Asia/Riyadh'));
+    $datePart = $dateObj->format('Ymd');
+    $base = $prefix . $datePart;
+
     $stmt = $pdo->prepare("SELECT service_code FROM sick_leaves WHERE service_code LIKE ? ORDER BY id DESC LIMIT 1");
-    $stmt->execute([$prefix . '%']);
+    $stmt->execute([$base . '%']);
     $last = $stmt->fetchColumn();
-    if ($last) {
-        $num = intval(substr($last, strlen($prefix))) + 1;
+
+    if ($last && preg_match('/^(?:GSL|PSL)\d{8}(\d+)$/', $last, $m)) {
+        $num = intval($m[1]) + 1;
     } else {
         $num = 1;
     }
-    return $prefix . str_pad($num, 6, '0', STR_PAD_LEFT);
+
+    return $base . str_pad((string)$num, 4, '0', STR_PAD_LEFT);
 }
 
 function fetchAllData($pdo) {
@@ -362,6 +373,7 @@ if (isset($_POST['action']) && $_POST['action'] !== 'login' && $_POST['action'] 
     switch ($action) {
         case 'fetch_all_leaves':
             $data = fetchAllData($pdo);
+            $data['doctors'] = $pdo->query("SELECT * FROM doctors ORDER BY name")->fetchAll();
             $data['stats'] = getStats($pdo);
             $data['success'] = true;
             echo json_encode($data);
@@ -412,16 +424,17 @@ if (isset($_POST['action']) && $_POST['action'] !== 'login' && $_POST['action'] 
                 $doctor_id = intval($doctor_select);
             }
 
+            $issue_date = $_POST['issue_date'] ?? '';
+
             // توليد رمز الخدمة
             $service_code_manual = trim($_POST['service_code_manual'] ?? '');
             $service_prefix = $_POST['service_prefix'] ?? 'GSL';
             if (!empty($service_code_manual)) {
                 $service_code = strtoupper($service_code_manual);
             } else {
-                $service_code = generateServiceCode($pdo, $service_prefix);
+                $service_code = generateServiceCode($pdo, $service_prefix, $issue_date);
             }
 
-            $issue_date = $_POST['issue_date'] ?? '';
             $start_date = $_POST['start_date'] ?? '';
             $end_date = $_POST['end_date'] ?? '';
             $days_count = intval($_POST['days_count'] ?? 0);
@@ -453,6 +466,7 @@ if (isset($_POST['action']) && $_POST['action'] !== 'login' && $_POST['action'] 
             }
 
             $data = fetchActiveOperationalData($pdo);
+            $data['doctors'] = $pdo->query("SELECT * FROM doctors ORDER BY name")->fetchAll();
             $data['stats'] = getStats($pdo);
             $data['success'] = true;
             $data['message'] = "تمت إضافة الإجازة بنجاح. رمز الخدمة: $service_code";
@@ -473,7 +487,22 @@ if (isset($_POST['action']) && $_POST['action'] !== 'login' && $_POST['action'] 
             $payment_amount = floatval($_POST['payment_amount_edit'] ?? 0);
             
             // خاصية تغيير الطبيب
-            $doctor_id_edit = isset($_POST['doctor_id_edit']) ? intval($_POST['doctor_id_edit']) : null;
+            $doctor_id_edit_raw = $_POST['doctor_id_edit'] ?? '';
+            $doctor_id_edit = null;
+            if ($doctor_id_edit_raw === 'manual') {
+                $dName = trim($_POST['doctor_manual_name_edit'] ?? '');
+                $dTitle = trim($_POST['doctor_manual_title_edit'] ?? '');
+                $dNote = trim($_POST['doctor_manual_note_edit'] ?? '');
+                if (empty($dName) || empty($dTitle)) {
+                    echo json_encode(['success' => false, 'message' => 'يرجى إدخال اسم الطبيب ومسمّاه الوظيفي.']);
+                    exit;
+                }
+                $stmt = $pdo->prepare("INSERT INTO doctors (name, title, note) VALUES (?, ?, ?)");
+                $stmt->execute([$dName, $dTitle, $dNote]);
+                $doctor_id_edit = intval($pdo->lastInsertId());
+            } else {
+                $doctor_id_edit = intval($doctor_id_edit_raw ?: 0);
+            }
 
             if ($leave_id <= 0 || empty($service_code) || empty($issue_date) || empty($start_date) || empty($end_date) || $days_count <= 0) {
                 echo json_encode(['success' => false, 'message' => 'يرجى تعبئة جميع الحقول المطلوبة.']);
@@ -505,6 +534,7 @@ if (isset($_POST['action']) && $_POST['action'] !== 'login' && $_POST['action'] 
             }
 
             $data = fetchActiveOperationalData($pdo);
+            $data['doctors'] = $pdo->query("SELECT * FROM doctors ORDER BY name")->fetchAll();
             $data['stats'] = getStats($pdo);
             $data['success'] = true;
             $data['message'] = 'تم تعديل الإجازة بنجاح.';
@@ -532,16 +562,17 @@ if (isset($_POST['action']) && $_POST['action'] !== 'login' && $_POST['action'] 
                 $doctor_id = intval($doctor_select);
             }
 
+            $issue_date = $_POST['dup_issue_date'] ?? '';
+
             // توليد رمز الخدمة
             $service_code_manual = trim($_POST['dup_service_code_manual'] ?? '');
             $service_prefix = $_POST['dup_service_prefix'] ?? 'GSL';
             if (!empty($service_code_manual)) {
                 $service_code = strtoupper($service_code_manual);
             } else {
-                $service_code = generateServiceCode($pdo, $service_prefix);
+                $service_code = generateServiceCode($pdo, $service_prefix, $issue_date);
             }
 
-            $issue_date = $_POST['dup_issue_date'] ?? '';
             $start_date = $_POST['dup_start_date'] ?? '';
             $end_date = $_POST['dup_end_date'] ?? '';
             $days_count = intval($_POST['dup_days_count'] ?? 0);
@@ -572,6 +603,7 @@ if (isset($_POST['action']) && $_POST['action'] !== 'login' && $_POST['action'] 
             }
 
             $data = fetchActiveOperationalData($pdo);
+            $data['doctors'] = $pdo->query("SELECT * FROM doctors ORDER BY name")->fetchAll();
             $data['stats'] = getStats($pdo);
             $data['success'] = true;
             $data['message'] = "تم تكرار الإجازة بنجاح. رمز الخدمة الجديد: $service_code";
@@ -634,6 +666,7 @@ if (isset($_POST['action']) && $_POST['action'] !== 'login' && $_POST['action'] 
             $stmt->execute([$amount, $leave_id]);
             $pdo->prepare("DELETE FROM notifications WHERE leave_id = ? AND type = 'payment'")->execute([$leave_id]);
             $data = fetchActiveOperationalData($pdo);
+            $data['doctors'] = $pdo->query("SELECT * FROM doctors ORDER BY name")->fetchAll();
             $data['stats'] = getStats($pdo);
             $data['success'] = true;
             $data['message'] = 'تم تأكيد الدفع بنجاح.';
@@ -2194,13 +2227,22 @@ if ($loggedIn) {
                         </div>
                         <div class="col-md-6">
                             <label class="form-label">الطبيب</label>
+                            <input type="text" class="form-control form-control-sm mb-2" id="doctor_id_edit_search" placeholder="بحث سريع باسم الطبيب...">
                             <select class="form-select" name="doctor_id_edit" id="doctor_id_edit">
                                 <option value="">-- لا تغيير --</option>
                                 <?php foreach ($doctors as $d): ?>
                                 <option value="<?php echo $d['id']; ?>"><?php echo htmlspecialchars($d['name']); ?> (<?php echo htmlspecialchars($d['title']); ?>)</option>
                                 <?php endforeach; ?>
+                                <option value="manual">+ إدخال يدوي</option>
                             </select>
                             <small class="form-text">اختر طبيباً جديداً أو اتركه لعدم التغيير</small>
+                        </div>
+                        <div class="col-md-12 hidden-field" id="editDoctorManualFields">
+                            <div class="row g-2">
+                                <div class="col-4"><label class="form-label">اسم الطبيب</label><input type="text" class="form-control" name="doctor_manual_name_edit" id="doctor_manual_name_edit"></div>
+                                <div class="col-4"><label class="form-label">المسمى</label><input type="text" class="form-control" name="doctor_manual_title_edit" id="doctor_manual_title_edit"></div>
+                                <div class="col-4"><label class="form-label">ملاحظة</label><input type="text" class="form-control" name="doctor_manual_note_edit" id="doctor_manual_note_edit"></div>
+                            </div>
                         </div>
                         <div class="col-md-4">
                             <label class="form-label">تاريخ الإصدار</label>
@@ -2627,10 +2669,16 @@ function formatWhatsAppLink(phone) {
 
 function formatSaudiDateTime(dateValue) {
     if (!dateValue) return '';
-    const normalized = String(dateValue).replace(' ' ,'T');
-    const date = new Date(normalized);
-    if (Number.isNaN(date.getTime())) return htmlspecialchars(dateValue);
-    return new Intl.DateTimeFormat('ar-SA', { timeZone: 'Asia/Riyadh', year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: true }).format(date);
+    const str = String(dateValue).trim();
+    const m = str.match(/^(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2})(?::(\d{2}))?$/);
+    if (!m) return htmlspecialchars(str);
+    let hour = parseInt(m[4], 10);
+    const ampm = hour >= 12 ? 'م' : 'ص';
+    hour = hour % 12;
+    if (hour === 0) hour = 12;
+    const hh = String(hour).padStart(2, '0');
+    const ss = m[6] || '00';
+    return `${m[3]}/${m[2]}/${m[1]} ${hh}:${m[5]}:${ss} ${ampm} (السعودية)`;
 }
 
 function showToast(msg, type = 'success') {
@@ -2692,14 +2740,28 @@ function updateTable(tableEl, data, rowGenerator) {
     });
 }
 
+function normalizeSearchText(value) {
+    return String(value || '')
+        .toLowerCase()
+        .replace(/[ً-ٰٟ]/g, '')
+        .replace(/[إأآا]/g, 'ا')
+        .replace(/[ى]/g, 'ي')
+        .replace(/[ؤ]/g, 'و')
+        .replace(/[ئ]/g, 'ي')
+        .replace(/[ة]/g, 'ه')
+        .replace(/[٠-٩]/g, d => String('٠١٢٣٤٥٦٧٨٩'.indexOf(d)))
+        .replace(/\s+/g, ' ')
+        .trim();
+}
+
 function filterAndSortTable(tableEl, data, rowGenerator, filters = {}, sortCol = '', sortOrder = 'desc') {
     let filtered = [...data];
 
     // البحث
     if (filters.search) {
-        const q = String(filters.search).toLowerCase().trim();
+        const q = normalizeSearchText(filters.search);
         filtered = filtered.filter(item => {
-            const searchText = JSON.stringify(item || {}).toLowerCase();
+            const searchText = normalizeSearchText(JSON.stringify(item || {}));
             return searchText.includes(q);
         });
     }
@@ -2768,13 +2830,13 @@ function setupSelectQuickSearch(searchInputId, selectId) {
     refreshSelectQuickSearchData(selectId);
 
     const renderOptions = (term = '') => {
-        const q = term.trim().toLowerCase();
+        const q = normalizeSearchText(term);
         const selectedValue = select.value;
         const allOptions = JSON.parse(select.dataset.fullOptions || '[]');
         select.innerHTML = '';
         allOptions.forEach(opt => {
             const alwaysKeep = opt.value === '' || opt.value === 'manual';
-            const matches = alwaysKeep || !q || opt.text.toLowerCase().includes(q);
+            const matches = alwaysKeep || !q || normalizeSearchText(opt.text).includes(q);
             if (!matches) return;
             const optionEl = document.createElement('option');
             optionEl.value = opt.value;
@@ -3188,7 +3250,12 @@ document.addEventListener('DOMContentLoaded', () => {
 
             applyAllCurrentFilters();
 
-            if (result.stats) updateStats(result.stats);
+            if (result.doctors) {
+                    currentTableData.doctors = result.doctors;
+                    applyDoctorsFilters();
+                    updateDoctorSelects(currentTableData.doctors);
+                }
+                if (result.stats) updateStats(result.stats);
         }
     }
 
@@ -3263,6 +3330,7 @@ document.addEventListener('DOMContentLoaded', () => {
     setupSelectQuickSearch('patient_select_search', 'patient_select');
     setupSelectQuickSearch('doctor_select_search', 'doctor_select');
     setupSelectQuickSearch('dup_doctor_search', 'dup_doctor_select');
+    setupSelectQuickSearch('doctor_id_edit_search', 'doctor_id_edit');
 
     // حقول المرافق في نموذج الإضافة
     const companionCheckbox = document.getElementById('is_companion');
@@ -3336,6 +3404,8 @@ document.addEventListener('DOMContentLoaded', () => {
         document.getElementById('leave_id_edit').value = leave.id;
         document.getElementById('service_code_edit').value = leave.service_code;
         document.getElementById('doctor_id_edit').value = leave.doctor_id || '';
+        document.getElementById('doctor_id_edit_search').value = '';
+        document.getElementById('editDoctorManualFields').classList.add('hidden-field');
         document.getElementById('issue_date_edit').value = leave.issue_date;
         document.getElementById('start_date_edit').value = leave.start_date;
         document.getElementById('end_date_edit').value = leave.end_date;
@@ -3358,6 +3428,12 @@ document.addEventListener('DOMContentLoaded', () => {
         }
 
         editLeaveModal.show();
+    });
+
+    document.getElementById('doctor_id_edit').addEventListener('change', function() {
+        const fields = document.getElementById('editDoctorManualFields');
+        if (this.value === 'manual') fields.classList.remove('hidden-field');
+        else fields.classList.add('hidden-field');
     });
 
     // حقول المرافق في التعديل
@@ -3393,6 +3469,11 @@ document.addEventListener('DOMContentLoaded', () => {
                 document.getElementById('filterToDate').value = '';
                 document.getElementById('filterType').value = '';
                 applyAllCurrentFilters();
+                if (result.doctors) {
+                    currentTableData.doctors = result.doctors;
+                    applyDoctorsFilters();
+                    updateDoctorSelects(currentTableData.doctors);
+                }
                 if (result.stats) updateStats(result.stats);
             } else { showToast(result.message, 'danger'); }
         } catch (err) { hideLoading(); showToast('خطأ في الاتصال.', 'danger'); }
@@ -3479,6 +3560,11 @@ document.addEventListener('DOMContentLoaded', () => {
                 document.getElementById('filterType').value = '';
                 applyLeavesFilters();
                 applyAllCurrentFilters();
+                if (result.doctors) {
+                    currentTableData.doctors = result.doctors;
+                    applyDoctorsFilters();
+                    updateDoctorSelects(currentTableData.doctors);
+                }
                 if (result.stats) updateStats(result.stats);
             } else { showToast(result.message, 'danger'); }
         } catch (err) { hideLoading(); showToast('خطأ في الاتصال.', 'danger'); }
@@ -4100,9 +4186,9 @@ document.addEventListener('DOMContentLoaded', () => {
 
     function applyNotificationsFilters() {
         let data = [...(currentTableData.notifications_payment || [])];
-        const search = (filtersState.notifications.search || '').toLowerCase();
+        const search = normalizeSearchText(filtersState.notifications.search || '');
         if (search) {
-            data = data.filter(n => JSON.stringify(n || {}).toLowerCase().includes(search));
+            data = data.filter(n => normalizeSearchText(JSON.stringify(n || {})).includes(search));
         }
 
         if (filtersState.notifications.sortMode === 'oldest') {
