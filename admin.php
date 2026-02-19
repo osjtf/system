@@ -383,11 +383,12 @@ function ensureDelayedUnpaidNotifications($pdo): void {
     $rows = $stmt->fetchAll();
     if (!$rows) return;
 
-    $ins = $pdo->prepare("INSERT INTO notifications (type, leave_id, message) VALUES ('payment', ?, ?)");
+    $ins = $pdo->prepare("INSERT INTO notifications (type, leave_id, message, created_at) VALUES ('payment', ?, ?, ?)");
     foreach ($rows as $row) {
         $ins->execute([
             $row['id'],
-            "إجازة غير مدفوعة منذ أكثر من 5 دقائق برمز {$row['service_code']} بمبلغ {$row['payment_amount']}"
+            "إجازة غير مدفوعة منذ أكثر من 5 دقائق برمز {$row['service_code']} بمبلغ {$row['payment_amount']}",
+            nowSaudi()
         ]);
     }
 }
@@ -569,8 +570,8 @@ if (isset($_POST['action']) && $_POST['action'] !== 'login' && $_POST['action'] 
             // إضافة إشعار دفع إذا كانت غير مدفوعة
             if (!$is_paid && $payment_amount > 0) {
                 $leaveId = $pdo->lastInsertId();
-                $stmt = $pdo->prepare("INSERT INTO notifications (type, leave_id, message) VALUES ('payment', ?, ?)");
-                $stmt->execute([$leaveId, "إجازة جديدة غير مدفوعة برمز $service_code بمبلغ $payment_amount"]);
+                $stmt = $pdo->prepare("INSERT INTO notifications (type, leave_id, message, created_at) VALUES ('payment', ?, ?, ?)");
+                $stmt->execute([$leaveId, "إجازة جديدة غير مدفوعة برمز $service_code بمبلغ $payment_amount", nowSaudi()]);
             }
 
             $data = fetchActiveOperationalData($pdo);
@@ -708,8 +709,8 @@ if (isset($_POST['action']) && $_POST['action'] !== 'login' && $_POST['action'] 
 
             if (!$is_paid && $payment_amount > 0) {
                 $leaveId = $pdo->lastInsertId();
-                $stmt = $pdo->prepare("INSERT INTO notifications (type, leave_id, message) VALUES ('payment', ?, ?)");
-                $stmt->execute([$leaveId, "إجازة مكررة غير مدفوعة برمز $service_code بمبلغ $payment_amount"]);
+                $stmt = $pdo->prepare("INSERT INTO notifications (type, leave_id, message, created_at) VALUES ('payment', ?, ?, ?)");
+                $stmt->execute([$leaveId, "إجازة مكررة غير مدفوعة برمز $service_code بمبلغ $payment_amount", nowSaudi()]);
             }
 
             $data = fetchActiveOperationalData($pdo);
