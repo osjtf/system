@@ -203,6 +203,13 @@ function setSetting(PDO $pdo, string $key, string $value): void {
     $stmt->execute([$key, $value]);
 }
 
+function getUnreadMessagesCount(PDO $pdo, int $userId): int {
+    if ($userId <= 0) return 0;
+    $stmt = $pdo->prepare("SELECT COUNT(*) FROM user_messages WHERE receiver_id = ? AND is_read = 0 AND deleted_at IS NULL");
+    $stmt->execute([$userId]);
+    return intval($stmt->fetchColumn());
+}
+
 function purgeExpiredMessages(PDO $pdo): void {
     $hours = intval(getSetting($pdo, 'chat_retention_hours', '0'));
     if ($hours <= 0) return;
@@ -292,7 +299,7 @@ function fetchAllData($pdo) {
 
     // إشعارات المدفوعات
     $notifications_payment = $pdo->query("
-        SELECT n.*, sl.payment_amount, sl.service_code, sl.patient_id, p.name AS patient_name
+        SELECT n.*, sl.payment_amount, sl.service_code, sl.patient_id, p.name AS patient_name, p.phone AS patient_phone
         FROM notifications n
         LEFT JOIN sick_leaves sl ON n.leave_id = sl.id
         LEFT JOIN patients p ON sl.patient_id = p.id
@@ -338,7 +345,7 @@ function fetchActiveOperationalData($pdo) {
     ")->fetchAll();
 
     $notifications_payment = $pdo->query(" 
-        SELECT n.*, sl.payment_amount, sl.service_code, sl.patient_id, p.name AS patient_name
+        SELECT n.*, sl.payment_amount, sl.service_code, sl.patient_id, p.name AS patient_name, p.phone AS patient_phone
         FROM notifications n
         LEFT JOIN sick_leaves sl ON n.leave_id = sl.id
         LEFT JOIN patients p ON sl.patient_id = p.id
@@ -369,7 +376,6 @@ function ensureDelayedUnpaidNotifications($pdo): void {
         LEFT JOIN notifications n ON n.leave_id = sl.id AND n.type = 'payment'
         WHERE sl.deleted_at IS NULL
           AND sl.is_paid = 0
-          AND sl.payment_amount > 0
           AND sl.created_at <= (NOW() - INTERVAL 5 MINUTE)
           AND n.id IS NULL
     ");
@@ -476,6 +482,7 @@ if (isset($_POST['action']) && $_POST['action'] !== 'login' && $_POST['action'] 
             $data['doctors'] = $pdo->query("SELECT * FROM doctors ORDER BY name")->fetchAll();
             $data['patients'] = $pdo->query("SELECT * FROM patients ORDER BY name")->fetchAll();
             $data['stats'] = getStats($pdo);
+            $data['unread_messages_count'] = getUnreadMessagesCount($pdo, intval($_SESSION['admin_user_id'] ?? 0));
             $data['success'] = true;
             echo json_encode($data);
             break;
@@ -978,7 +985,7 @@ if (isset($_POST['action']) && $_POST['action'] !== 'login' && $_POST['action'] 
         case 'fetch_notifications':
             ensureDelayedUnpaidNotifications($pdo);
             $notifications = $pdo->query(" 
-                SELECT n.*, sl.payment_amount, sl.service_code, sl.patient_id, p.name AS patient_name
+                SELECT n.*, sl.payment_amount, sl.service_code, sl.patient_id, p.name AS patient_name, p.phone AS patient_phone
                 FROM notifications n
                 LEFT JOIN sick_leaves sl ON n.leave_id = sl.id
                 LEFT JOIN patients p ON sl.patient_id = p.id
@@ -1018,6 +1025,10 @@ if (isset($_POST['action']) && $_POST['action'] !== 'login' && $_POST['action'] 
             break;
 
 
+        case 'fetch_unread_messages_count':
+            echo json_encode(['success' => true, 'count' => getUnreadMessagesCount($pdo, intval($_SESSION['admin_user_id'] ?? 0))]);
+            break;
+
         case 'fetch_chat_users':
             $currentUserId = intval($_SESSION['admin_user_id'] ?? 0);
             if ($_SESSION['admin_role'] === 'admin') {
@@ -1027,7 +1038,7 @@ if (isset($_POST['action']) && $_POST['action'] !== 'login' && $_POST['action'] 
                 $stmt = $pdo->prepare("SELECT id, username, display_name, role FROM admin_users WHERE is_active = 1 AND role = 'admin' ORDER BY display_name");
                 $stmt->execute();
             }
-            echo json_encode(['success' => true, 'users' => $stmt->fetchAll(), 'chat_retention_hours' => intval(getSetting($pdo, 'chat_retention_hours', '0'))]);
+            echo json_encode(['success' => true, 'users' => $stmt->fetchAll(), 'chat_retention_hours' => intval(getSetting($pdo, 'chat_retention_hours', '0')), 'unread_messages_count' => getUnreadMessagesCount($pdo, intval($_SESSION['admin_user_id'] ?? 0))]);
             break;
 
         case 'fetch_messages':
@@ -2117,7 +2128,7 @@ if ($loggedIn) {
         </li>
         <li class="nav-item" role="presentation">
             <button class="nav-link" id="tab-chat" data-bs-toggle="tab" data-bs-target="#pane-chat" type="button" role="tab">
-                <i class="bi bi-chat-dots"></i> المراسلات
+                <i class="bi bi-chat-dots"></i> المراسلات <span class="badge bg-danger ms-1" id="chatUnreadBadge" style="display:none;">0</span>
             </button>
         </li>
         <li class="nav-item" role="presentation">
@@ -3405,7 +3416,7 @@ function updatePaymentNotifications(notifications) {
                 <i class="bi bi-bell-fill text-warning"></i>
                 <span class="badge bg-light text-dark ms-1">${htmlspecialchars(n.service_code || '-')}</span>
                 <span>${htmlspecialchars(n.message)}</span>
-                <br><span class="notif-patient-name"><i class="bi bi-person"></i> ${htmlspecialchars(n.patient_name || 'غير معروف')}</span>
+                <br><span class="notif-patient-name"><i class="bi bi-person"></i> ${htmlspecialchars(n.patient_name || 'غير معروف')} ${n.patient_phone ? `<a href="${formatWhatsAppLink(n.patient_phone)}" target="_blank" class="ms-1" title="واتساب"><i class="bi bi-whatsapp text-success"></i></a>` : ''}</span>
                 <br><small class="text-muted">${formatSaudiDateTime(n.created_at)}</small>
             </div>
             <div class="d-flex gap-1">
@@ -3415,6 +3426,14 @@ function updatePaymentNotifications(notifications) {
             </div>
         </li>
     `).join('');
+}
+
+function updateChatUnreadBadge(count) {
+    const badge = document.getElementById('chatUnreadBadge');
+    if (!badge) return;
+    const c = parseInt(count || 0, 10);
+    badge.textContent = c;
+    badge.style.display = c > 0 ? 'inline-block' : 'none';
 }
 
 function updateStats(stats) {
@@ -3606,6 +3625,7 @@ document.addEventListener('DOMContentLoaded', () => {
                     updateDoctorSelects(currentTableData.doctors);
                 }
                 if (result.stats) updateStats(result.stats);
+                if (result.unread_messages_count !== undefined) updateChatUnreadBadge(result.unread_messages_count);
         }
     }
 
@@ -4527,6 +4547,7 @@ document.addEventListener('DOMContentLoaded', () => {
             currentTableData.chat_users = result.users || [];
             renderChatUsers(currentTableData.chat_users);
             const rh = document.getElementById('chatRetentionHours'); if (rh && result.chat_retention_hours !== undefined) rh.value = result.chat_retention_hours;
+            if (result.unread_messages_count !== undefined) updateChatUnreadBadge(result.unread_messages_count);
         }
     }
 
@@ -4536,6 +4557,8 @@ document.addEventListener('DOMContentLoaded', () => {
         if (result.success) {
             currentTableData.chat_messages = result.messages || [];
             renderChatMessages(currentTableData.chat_messages);
+            const unreadRes = await sendAjaxRequest('fetch_unread_messages_count', {});
+            if (unreadRes.success) updateChatUnreadBadge(unreadRes.count);
         }
     }
 
@@ -4765,7 +4788,7 @@ document.addEventListener('DOMContentLoaded', () => {
     });
 
 
-    document.getElementById('btn-search-leaves').addEventListener('click', () => applyLeavesFilters());
+    document.getElementById('btn-search-leaves').addEventListener('click', () => { filtersState.leaves.search = document.getElementById('searchLeaves').value; applyLeavesFilters(); });
     document.getElementById('btn-search-archived').addEventListener('click', () => {
         filtersState.archived.search = document.getElementById('searchArchived').value;
         applyArchivedFilters();
@@ -4774,11 +4797,11 @@ document.addEventListener('DOMContentLoaded', () => {
         filtersState.queries.search = document.getElementById('searchQueries').value;
         applyQueriesFilters();
     });
-    document.getElementById('btn-search-payments').addEventListener('click', () => applyPaymentsFilters());
-    document.getElementById('btn-search-notifs').addEventListener('click', () => applyNotificationsFilters());
+    document.getElementById('btn-search-payments').addEventListener('click', () => { filtersState.payments.search = document.getElementById('searchPayments').value; applyPaymentsFilters(); });
+    document.getElementById('btn-search-notifs').addEventListener('click', () => { filtersState.notifications.search = document.getElementById('searchNotifs').value; applyNotificationsFilters(); });
 
-    document.getElementById('btn-search-doctors')?.addEventListener('click', () => applyDoctorsFilters());
-    document.getElementById('btn-search-patients')?.addEventListener('click', () => applyPatientsFilters());
+    document.getElementById('btn-search-doctors')?.addEventListener('click', () => { filtersState.doctors.search = document.getElementById('searchDoctors').value; applyDoctorsFilters(); });
+    document.getElementById('btn-search-patients')?.addEventListener('click', () => { filtersState.patients.search = document.getElementById('searchPatients').value; applyPatientsFilters(); });
 
     const deleteAllQueriesBtn = document.getElementById('deleteAllQueriesBtn') || document.getElementById('deleteAllQueries');
     if (deleteAllQueriesBtn) {
@@ -4837,6 +4860,8 @@ document.addEventListener('DOMContentLoaded', () => {
 
     renderChatUsers(currentTableData.chat_users || []);
     refreshChatUsers();
+    sendAjaxRequest('fetch_unread_messages_count', {}).then(r => { if (r.success) updateChatUnreadBadge(r.count); });
+    setInterval(() => { sendAjaxRequest('fetch_unread_messages_count', {}).then(r => { if (r.success) updateChatUnreadBadge(r.count); }); }, 15000);
     document.getElementById('chatUsersSearch')?.addEventListener('input', debounce(function() {
         const q = this.value;
         const filtered = (currentTableData.chat_users || []).filter(u => matchesSearch(u, q));
