@@ -820,7 +820,6 @@ if (isset($_POST['action']) && $_POST['action'] !== 'login' && $_POST['action'] 
             break;
 
         case 'fetch_notifications':
-            ensureDelayedUnpaidNotifications($pdo);
             $notifications = $pdo->query(" 
                 SELECT n.*, sl.payment_amount, sl.service_code, sl.patient_id, p.name AS patient_name
                 FROM notifications n
@@ -2723,36 +2722,29 @@ function debounce(fn, delay = 220) {
     };
 }
 
-function refreshSelectQuickSearchData(selectId) {
-    const select = document.getElementById(selectId);
-    if (!select) return;
-    const options = Array.from(select.options).map(opt => ({
-        value: opt.value,
-        text: opt.textContent
-    }));
-    select.dataset.fullOptions = JSON.stringify(options);
-}
-
 function setupSelectQuickSearch(searchInputId, selectId) {
     const input = document.getElementById(searchInputId);
     const select = document.getElementById(selectId);
     if (!input || !select) return;
 
-    refreshSelectQuickSearchData(selectId);
+    const originalOptions = Array.from(select.options).map(opt => ({
+        value: opt.value,
+        text: opt.textContent,
+        selected: opt.selected
+    }));
 
     const renderOptions = (term = '') => {
         const q = term.trim().toLowerCase();
         const selectedValue = select.value;
-        const allOptions = JSON.parse(select.dataset.fullOptions || '[]');
         select.innerHTML = '';
-        allOptions.forEach(opt => {
+        originalOptions.forEach(opt => {
             const alwaysKeep = opt.value === '' || opt.value === 'manual';
             const matches = alwaysKeep || !q || opt.text.toLowerCase().includes(q);
             if (!matches) return;
             const optionEl = document.createElement('option');
             optionEl.value = opt.value;
             optionEl.textContent = opt.text;
-            if (opt.value === selectedValue) optionEl.selected = true;
+            optionEl.selected = opt.value === selectedValue;
             select.appendChild(optionEl);
         });
     };
@@ -4140,16 +4132,6 @@ document.addEventListener('DOMContentLoaded', () => {
         filtersState.payments.sortOrder = 'desc';
         applyPaymentsFilters();
     });
-    document.getElementById('sortPaymentsMostLeaves').addEventListener('click', () => {
-        filtersState.payments.sortCol = 'total';
-        filtersState.payments.sortOrder = 'desc';
-        applyPaymentsFilters();
-    });
-    document.getElementById('sortPaymentsLeastLeaves').addEventListener('click', () => {
-        filtersState.payments.sortCol = 'total';
-        filtersState.payments.sortOrder = 'asc';
-        applyPaymentsFilters();
-    });
     document.getElementById('sortPaymentsReset').addEventListener('click', () => {
         filtersState.payments.sortCol = 'total';
         filtersState.payments.sortOrder = 'desc';
@@ -4188,23 +4170,6 @@ document.addEventListener('DOMContentLoaded', () => {
         document.getElementById('searchNotifs').value = '';
         applyNotificationsFilters();
     });
-
-
-    document.getElementById('btn-search-leaves').addEventListener('click', () => applyLeavesFilters());
-    document.getElementById('btn-search-archived').addEventListener('click', () => {
-        filtersState.archived.search = document.getElementById('searchArchived').value;
-        filterAndSortTable(archivedTable, currentTableData.archived, generateArchivedLeaveRow, { search: filtersState.archived.search });
-    });
-    document.getElementById('btn-search-queries').addEventListener('click', () => {
-        filtersState.queries.search = document.getElementById('searchQueries').value;
-        filterAndSortTable(queriesTable, currentTableData.queries, generateQueryRow, {
-            search: filtersState.queries.search,
-            fromDate: filtersState.queries.fromDate,
-            toDate: filtersState.queries.toDate
-        });
-    });
-    document.getElementById('btn-search-payments').addEventListener('click', () => applyPaymentsFilters());
-    document.getElementById('btn-search-notifs').addEventListener('click', () => applyNotificationsFilters());
 
     // ====== التصدير والطباعة ======
     document.getElementById('exportLeavesPdf').addEventListener('click', () => exportTableToPdf(leavesTable, 'leaves.pdf', 'الإجازات الطبية'));
