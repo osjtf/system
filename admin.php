@@ -81,6 +81,20 @@ $pdo->exec("CREATE TABLE IF NOT EXISTS user_messages (
     FOREIGN KEY (receiver_id) REFERENCES admin_users(id) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci");
 
+$pdo->exec("CREATE TABLE IF NOT EXISTS app_settings (
+    setting_key VARCHAR(100) PRIMARY KEY,
+    setting_value TEXT,
+    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci");
+
+function ensureColumn(PDO $pdo, string $table, string $column, string $definition): void {
+    $stmt = $pdo->prepare("SELECT COUNT(*) FROM information_schema.columns WHERE table_schema = DATABASE() AND table_name = ? AND column_name = ?");
+    $stmt->execute([$table, $column]);
+    if ((int)$stmt->fetchColumn() === 0) {
+        $pdo->exec("ALTER TABLE $table ADD COLUMN $column $definition");
+    }
+}
+
 function ensureIndex(PDO $pdo, string $table, string $indexName, string $columns): void {
     $check = $pdo->prepare("SELECT COUNT(*) FROM information_schema.statistics WHERE table_schema = DATABASE() AND table_name = ? AND index_name = ?");
     $check->execute([$table, $indexName]);
@@ -102,6 +116,13 @@ ensureIndex($pdo, 'patients', 'idx_patients_name', 'name');
 ensureIndex($pdo, 'doctors', 'idx_doctors_name', 'name');
 ensureIndex($pdo, 'user_messages', 'idx_user_messages_pair_created', 'sender_id, receiver_id, created_at');
 ensureIndex($pdo, 'user_messages', 'idx_user_messages_receiver_read', 'receiver_id, is_read');
+ensureColumn($pdo, 'user_messages', 'message_type', "ENUM('text','image','file','voice') DEFAULT 'text' AFTER message_text");
+ensureColumn($pdo, 'user_messages', 'file_name', "VARCHAR(255) NULL AFTER message_type");
+ensureColumn($pdo, 'user_messages', 'file_path', "VARCHAR(500) NULL AFTER file_name");
+ensureColumn($pdo, 'user_messages', 'mime_type', "VARCHAR(150) NULL AFTER file_path");
+ensureColumn($pdo, 'user_messages', 'file_size', "INT NULL AFTER mime_type");
+ensureColumn($pdo, 'user_messages', 'deleted_at', "DATETIME NULL AFTER is_read");
+ensureIndex($pdo, 'user_messages', 'idx_user_messages_deleted', 'deleted_at');
 
 // إنشاء مستخدم افتراضي إذا لم يوجد أي مستخدم
 $stmt = $pdo->query("SELECT COUNT(*) as cnt FROM admin_users");
@@ -169,33 +190,58 @@ function nowSaudi(): string {
     return (new DateTime('now', new DateTimeZone('Asia/Riyadh')))->format('Y-m-d H:i:s');
 }
 
+function getSetting(PDO $pdo, string $key, ?string $default = null): ?string {
+    $stmt = $pdo->prepare("SELECT setting_value FROM app_settings WHERE setting_key = ?");
+    $stmt->execute([$key]);
+    $v = $stmt->fetchColumn();
+    return $v === false ? $default : (string)$v;
+}
+
+function setSetting(PDO $pdo, string $key, string $value): void {
+    $stmt = $pdo->prepare("INSERT INTO app_settings (setting_key, setting_value) VALUES (?, ?) ON DUPLICATE KEY UPDATE setting_value = VALUES(setting_value)");
+    $stmt->execute([$key, $value]);
+}
+
+function purgeExpiredMessages(PDO $pdo): void {
+    $hours = intval(getSetting($pdo, 'chat_retention_hours', '0'));
+    if ($hours <= 0) return;
+    $threshold = (new DateTime('now', new DateTimeZone('Asia/Riyadh')))->modify("-{$hours} hours")->format('Y-m-d H:i:s');
+    $stmt = $pdo->prepare("SELECT id, file_path FROM user_messages WHERE deleted_at IS NULL AND created_at <= ?");
+    $stmt->execute([$threshold]);
+    $rows = $stmt->fetchAll();
+    if (!$rows) return;
+    foreach ($rows as $r) {
+        if (!empty($r['file_path'])) {
+            $full = __DIR__ . '/' . ltrim($r['file_path'], '/');
+            if (is_file($full)) @unlink($full);
+        }
+    }
+    $pdo->prepare("UPDATE user_messages SET deleted_at = ? WHERE deleted_at IS NULL AND created_at <= ?")->execute([nowSaudi(), $threshold]);
+}
+
 function generateServiceCode($pdo, $prefix, $issueDate = null) {
     $prefix = strtoupper(trim($prefix));
     if (!in_array($prefix, ['GSL', 'PSL'])) {
         $prefix = 'GSL';
     }
 
-    $issueDateObj = DateTime::createFromFormat('Y-m-d', (string)$issueDate, new DateTimeZone('Asia/Riyadh'));
-    if (!$issueDateObj) {
-        $issueDateObj = new DateTime('now', new DateTimeZone('Asia/Riyadh'));
-    }
-    $datePart = $issueDateObj->format('ymd');
-
     $stmt = $pdo->prepare("SELECT service_code FROM sick_leaves WHERE service_code LIKE ? ORDER BY id DESC LIMIT 1");
-    $stmt->execute([$prefix . $datePart . '%']);
+    $stmt->execute([$prefix . '%']);
     $last = $stmt->fetchColumn();
 
-    if ($last && preg_match('/^(?:GSL|PSL)\d{6}(\d+)$/', $last, $m)) {
+    if ($last && preg_match('/^(?:GSL|PSL)(\d+)$/', $last, $m)) {
         $num = intval($m[1]) + 1;
     } else {
         $num = 1;
     }
 
-    return $prefix . $datePart . str_pad((string)$num, 4, '0', STR_PAD_LEFT);
+    return $prefix . str_pad((string)$num, 6, '0', STR_PAD_LEFT);
 }
+
 
 function fetchAllData($pdo) {
     ensureDelayedUnpaidNotifications($pdo);
+    purgeExpiredMessages($pdo);
     // الإجازات النشطة
     $leaves = $pdo->query(" 
         SELECT sl.*, p.name AS patient_name, p.identity_number, p.phone AS patient_phone,
@@ -270,6 +316,7 @@ function fetchAllData($pdo) {
 
 function fetchActiveOperationalData($pdo) {
     ensureDelayedUnpaidNotifications($pdo);
+    purgeExpiredMessages($pdo);
     $leaves = $pdo->query(" 
         SELECT sl.*, p.name AS patient_name, p.identity_number, p.phone AS patient_phone,
                d.name AS doctor_name, d.title AS doctor_title, d.note AS doctor_note,
@@ -976,7 +1023,7 @@ if (isset($_POST['action']) && $_POST['action'] !== 'login' && $_POST['action'] 
                 $stmt = $pdo->prepare("SELECT id, username, display_name, role FROM admin_users WHERE is_active = 1 AND role = 'admin' ORDER BY display_name");
                 $stmt->execute();
             }
-            echo json_encode(['success' => true, 'users' => $stmt->fetchAll()]);
+            echo json_encode(['success' => true, 'users' => $stmt->fetchAll(), 'chat_retention_hours' => intval(getSetting($pdo, 'chat_retention_hours', '0'))]);
             break;
 
         case 'fetch_messages':
@@ -993,8 +1040,8 @@ if (isset($_POST['action']) && $_POST['action'] !== 'login' && $_POST['action'] 
                 FROM user_messages um
                 LEFT JOIN admin_users s ON um.sender_id = s.id
                 LEFT JOIN admin_users r ON um.receiver_id = r.id
-                WHERE (um.sender_id = ? AND um.receiver_id = ?)
-                   OR (um.sender_id = ? AND um.receiver_id = ?)
+                WHERE um.deleted_at IS NULL AND ((um.sender_id = ? AND um.receiver_id = ?)
+                   OR (um.sender_id = ? AND um.receiver_id = ?))
                 ORDER BY um.created_at ASC, um.id ASC
                 LIMIT 500
             ");
@@ -1009,7 +1056,7 @@ if (isset($_POST['action']) && $_POST['action'] !== 'login' && $_POST['action'] 
             $peerId = intval($_POST['peer_id'] ?? 0);
             $messageText = trim($_POST['message_text'] ?? '');
             $me = intval($_SESSION['admin_user_id'] ?? 0);
-            if ($peerId <= 0 || $me <= 0 || $messageText === '') {
+            if ($peerId <= 0 || $me <= 0) {
                 echo json_encode(['success' => false, 'message' => 'بيانات الرسالة غير مكتملة.']);
                 break;
             }
@@ -1019,9 +1066,87 @@ if (isset($_POST['action']) && $_POST['action'] !== 'login' && $_POST['action'] 
                 echo json_encode(['success' => false, 'message' => 'المستخدم غير موجود أو غير مفعل.']);
                 break;
             }
-            $ins = $pdo->prepare("INSERT INTO user_messages (sender_id, receiver_id, message_text, created_at) VALUES (?, ?, ?, ?)");
-            $ins->execute([$me, $peerId, $messageText, nowSaudi()]);
+
+            $messageType = 'text';
+            $fileName = null; $filePath = null; $mimeType = null; $fileSize = null;
+            if (!empty($_FILES['chat_file']) && intval($_FILES['chat_file']['error']) === UPLOAD_ERR_OK) {
+                $upload = $_FILES['chat_file'];
+                $ext = strtolower(pathinfo($upload['name'], PATHINFO_EXTENSION));
+                $allowed = ['jpg','jpeg','png','gif','webp','pdf','doc','docx','xls','xlsx','txt','mp3','wav','ogg','m4a','aac','mp4'];
+                if (!in_array($ext, $allowed)) {
+                    echo json_encode(['success' => false, 'message' => 'نوع الملف غير مسموح.']);
+                    break;
+                }
+                $mimeType = mime_content_type($upload['tmp_name']) ?: 'application/octet-stream';
+                $fileSize = intval($upload['size'] ?? 0);
+                if ($fileSize > 15 * 1024 * 1024) {
+                    echo json_encode(['success' => false, 'message' => 'حجم الملف كبير (الحد 15MB).']);
+                    break;
+                }
+                $dir = __DIR__ . '/uploads/chat';
+                if (!is_dir($dir)) { @mkdir($dir, 0775, true); }
+                $safe = bin2hex(random_bytes(8)) . '_' . time() . '.' . $ext;
+                $target = $dir . '/' . $safe;
+                if (!move_uploaded_file($upload['tmp_name'], $target)) {
+                    echo json_encode(['success' => false, 'message' => 'تعذر رفع الملف.']);
+                    break;
+                }
+                $fileName = $upload['name'];
+                $filePath = 'uploads/chat/' . $safe;
+                $messageType = (str_starts_with($mimeType, 'image/')) ? 'image' : ((str_starts_with($mimeType, 'audio/')) ? 'voice' : 'file');
+            }
+
+            if ($messageText === '' && !$filePath) {
+                echo json_encode(['success' => false, 'message' => 'أدخل نصاً أو أرفق ملفاً.']);
+                break;
+            }
+
+            $ins = $pdo->prepare("INSERT INTO user_messages (sender_id, receiver_id, message_text, message_type, file_name, file_path, mime_type, file_size, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)");
+            $ins->execute([$me, $peerId, $messageText, $messageType, $fileName, $filePath, $mimeType, $fileSize, nowSaudi()]);
             echo json_encode(['success' => true, 'message' => 'تم إرسال الرسالة.']);
+            break;
+
+        case 'delete_message':
+            $messageId = intval($_POST['message_id'] ?? 0);
+            $me = intval($_SESSION['admin_user_id'] ?? 0);
+            $role = $_SESSION['admin_role'] ?? 'user';
+            $stmt = $pdo->prepare("SELECT sender_id, file_path, deleted_at FROM user_messages WHERE id = ? LIMIT 1");
+            $stmt->execute([$messageId]);
+            $msg = $stmt->fetch();
+            if (!$msg || !empty($msg['deleted_at'])) {
+                echo json_encode(['success' => false, 'message' => 'الرسالة غير موجودة.']);
+                break;
+            }
+            if ($role !== 'admin' && intval($msg['sender_id']) !== $me) {
+                echo json_encode(['success' => false, 'message' => 'لا تملك صلاحية حذف هذه الرسالة.']);
+                break;
+            }
+            if (!empty($msg['file_path'])) {
+                $full = __DIR__ . '/' . ltrim($msg['file_path'], '/');
+                if (is_file($full)) @unlink($full);
+            }
+            $pdo->prepare("UPDATE user_messages SET deleted_at = ? WHERE id = ?")->execute([nowSaudi(), $messageId]);
+            echo json_encode(['success' => true, 'message' => 'تم حذف الرسالة.']);
+            break;
+
+        case 'set_chat_retention':
+            if (($_SESSION['admin_role'] ?? 'user') !== 'admin') {
+                echo json_encode(['success' => false, 'message' => 'ليس لديك صلاحية.']);
+                break;
+            }
+            $hours = max(0, intval($_POST['hours'] ?? 0));
+            setSetting($pdo, 'chat_retention_hours', (string)$hours);
+            purgeExpiredMessages($pdo);
+            echo json_encode(['success' => true, 'message' => 'تم حفظ مدة الحذف التلقائي.', 'hours' => $hours]);
+            break;
+
+        case 'run_chat_cleanup':
+            if (($_SESSION['admin_role'] ?? 'user') !== 'admin') {
+                echo json_encode(['success' => false, 'message' => 'ليس لديك صلاحية.']);
+                break;
+            }
+            purgeExpiredMessages($pdo);
+            echo json_encode(['success' => true, 'message' => 'تم تنظيف المحادثات حسب المدة.']);
             break;
 
         // ======================== إدارة المستخدمين ========================
@@ -2296,13 +2421,27 @@ if ($loggedIn) {
                         <div class="col-lg-4">
                             <input type="text" class="form-control mb-2" id="chatUsersSearch" placeholder="بحث مستخدم...">
                             <select class="form-select mb-2" id="chatPeerSelect"></select>
-                            <button class="btn btn-sm btn-outline-secondary" id="refreshChatUsersBtn"><i class="bi bi-arrow-repeat"></i> تحديث المستخدمين</button>
+                            <button class="btn btn-sm btn-outline-secondary mb-2" id="refreshChatUsersBtn"><i class="bi bi-arrow-repeat"></i> تحديث المستخدمين</button>
+                            <?php if ($_SESSION['admin_role'] === 'admin'): ?>
+                            <div class="input-group input-group-sm mb-2">
+                                <span class="input-group-text">حذف تلقائي بعد (س)</span>
+                                <input type="number" min="0" class="form-control" id="chatRetentionHours" placeholder="0 = تعطيل">
+                            </div>
+                            <div class="d-flex gap-2">
+                                <button class="btn btn-sm btn-warning" id="saveChatRetentionBtn">حفظ المدة</button>
+                                <button class="btn btn-sm btn-outline-danger" id="runChatCleanupBtn">تنظيف الآن</button>
+                            </div>
+                            <?php endif; ?>
                         </div>
                         <div class="col-lg-8">
                             <div id="chatMessagesBox" class="border rounded p-2 mb-2" style="height:320px; overflow:auto; background:#f8f9fa;"></div>
-                            <div class="input-group">
+                            <div class="input-group mb-2">
                                 <input type="text" class="form-control" id="chatMessageInput" placeholder="اكتب رسالتك...">
                                 <button class="btn btn-gradient" id="sendChatMessageBtn"><i class="bi bi-send"></i> إرسال</button>
+                            </div>
+                            <div class="input-group input-group-sm">
+                                <input type="file" class="form-control" id="chatFileInput" accept="image/*,audio/*,.pdf,.doc,.docx,.xls,.xlsx,.txt,.mp4">
+                                <button class="btn btn-outline-secondary" id="clearChatFileBtn" type="button">إلغاء المرفق</button>
                             </div>
                         </div>
                     </div>
@@ -2851,19 +2990,13 @@ function formatSaudiDateTime(dateValue) {
     const str = String(dateValue).trim();
     const m = str.match(/^(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2})(?::(\d{2}))?$/);
     if (!m) return htmlspecialchars(str);
-    const dt = new Date(Date.UTC(parseInt(m[1], 10), parseInt(m[2], 10) - 1, parseInt(m[3], 10), parseInt(m[4], 10), parseInt(m[5], 10), parseInt(m[6] || '0', 10)));
-    const parts = new Intl.DateTimeFormat('en-GB', {
-        timeZone: 'Asia/Riyadh',
-        year: 'numeric', month: '2-digit', day: '2-digit',
-        hour: '2-digit', minute: '2-digit', second: '2-digit',
-        hour12: false
-    }).formatToParts(dt).reduce((acc, part) => (acc[part.type] = part.value, acc), {});
-    let hour = parseInt(parts.hour || '0', 10);
+    let hour = parseInt(m[4], 10);
     const ampm = hour >= 12 ? 'م' : 'ص';
     hour = hour % 12;
     if (hour === 0) hour = 12;
     const hh = String(hour).padStart(2, '0');
-    return `${parts.day}/${parts.month}/${parts.year} ${hh}:${parts.minute}:${parts.second} ${ampm} (السعودية)`;
+    const ss = m[6] || '00';
+    return `${m[3]}/${m[2]}/${m[1]} ${hh}:${m[5]}:${ss} ${ampm} (السعودية)`;
 }
 
 function showToast(msg, type = 'success') {
@@ -2935,7 +3068,7 @@ function normalizeSearchText(value) {
         .replace(/[ئ]/g, 'ي')
         .replace(/[ة]/g, 'ه')
         .replace(/[٠-٩]/g, d => String('٠١٢٣٤٥٦٧٨٩'.indexOf(d)))
-        .replace(/[^\p{L}\p{N}\s]/gu, ' ')
+        .replace(/[^a-z0-9\u0600-\u06FF\s]/g, ' ')
         .replace(/\s+/g, ' ')
         .trim();
 }
@@ -4364,7 +4497,9 @@ document.addEventListener('DOMContentLoaded', () => {
         const me = String(<?php echo intval($_SESSION['admin_user_id'] ?? 0); ?>);
         const rows = (list || []).map(m => {
             const mine = String(m.sender_id) === me;
-            return `<div class="mb-2 d-flex ${mine ? 'justify-content-start' : 'justify-content-end'}"><div class="p-2 rounded" style="max-width:78%; background:${mine ? '#d1e7dd' : '#e2e3e5'}"><div class="small fw-bold">${htmlspecialchars(m.sender_name || '')}</div><div>${htmlspecialchars(m.message_text || '')}</div><div class="small text-muted">${formatSaudiDateTime(m.created_at)}</div></div></div>`;
+            const fileHtml = m.file_path ? (m.message_type === 'image' ? `<div><img src="${htmlspecialchars(m.file_path)}" style="max-width:220px;border-radius:8px;"></div>` : (m.message_type === 'voice' ? `<audio controls src="${htmlspecialchars(m.file_path)}" style="max-width:240px;"></audio>` : `<a href="${htmlspecialchars(m.file_path)}" target="_blank" class="btn btn-sm btn-outline-primary mt-1"><i class="bi bi-paperclip"></i> ${htmlspecialchars(m.file_name || 'ملف')}</a>`)) : '';
+            const delBtn = mine || IS_ADMIN ? `<button class="btn btn-sm btn-outline-danger mt-1 btn-delete-chat-message" data-id="${m.id}"><i class="bi bi-trash3"></i></button>` : '';
+            return `<div class="mb-2 d-flex ${mine ? 'justify-content-start' : 'justify-content-end'}"><div class="p-2 rounded" style="max-width:78%; background:${mine ? '#d1e7dd' : '#e2e3e5'}"><div class="small fw-bold">${htmlspecialchars(m.sender_name || '')}</div><div>${htmlspecialchars(m.message_text || '')}</div>${fileHtml}<div class="small text-muted">${formatSaudiDateTime(m.created_at)}</div>${delBtn}</div></div>`;
         }).join('');
         box.innerHTML = rows || '<div class="text-muted text-center mt-4">لا توجد رسائل بعد.</div>';
         box.scrollTop = box.scrollHeight;
@@ -4375,6 +4510,7 @@ document.addEventListener('DOMContentLoaded', () => {
         if (result.success) {
             currentTableData.chat_users = result.users || [];
             renderChatUsers(currentTableData.chat_users);
+            const rh = document.getElementById('chatRetentionHours'); if (rh && result.chat_retention_hours !== undefined) rh.value = result.chat_retention_hours;
         }
     }
 
@@ -4684,6 +4820,7 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     renderChatUsers(currentTableData.chat_users || []);
+    refreshChatUsers();
     document.getElementById('chatUsersSearch')?.addEventListener('input', debounce(function() {
         const q = this.value;
         const filtered = (currentTableData.chat_users || []).filter(u => matchesSearch(u, q));
@@ -4697,10 +4834,15 @@ document.addEventListener('DOMContentLoaded', () => {
     document.getElementById('sendChatMessageBtn')?.addEventListener('click', async () => {
         const input = document.getElementById('chatMessageInput');
         const text = (input?.value || '').trim();
-        if (!activeChatPeerId || !text) return;
-        const result = await sendAjaxRequest('send_message', { peer_id: activeChatPeerId, message_text: text });
+        const fileInput = document.getElementById('chatFileInput');
+        const file = fileInput?.files?.[0] || null;
+        if (!activeChatPeerId || (!text && !file)) return;
+        const payload = { peer_id: activeChatPeerId, message_text: text };
+        if (file) payload.chat_file = file;
+        const result = await sendAjaxRequest('send_message', payload);
         if (result.success) {
             input.value = '';
+            if (fileInput) fileInput.value = '';
             await loadChatMessages();
         }
     });
@@ -4711,6 +4853,25 @@ document.addEventListener('DOMContentLoaded', () => {
         }
     });
     setInterval(() => { if (activeChatPeerId) loadChatMessages(); }, 7000);
+
+    document.getElementById('clearChatFileBtn')?.addEventListener('click', () => {
+        const f = document.getElementById('chatFileInput');
+        if (f) f.value = '';
+    });
+    document.getElementById('chatMessagesBox')?.addEventListener('click', async (e) => {
+        const btn = e.target.closest('.btn-delete-chat-message');
+        if (!btn) return;
+        const result = await sendAjaxRequest('delete_message', { message_id: btn.dataset.id });
+        if (result.success) await loadChatMessages();
+    });
+    document.getElementById('saveChatRetentionBtn')?.addEventListener('click', async () => {
+        const h = document.getElementById('chatRetentionHours')?.value || '0';
+        await sendAjaxRequest('set_chat_retention', { hours: h });
+    });
+    document.getElementById('runChatCleanupBtn')?.addEventListener('click', async () => {
+        const result = await sendAjaxRequest('run_chat_cleanup', {});
+        if (result.success) await loadChatMessages();
+    });
 
 
     // ====== التصدير والطباعة ======
