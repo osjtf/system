@@ -801,6 +801,24 @@ if (isset($_POST['action']) && $_POST['action'] !== 'login' && $_POST['action'] 
 
         case 'fetch_leave_details':
             $leave_id = intval($_POST['leave_id'] ?? 0);
+
+            $statusStmt = $pdo->prepare("SELECT id, deleted_at FROM sick_leaves WHERE id = ? LIMIT 1");
+            $statusStmt->execute([$leave_id]);
+            $status = $statusStmt->fetch();
+
+            if (!$status) {
+                echo json_encode(['success' => false, 'message' => 'لم يتم العثور على الإجازة.']);
+                break;
+            }
+
+            $source = $status['deleted_at'] ? 'archived_lookup' : 'admin_lookup';
+            $pdo->prepare("INSERT INTO leave_queries (leave_id, queried_at, source) VALUES (?, NOW(), ?)")->execute([$leave_id, $source]);
+
+            if ($status['deleted_at']) {
+                echo json_encode(['success' => false, 'message' => 'لم يتم العثور على الإجازة.']);
+                break;
+            }
+
             $stmt = $pdo->prepare("
                 SELECT sl.*, p.name AS patient_name, p.identity_number,
                        d.name AS doctor_name, d.title AS doctor_title, d.note AS doctor_note,
@@ -808,7 +826,7 @@ if (isset($_POST['action']) && $_POST['action'] !== 'login' && $_POST['action'] 
                 FROM sick_leaves sl
                 LEFT JOIN patients p ON sl.patient_id = p.id
                 LEFT JOIN doctors d ON sl.doctor_id = d.id
-                WHERE sl.id = ?
+                WHERE sl.id = ? AND sl.deleted_at IS NULL
             ");
             $stmt->execute([$leave_id]);
             $leave = $stmt->fetch();
@@ -820,6 +838,7 @@ if (isset($_POST['action']) && $_POST['action'] !== 'login' && $_POST['action'] 
             break;
 
         case 'fetch_notifications':
+            ensureDelayedUnpaidNotifications($pdo);
             $notifications = $pdo->query(" 
                 SELECT n.*, sl.payment_amount, sl.service_code, sl.patient_id, p.name AS patient_name
                 FROM notifications n
@@ -2017,6 +2036,7 @@ if ($loggedIn) {
                                     <th>مدفوعة</th>
                                     <th>المبلغ</th>
                                     <th>تاريخ الأرشفة</th>
+                                    <th>الاستعلامات</th>
                                     <th>التحكم</th>
                                 </tr>
                             </thead>
@@ -2605,6 +2625,14 @@ function formatWhatsAppLink(phone) {
     return `https://wa.me/${digits}`;
 }
 
+function formatSaudiDateTime(dateValue) {
+    if (!dateValue) return '';
+    const normalized = String(dateValue).replace(' ' ,'T');
+    const date = new Date(normalized);
+    if (Number.isNaN(date.getTime())) return htmlspecialchars(dateValue);
+    return new Intl.DateTimeFormat('ar-SA', { timeZone: 'Asia/Riyadh', year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: true }).format(date);
+}
+
 function showToast(msg, type = 'success') {
     const container = document.getElementById('alert-container');
     const icons = { success: 'bi-check-circle-fill', danger: 'bi-x-circle-fill', warning: 'bi-exclamation-triangle-fill', info: 'bi-info-circle-fill' };
@@ -2722,29 +2750,36 @@ function debounce(fn, delay = 220) {
     };
 }
 
+function refreshSelectQuickSearchData(selectId) {
+    const select = document.getElementById(selectId);
+    if (!select) return;
+    const options = Array.from(select.options).map(opt => ({
+        value: opt.value,
+        text: opt.textContent
+    }));
+    select.dataset.fullOptions = JSON.stringify(options);
+}
+
 function setupSelectQuickSearch(searchInputId, selectId) {
     const input = document.getElementById(searchInputId);
     const select = document.getElementById(selectId);
     if (!input || !select) return;
 
-    const originalOptions = Array.from(select.options).map(opt => ({
-        value: opt.value,
-        text: opt.textContent,
-        selected: opt.selected
-    }));
+    refreshSelectQuickSearchData(selectId);
 
     const renderOptions = (term = '') => {
         const q = term.trim().toLowerCase();
         const selectedValue = select.value;
+        const allOptions = JSON.parse(select.dataset.fullOptions || '[]');
         select.innerHTML = '';
-        originalOptions.forEach(opt => {
+        allOptions.forEach(opt => {
             const alwaysKeep = opt.value === '' || opt.value === 'manual';
             const matches = alwaysKeep || !q || opt.text.toLowerCase().includes(q);
             if (!matches) return;
             const optionEl = document.createElement('option');
             optionEl.value = opt.value;
             optionEl.textContent = opt.text;
-            optionEl.selected = opt.value === selectedValue;
+            if (opt.value === selectedValue) optionEl.selected = true;
             select.appendChild(optionEl);
         });
     };
@@ -2841,6 +2876,9 @@ function generateArchivedLeaveRow(lv) {
             <td>${paidBadge}</td>
             <td>${parseFloat(lv.payment_amount).toFixed(2)}</td>
             <td>${htmlspecialchars(lv.deleted_at)}</td>
+            <td class="cell-queries-count">${lv.queries_count || 0}
+                <button class="btn btn-sm btn-outline-info action-btn btn-view-queries" data-leave-id="${lv.id}" title="عرض الاستعلامات"><i class="bi bi-eye btn-view-queries" data-leave-id="${lv.id}"></i></button>
+            </td>
             <td>
                 <button class="btn btn-sm btn-success-custom action-btn btn-restore-leave" data-id="${lv.id}" title="استعادة"><i class="bi bi-arrow-counterclockwise btn-restore-leave" data-id="${lv.id}"></i></button>
                 <button class="btn btn-sm btn-danger-custom action-btn btn-force-delete" data-id="${lv.id}" title="حذف نهائي"><i class="bi bi-trash3 btn-force-delete" data-id="${lv.id}"></i></button>
@@ -2883,7 +2921,7 @@ function generateQueryRow(q) {
             <td><strong>${htmlspecialchars(q.service_code)}</strong></td>
             <td>${htmlspecialchars(q.patient_name)}</td>
             <td>${htmlspecialchars(q.identity_number)}</td>
-            <td>${htmlspecialchars(q.queried_at)}</td>
+            <td>${formatSaudiDateTime(q.queried_at)}</td>
             <td>${htmlspecialchars(q.source || 'admin')}</td>
             <td>
                 <button class="btn btn-sm btn-gradient action-btn btn-view-leave-from-query" data-leave-id="${q.leave_id}"><i class="bi bi-eye btn-view-leave-from-query" data-leave-id="${q.leave_id}"></i></button>
@@ -2933,7 +2971,7 @@ function renderDetailQueries(queries) {
     container.innerHTML = queries.map((q, i) => `
         <li class="list-group-item d-flex justify-content-between align-items-center" data-id="${q.id}">
             <div>
-                <strong>#${i + 1}</strong> - ${htmlspecialchars(q.queried_at)}
+                <strong>#${i + 1}</strong> - ${formatSaudiDateTime(q.queried_at)}
                 <span class="badge bg-secondary">${htmlspecialchars(q.source || 'admin')}</span>
             </div>
             <button class="btn btn-sm btn-danger-custom btn-delete-detail-query" data-id="${q.id}"><i class="bi bi-trash3 btn-delete-detail-query" data-id="${q.id}"></i></button>
@@ -3148,11 +3186,7 @@ document.addEventListener('DOMContentLoaded', () => {
             if (Array.isArray(result.payments)) currentTableData.payments = result.payments;
             if (Array.isArray(result.notifications_payment)) currentTableData.notifications_payment = result.notifications_payment;
 
-            updateTable(leavesTable, currentTableData.leaves, generateLeaveRow);
-            updateTable(archivedTable, currentTableData.archived, generateArchivedLeaveRow);
-            updateTable(queriesTable, currentTableData.queries, generateQueryRow);
-            updateTable(paymentsTable, currentTableData.payments, generatePaymentPatientRow);
-            updatePaymentNotifications(currentTableData.notifications_payment);
+            applyAllCurrentFilters();
 
             if (result.stats) updateStats(result.stats);
         }
@@ -3182,13 +3216,13 @@ document.addEventListener('DOMContentLoaded', () => {
         const docRes = await sendAjaxRequest('fetch_doctors', {});
         if (docRes.success) {
             currentTableData.doctors = docRes.doctors;
-            updateTable(doctorsTable, currentTableData.doctors, generateDoctorRow);
+            applyDoctorsFilters();
             updateDoctorSelects(currentTableData.doctors);
         }
         const patRes = await sendAjaxRequest('fetch_patients', {});
         if (patRes.success) {
             currentTableData.patients = patRes.patients;
-            updateTable(patientsTable, currentTableData.patients, generatePatientRow);
+            applyPatientsFilters();
             updatePatientSelects(currentTableData.patients);
         }
         hideLoading();
@@ -3280,10 +3314,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 document.getElementById('filterToDate').value = '';
                 document.getElementById('filterType').value = '';
                 applyLeavesFilters();
-                updateTable(archivedTable, currentTableData.archived, generateArchivedLeaveRow);
-                updateTable(queriesTable, currentTableData.queries, generateQueryRow);
-                updateTable(paymentsTable, currentTableData.payments, generatePaymentPatientRow);
-                updatePaymentNotifications(currentTableData.notifications_payment);
+                applyAllCurrentFilters();
                 if (result.stats) updateStats(result.stats);
                 // التبديل لتبويب الإجازات
                 document.getElementById('tab-leaves').click();
@@ -3361,10 +3392,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 document.getElementById('filterFromDate').value = '';
                 document.getElementById('filterToDate').value = '';
                 document.getElementById('filterType').value = '';
-                applyLeavesFilters();
-                updateTable(archivedTable, currentTableData.archived, generateArchivedLeaveRow);
-                updateTable(queriesTable, currentTableData.queries, generateQueryRow);
-                updateTable(paymentsTable, currentTableData.payments, generatePaymentPatientRow);
+                applyAllCurrentFilters();
                 if (result.stats) updateStats(result.stats);
             } else { showToast(result.message, 'danger'); }
         } catch (err) { hideLoading(); showToast('خطأ في الاتصال.', 'danger'); }
@@ -3450,10 +3478,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 document.getElementById('filterToDate').value = '';
                 document.getElementById('filterType').value = '';
                 applyLeavesFilters();
-                updateTable(archivedTable, currentTableData.archived, generateArchivedLeaveRow);
-                updateTable(queriesTable, currentTableData.queries, generateQueryRow);
-                updateTable(paymentsTable, currentTableData.payments, generatePaymentPatientRow);
-                updatePaymentNotifications(currentTableData.notifications_payment);
+                applyAllCurrentFilters();
                 if (result.stats) updateStats(result.stats);
             } else { showToast(result.message, 'danger'); }
         } catch (err) { hideLoading(); showToast('خطأ في الاتصال.', 'danger'); }
@@ -3476,9 +3501,9 @@ document.addEventListener('DOMContentLoaded', () => {
                 if (Array.isArray(result.leaves)) currentTableData.leaves = result.leaves;
                 if (Array.isArray(result.archived)) currentTableData.archived = result.archived;
                 if (Array.isArray(result.payments)) currentTableData.payments = result.payments;
-                updateTable(leavesTable, currentTableData.leaves, generateLeaveRow);
-                updateTable(archivedTable, currentTableData.archived, generateArchivedLeaveRow);
-                updateTable(paymentsTable, currentTableData.payments, generatePaymentPatientRow);
+                applyLeavesFilters();
+                applyArchivedFilters();
+                applyPaymentsFilters();
                 if (result.stats) updateStats(result.stats);
             }
         };
@@ -3502,9 +3527,9 @@ document.addEventListener('DOMContentLoaded', () => {
                 if (Array.isArray(result.leaves)) currentTableData.leaves = result.leaves;
                 if (Array.isArray(result.archived)) currentTableData.archived = result.archived;
                 if (Array.isArray(result.payments)) currentTableData.payments = result.payments;
-                updateTable(leavesTable, currentTableData.leaves, generateLeaveRow);
-                updateTable(archivedTable, currentTableData.archived, generateArchivedLeaveRow);
-                updateTable(paymentsTable, currentTableData.payments, generatePaymentPatientRow);
+                applyLeavesFilters();
+                applyArchivedFilters();
+                applyPaymentsFilters();
                 if (result.stats) updateStats(result.stats);
             }
         };
@@ -3527,8 +3552,8 @@ document.addEventListener('DOMContentLoaded', () => {
                 showToast(result.message, 'success');
                 if (Array.isArray(result.leaves)) currentTableData.leaves = result.leaves;
                 if (Array.isArray(result.archived)) currentTableData.archived = result.archived;
-                updateTable(leavesTable, currentTableData.leaves, generateLeaveRow);
-                updateTable(archivedTable, currentTableData.archived, generateArchivedLeaveRow);
+                applyLeavesFilters();
+                applyArchivedFilters();
                 if (result.stats) updateStats(result.stats);
             }
         };
@@ -3546,7 +3571,7 @@ document.addEventListener('DOMContentLoaded', () => {
             if (result.success) {
                 showToast(result.message, 'success');
                 if (Array.isArray(result.archived)) currentTableData.archived = result.archived;
-                updateTable(archivedTable, currentTableData.archived, generateArchivedLeaveRow);
+                applyArchivedFilters();
                 if (result.stats) updateStats(result.stats);
             }
         };
@@ -3574,6 +3599,23 @@ document.addEventListener('DOMContentLoaded', () => {
 
     // ====== عرض تفاصيل الاستعلامات ======
     leavesTable.addEventListener('click', async (e) => {
+        const target = e.target.closest('.btn-view-queries') || (e.target.classList.contains('btn-view-queries') ? e.target : null);
+        if (!target) return;
+        const leaveId = target.dataset.leaveId;
+        currentConfirmId = leaveId;
+        queriesDetailsContainer.innerHTML = '<li class="list-group-item text-center">جارٍ جلب البيانات...</li>';
+        viewQueriesModal.show();
+        const result = await sendAjaxRequest('fetch_queries', { leave_id: leaveId });
+        if (result.success) {
+            currentDetailQueries = result.queries;
+            renderDetailQueries(currentDetailQueries);
+        } else {
+            queriesDetailsContainer.innerHTML = '<li class="list-group-item text-center text-danger">فشل في جلب البيانات.</li>';
+        }
+    });
+
+
+    archivedTable.addEventListener('click', async (e) => {
         const target = e.target.closest('.btn-view-queries') || (e.target.classList.contains('btn-view-queries') ? e.target : null);
         if (!target) return;
         const leaveId = target.dataset.leaveId;
@@ -3750,7 +3792,7 @@ document.addEventListener('DOMContentLoaded', () => {
             e.target.reset();
             currentTableData.doctors = result.doctors;
             document.getElementById('searchDoctors').value = '';
-            updateTable(doctorsTable, currentTableData.doctors, generateDoctorRow);
+            applyDoctorsFilters();
             updateDoctorSelects(currentTableData.doctors);
             if (result.stats) updateStats(result.stats);
         } else { showToast(result.message, 'danger'); }
@@ -3776,7 +3818,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 if (result.success) {
                     showToast(result.message, 'success');
                     currentTableData.doctors = result.doctors;
-                    updateTable(doctorsTable, currentTableData.doctors, generateDoctorRow);
+                    applyDoctorsFilters();
                     updateDoctorSelects(currentTableData.doctors);
                     if (result.stats) updateStats(result.stats);
                 }
@@ -3798,7 +3840,7 @@ document.addEventListener('DOMContentLoaded', () => {
             editDoctorModal.hide();
             currentTableData.doctors = result.doctors;
             document.getElementById('searchDoctors').value = '';
-            updateTable(doctorsTable, currentTableData.doctors, generateDoctorRow);
+            applyDoctorsFilters();
             updateDoctorSelects(currentTableData.doctors);
         } else { showToast(result.message, 'danger'); }
     });
@@ -3818,7 +3860,7 @@ document.addEventListener('DOMContentLoaded', () => {
             e.target.reset();
             currentTableData.patients = result.patients;
             document.getElementById('searchPatients').value = '';
-            updateTable(patientsTable, currentTableData.patients, generatePatientRow);
+            applyPatientsFilters();
             updatePatientSelects(currentTableData.patients);
             if (result.stats) updateStats(result.stats);
         } else { showToast(result.message, 'danger'); }
@@ -3844,7 +3886,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 if (result.success) {
                     showToast(result.message, 'success');
                     currentTableData.patients = result.patients;
-                    updateTable(patientsTable, currentTableData.patients, generatePatientRow);
+                    applyPatientsFilters();
                     updatePatientSelects(currentTableData.patients);
                     if (result.stats) updateStats(result.stats);
                 }
@@ -3866,7 +3908,7 @@ document.addEventListener('DOMContentLoaded', () => {
             editPatientModal.hide();
             currentTableData.patients = result.patients;
             document.getElementById('searchPatients').value = '';
-            updateTable(patientsTable, currentTableData.patients, generatePatientRow);
+            applyPatientsFilters();
             updatePatientSelects(currentTableData.patients);
         } else { showToast(result.message, 'danger'); }
     });
@@ -4026,14 +4068,41 @@ document.addEventListener('DOMContentLoaded', () => {
         }, filtersState.payments.sortCol, filtersState.payments.sortOrder);
     }
 
+    function applyArchivedFilters() {
+        filterAndSortTable(archivedTable, currentTableData.archived, generateArchivedLeaveRow, { search: filtersState.archived.search });
+    }
+
+    function applyQueriesFilters() {
+        filterAndSortTable(queriesTable, currentTableData.queries, generateQueryRow, {
+            search: filtersState.queries.search,
+            fromDate: filtersState.queries.fromDate,
+            toDate: filtersState.queries.toDate
+        });
+    }
+
+    function applyDoctorsFilters() {
+        filterAndSortTable(doctorsTable, currentTableData.doctors, generateDoctorRow, { search: filtersState.doctors.search });
+    }
+
+    function applyPatientsFilters() {
+        filterAndSortTable(patientsTable, currentTableData.patients, generatePatientRow, { search: filtersState.patients.search });
+    }
+
+    function applyAllCurrentFilters() {
+        applyLeavesFilters();
+        applyArchivedFilters();
+        applyQueriesFilters();
+        applyDoctorsFilters();
+        applyPatientsFilters();
+        applyPaymentsFilters();
+        applyNotificationsFilters();
+    }
+
     function applyNotificationsFilters() {
         let data = [...(currentTableData.notifications_payment || [])];
         const search = (filtersState.notifications.search || '').toLowerCase();
         if (search) {
-            data = data.filter(n => {
-                const text = `${n.message || ''} ${n.patient_name || ''} ${n.service_code || ''}`.toLowerCase();
-                return text.includes(search);
-            });
+            data = data.filter(n => JSON.stringify(n || {}).toLowerCase().includes(search));
         }
 
         if (filtersState.notifications.sortMode === 'oldest') {
@@ -4063,26 +4132,22 @@ document.addEventListener('DOMContentLoaded', () => {
 
     document.getElementById('searchArchived').addEventListener('input', debounce(function() {
         filtersState.archived.search = this.value;
-        filterAndSortTable(archivedTable, currentTableData.archived, generateArchivedLeaveRow, { search: filtersState.archived.search });
+        applyArchivedFilters();
     }));
 
     document.getElementById('searchQueries').addEventListener('input', debounce(function() {
         filtersState.queries.search = this.value;
-        filterAndSortTable(queriesTable, currentTableData.queries, generateQueryRow, {
-            search: filtersState.queries.search,
-            fromDate: filtersState.queries.fromDate,
-            toDate: filtersState.queries.toDate
-        });
+        applyQueriesFilters();
     }));
 
     document.getElementById('searchDoctors').addEventListener('input', debounce(function() {
         filtersState.doctors.search = this.value;
-        filterAndSortTable(doctorsTable, currentTableData.doctors, generateDoctorRow, { search: filtersState.doctors.search });
+        applyDoctorsFilters();
     }));
 
     document.getElementById('searchPatients').addEventListener('input', debounce(function() {
         filtersState.patients.search = this.value;
-        filterAndSortTable(patientsTable, currentTableData.patients, generatePatientRow, { search: filtersState.patients.search });
+        applyPatientsFilters();
     }));
 
     document.getElementById('searchPayments').addEventListener('input', debounce(function() {
@@ -4132,6 +4197,16 @@ document.addEventListener('DOMContentLoaded', () => {
         filtersState.payments.sortOrder = 'desc';
         applyPaymentsFilters();
     });
+    document.getElementById('sortPaymentsMostLeaves').addEventListener('click', () => {
+        filtersState.payments.sortCol = 'total';
+        filtersState.payments.sortOrder = 'desc';
+        applyPaymentsFilters();
+    });
+    document.getElementById('sortPaymentsLeastLeaves').addEventListener('click', () => {
+        filtersState.payments.sortCol = 'total';
+        filtersState.payments.sortOrder = 'asc';
+        applyPaymentsFilters();
+    });
     document.getElementById('sortPaymentsReset').addEventListener('click', () => {
         filtersState.payments.sortCol = 'total';
         filtersState.payments.sortOrder = 'desc';
@@ -4143,11 +4218,7 @@ document.addEventListener('DOMContentLoaded', () => {
         filtersState.queries.fromDate = document.getElementById('filterQueriesFrom').value;
         filtersState.queries.toDate = document.getElementById('filterQueriesTo').value;
         filtersState.queries.search = document.getElementById('searchQueries').value;
-        filterAndSortTable(queriesTable, currentTableData.queries, generateQueryRow, {
-            search: filtersState.queries.search,
-            fromDate: filtersState.queries.fromDate,
-            toDate: filtersState.queries.toDate
-        });
+        applyQueriesFilters();
     });
 
     document.getElementById('resetQueriesFilterBtn').addEventListener('click', () => {
@@ -4155,7 +4226,7 @@ document.addEventListener('DOMContentLoaded', () => {
         document.getElementById('filterQueriesFrom').value = '';
         document.getElementById('filterQueriesTo').value = '';
         document.getElementById('searchQueries').value = '';
-        updateTable(queriesTable, currentTableData.queries, generateQueryRow);
+        applyQueriesFilters();
     });
 
     document.getElementById('searchNotifs').addEventListener('input', debounce(function() {
@@ -4170,6 +4241,19 @@ document.addEventListener('DOMContentLoaded', () => {
         document.getElementById('searchNotifs').value = '';
         applyNotificationsFilters();
     });
+
+
+    document.getElementById('btn-search-leaves').addEventListener('click', () => applyLeavesFilters());
+    document.getElementById('btn-search-archived').addEventListener('click', () => {
+        filtersState.archived.search = document.getElementById('searchArchived').value;
+        applyArchivedFilters();
+    });
+    document.getElementById('btn-search-queries').addEventListener('click', () => {
+        filtersState.queries.search = document.getElementById('searchQueries').value;
+        applyQueriesFilters();
+    });
+    document.getElementById('btn-search-payments').addEventListener('click', () => applyPaymentsFilters());
+    document.getElementById('btn-search-notifs').addEventListener('click', () => applyNotificationsFilters());
 
     // ====== التصدير والطباعة ======
     document.getElementById('exportLeavesPdf').addEventListener('click', () => exportTableToPdf(leavesTable, 'leaves.pdf', 'الإجازات الطبية'));
@@ -4263,13 +4347,7 @@ document.addEventListener('DOMContentLoaded', () => {
     });
 
     // ====== التحميل الأولي ======
-    updateTable(leavesTable, currentTableData.leaves, generateLeaveRow);
-    updateTable(archivedTable, currentTableData.archived, generateArchivedLeaveRow);
-    updateTable(doctorsTable, currentTableData.doctors, generateDoctorRow);
-    updateTable(patientsTable, currentTableData.patients, generatePatientRow);
-    updateTable(queriesTable, currentTableData.queries, generateQueryRow);
-    updateTable(paymentsTable, currentTableData.payments, generatePaymentPatientRow);
-    updatePaymentNotifications(currentTableData.notifications_payment);
+    applyAllCurrentFilters();
     updateDoctorSelects(currentTableData.doctors);
     updatePatientSelects(currentTableData.patients);
 
@@ -4282,11 +4360,7 @@ document.addEventListener('DOMContentLoaded', () => {
             if (Array.isArray(result.queries)) currentTableData.queries = result.queries;
             if (Array.isArray(result.payments)) currentTableData.payments = result.payments;
             if (Array.isArray(result.notifications_payment)) currentTableData.notifications_payment = result.notifications_payment;
-            updateTable(leavesTable, currentTableData.leaves, generateLeaveRow);
-            updateTable(archivedTable, currentTableData.archived, generateArchivedLeaveRow);
-            updateTable(queriesTable, currentTableData.queries, generateQueryRow);
-            updateTable(paymentsTable, currentTableData.payments, generatePaymentPatientRow);
-            updatePaymentNotifications(currentTableData.notifications_payment);
+            applyAllCurrentFilters();
             if (result.stats) updateStats(result.stats);
         }
     }, 60000);
