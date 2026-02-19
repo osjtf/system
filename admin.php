@@ -156,6 +156,7 @@ function generateServiceCode($pdo, $prefix) {
 }
 
 function fetchAllData($pdo) {
+    ensureDelayedUnpaidNotifications($pdo);
     // الإجازات النشطة
     $leaves = $pdo->query(" 
         SELECT sl.*, p.name AS patient_name, p.identity_number, p.phone AS patient_phone,
@@ -229,6 +230,7 @@ function fetchAllData($pdo) {
 
 
 function fetchActiveOperationalData($pdo) {
+    ensureDelayedUnpaidNotifications($pdo);
     $leaves = $pdo->query(" 
         SELECT sl.*, p.name AS patient_name, p.identity_number, p.phone AS patient_phone,
                d.name AS doctor_name, d.title AS doctor_title, d.note AS doctor_note,
@@ -268,6 +270,30 @@ function fetchActiveOperationalData($pdo) {
     ")->fetchAll();
 
     return compact('leaves', 'payments', 'notifications_payment');
+}
+
+function ensureDelayedUnpaidNotifications($pdo): void {
+    $stmt = $pdo->prepare("
+        SELECT sl.id, sl.service_code, sl.payment_amount
+        FROM sick_leaves sl
+        LEFT JOIN notifications n ON n.leave_id = sl.id AND n.type = 'payment'
+        WHERE sl.deleted_at IS NULL
+          AND sl.is_paid = 0
+          AND sl.payment_amount > 0
+          AND sl.created_at <= (NOW() - INTERVAL 5 MINUTE)
+          AND n.id IS NULL
+    ");
+    $stmt->execute();
+    $rows = $stmt->fetchAll();
+    if (!$rows) return;
+
+    $ins = $pdo->prepare("INSERT INTO notifications (type, leave_id, message) VALUES ('payment', ?, ?)");
+    foreach ($rows as $row) {
+        $ins->execute([
+            $row['id'],
+            "إجازة غير مدفوعة منذ أكثر من 5 دقائق برمز {$row['service_code']} بمبلغ {$row['payment_amount']}"
+        ]);
+    }
 }
 
 // ======================== معالجة تسجيل الدخول والخروج ========================
@@ -794,6 +820,7 @@ if (isset($_POST['action']) && $_POST['action'] !== 'login' && $_POST['action'] 
             break;
 
         case 'fetch_notifications':
+            ensureDelayedUnpaidNotifications($pdo);
             $notifications = $pdo->query(" 
                 SELECT n.*, sl.payment_amount, sl.service_code, sl.patient_id, p.name AS patient_name
                 FROM notifications n
@@ -935,6 +962,26 @@ if (isset($_POST['action']) && $_POST['action'] !== 'login' && $_POST['action'] 
             ");
             $stmt->execute([$user_id]);
             echo json_encode(['success' => true, 'sessions' => $stmt->fetchAll()]);
+            break;
+
+        case 'delete_user_session':
+            if ($_SESSION['admin_role'] !== 'admin') {
+                echo json_encode(['success' => false, 'message' => 'ليس لديك صلاحية.']);
+                exit;
+            }
+            $session_id = intval($_POST['session_id'] ?? 0);
+            $pdo->prepare("DELETE FROM user_sessions WHERE id = ?")->execute([$session_id]);
+            echo json_encode(['success' => true, 'message' => 'تم حذف الجلسة.']);
+            break;
+
+        case 'delete_all_user_sessions':
+            if ($_SESSION['admin_role'] !== 'admin') {
+                echo json_encode(['success' => false, 'message' => 'ليس لديك صلاحية.']);
+                exit;
+            }
+            $user_id = intval($_POST['user_id'] ?? 0);
+            $pdo->prepare("DELETE FROM user_sessions WHERE user_id = ?")->execute([$user_id]);
+            echo json_encode(['success' => true, 'message' => 'تم حذف جميع جلسات المستخدم.']);
             break;
 
         default:
@@ -2501,6 +2548,7 @@ if ($loggedIn) {
         <div class="modal-content">
             <div class="modal-header"><h5 class="modal-title"><i class="bi bi-clock-history text-info"></i> سجل الجلسات</h5><button type="button" class="btn-close" data-bs-dismiss="modal"></button></div>
             <div class="modal-body">
+                <div class="d-flex justify-content-end mb-2"><button class="btn btn-sm btn-danger-custom" id="btnDeleteAllSessionsForUser"><i class="bi bi-trash3"></i> حذف كل الجلسات</button></div>
                 <ul class="list-group" id="sessionsListContainer">
                     <li class="list-group-item text-center text-muted">لا توجد جلسات.</li>
                 </ul>
@@ -2547,6 +2595,15 @@ function htmlspecialchars(str) {
     const div = document.createElement('div');
     div.appendChild(document.createTextNode(String(str)));
     return div.innerHTML;
+}
+
+function formatWhatsAppLink(phone) {
+    if (!phone) return '';
+    let digits = String(phone).replace(/\D/g, '');
+    if (!digits) return '';
+    if (digits.startsWith('00')) digits = digits.slice(2);
+    else if (digits.startsWith('0')) digits = '966' + digits.slice(1);
+    return `https://wa.me/${digits}`;
 }
 
 function showToast(msg, type = 'success') {
@@ -2819,7 +2876,7 @@ function generatePatientRow(p) {
             <td class="row-num"></td>
             <td>${htmlspecialchars(p.name)}</td>
             <td>${htmlspecialchars(p.identity_number)}</td>
-            <td>${htmlspecialchars(p.phone || '')}</td>
+            <td>${p.phone ? `<a href="${formatWhatsAppLink(p.phone)}" target="_blank" class="text-decoration-none"><i class="bi bi-whatsapp text-success"></i> ${htmlspecialchars(p.phone)}</a>` : ''}</td>
             <td>
                 <button class="btn btn-sm btn-gradient action-btn btn-edit-patient" data-id="${p.id}" data-name="${htmlspecialchars(p.name)}" data-identity="${htmlspecialchars(p.identity_number)}" data-phone="${htmlspecialchars(p.phone || '')}"><i class="bi bi-pencil"></i></button>
                 <button class="btn btn-sm btn-danger-custom action-btn btn-delete-patient" data-id="${p.id}"><i class="bi bi-trash3"></i></button>
@@ -3067,6 +3124,7 @@ document.addEventListener('DOMContentLoaded', () => {
     let currentConfirmAction = null;
     let currentConfirmId = null;
     let currentDetailQueries = [];
+    let currentSessionsUserId = null;
 
     const currentTableData = {
         leaves: initialLeaves,
@@ -3878,6 +3936,7 @@ document.addEventListener('DOMContentLoaded', () => {
             }
             if (sessBtn) {
                 const userId = sessBtn.dataset.id;
+                currentSessionsUserId = userId;
                 const sessionsList = document.getElementById('sessionsListContainer');
                 sessionsList.innerHTML = '<li class="list-group-item text-center">جارٍ جلب البيانات...</li>';
                 sessionsModal.show();
@@ -3899,6 +3958,7 @@ document.addEventListener('DOMContentLoaded', () => {
                                             <br><small class="text-muted"><i class="bi bi-box-arrow-right"></i> خروج: ${s.logout_at ? htmlspecialchars(s.logout_at) : 'لم يسجل خروج'}</small>
                                             <br><small class="text-muted"><i class="bi bi-globe"></i> IP: ${htmlspecialchars(s.ip_address || 'غير متوفر')}</small>
                                         </div>
+                                        <button class="btn btn-sm btn-outline-danger btn-delete-session" data-session-id="${s.id}" title="حذف الجلسة"><i class="bi bi-trash3"></i></button>
                                     </div>
                                 </li>
                             `).join('');
@@ -3907,6 +3967,27 @@ document.addEventListener('DOMContentLoaded', () => {
                         sessionsList.innerHTML = '<li class="list-group-item text-center text-danger">فشل في جلب البيانات.</li>';
                     }
                 });
+            }
+        });
+
+
+        document.getElementById('sessionsListContainer').addEventListener('click', async (e) => {
+            const btn = e.target.closest('.btn-delete-session');
+            if (!btn) return;
+            const sessionId = btn.dataset.sessionId;
+            const result = await sendAjaxRequest('delete_user_session', { session_id: sessionId });
+            if (result.success) {
+                showToast(result.message, 'success');
+                btn.closest('li')?.remove();
+            }
+        });
+
+        document.getElementById('btnDeleteAllSessionsForUser').addEventListener('click', async () => {
+            if (!currentSessionsUserId) return;
+            const result = await sendAjaxRequest('delete_all_user_sessions', { user_id: currentSessionsUserId });
+            if (result.success) {
+                showToast(result.message, 'success');
+                document.getElementById('sessionsListContainer').innerHTML = '<li class="list-group-item text-center text-muted">لا توجد جلسات مسجلة.</li>';
             }
         });
 
