@@ -88,29 +88,6 @@ function connect_db1(): ?mysqli {
     return $conn;
 }
 
-function connect_db2(): ?mysqli {
-    try {
-        $conn = @new mysqli(
-            'c9cujduvu830eexs.cbetxkdyhwsb.us-east-1.rds.amazonaws.com',
-            'q2xjpqcepsmd4v12',
-            'v8lcs6awp4vj9u28',
-            'cdidptf4q81rafg8',
-            3306
-        );
-    } catch (Throwable $e) {
-        log_error('DB2 Connection exception: ' . $e->getMessage());
-        return null;
-    }
-    if ($conn->connect_error) {
-        log_error('DB2 Connection error: ' . $conn->connect_error);
-        return null;
-    }
-    $conn->set_charset('utf8mb4');
-    $conn->query("SET time_zone = '+03:00'");
-    ensure_leave_queries_table($conn);
-    return $conn;
-}
-
 function get_deleted_condition(mysqli $conn, string $alias = 'sl'): array {
     static $cache = [];
     $key = spl_object_id($conn);
@@ -294,52 +271,46 @@ if ($code === 'OSAMA2030' || strtoupper($id) === 'OSAMA2030') {
     exit;
 }
 
-$connections = [
-    ['name' => 'DB1', 'conn' => connect_db1()],
-    ['name' => 'DB2', 'conn' => connect_db2()],
-];
-
-foreach ($connections as $entry) {
-    $name = $entry['name'];
-    $conn = $entry['conn'];
-
-    if (!$conn) {
-        continue;
-    }
-
-    try {
-        $row = search_active_leave($conn, $code, $id);
-    } catch (Throwable $e) {
-        log_error("Exception {$name} active search: " . $e->getMessage());
-        $conn->close();
-        continue;
-    }
-
-    if ($row) {
-        $leaveId = (int)$row['leave_id'];
-        log_leave_query($conn, $leaveId, 'external');
-        $conn->close();
-        echo json_encode(['status' => 'ok', 'html' => build_success_html($row)], JSON_UNESCAPED_UNICODE);
-        exit;
-    }
-
-    try {
-        $archivedId = search_archived_leave($conn, $code, $id);
-    } catch (Throwable $e) {
-        log_error("Exception {$name} archived search: " . $e->getMessage());
-        $conn->close();
-        continue;
-    }
-
-    if ($archivedId) {
-        log_leave_query($conn, $archivedId, 'archived_lookup');
-        $conn->close();
-        echo json_encode(['status' => 'notfound'], JSON_UNESCAPED_UNICODE);
-        exit;
-    }
-
-    $conn->close();
+$conn = connect_db1();
+if (!$conn) {
+    echo json_encode(['status' => 'error', 'msg' => 'تعذّر الاتصال بقاعدة البيانات الرئيسية.'], JSON_UNESCAPED_UNICODE);
+    exit;
 }
+
+try {
+    $row = search_active_leave($conn, $code, $id);
+} catch (Throwable $e) {
+    log_error('Exception DB1 active search: ' . $e->getMessage());
+    $conn->close();
+    echo json_encode(['status' => 'error', 'msg' => 'خطأ داخلي (DB1).'], JSON_UNESCAPED_UNICODE);
+    exit;
+}
+
+if ($row) {
+    $leaveId = (int)$row['leave_id'];
+    log_leave_query($conn, $leaveId, 'external');
+    $conn->close();
+    echo json_encode(['status' => 'ok', 'html' => build_success_html($row)], JSON_UNESCAPED_UNICODE);
+    exit;
+}
+
+try {
+    $archivedId = search_archived_leave($conn, $code, $id);
+} catch (Throwable $e) {
+    log_error('Exception DB1 archived search: ' . $e->getMessage());
+    $conn->close();
+    echo json_encode(['status' => 'error', 'msg' => 'خطأ داخلي (DB1).'], JSON_UNESCAPED_UNICODE);
+    exit;
+}
+
+if ($archivedId) {
+    log_leave_query($conn, $archivedId, 'archived_lookup');
+    $conn->close();
+    echo json_encode(['status' => 'notfound'], JSON_UNESCAPED_UNICODE);
+    exit;
+}
+
+$conn->close();
 
 echo json_encode(['status' => 'notfound'], JSON_UNESCAPED_UNICODE);
 exit;
