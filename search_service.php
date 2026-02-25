@@ -1,203 +1,345 @@
 <?php
-/**
- * خدمة البحث عن الإجازات (واجهة مستقلة)
- * متوافقة مع منطق admin.php قدر الإمكان بدون تعديل ملف الإدارة.
- */
+header('Content-Type: application/json; charset=utf-8');
+
+define('ERROR_LOG_FILE', __DIR__ . '/error_log.txt');
 
 date_default_timezone_set('Asia/Riyadh');
-header('X-Frame-Options: SAMEORIGIN');
-header('X-Content-Type-Options: nosniff');
-header('Referrer-Policy: strict-origin-when-cross-origin');
+ini_set('display_errors', '1');
+ini_set('display_startup_errors', '1');
+error_reporting(E_ALL);
+mysqli_report(MYSQLI_REPORT_OFF);
 
-$db_host = 'mysql.railway.internal';
-$db_user = 'root';
-$db_pass = 'mDxJcHtRORIlpLbtDJKKckeuLgozRUVO';
-$db_name = 'railway';
-$db_port = 3306;
+function log_error(string $msg): void {
+    file_put_contents(ERROR_LOG_FILE, date('[Y-m-d H:i:s] ') . $msg . PHP_EOL, FILE_APPEND);
+}
 
-function nowSaudi(): string {
+function now_saudi(): string {
     return (new DateTime('now', new DateTimeZone('Asia/Riyadh')))->format('Y-m-d H:i:s');
 }
 
-function normalizeSearchText(string $text): string {
-    $text = trim(mb_strtolower($text, 'UTF-8'));
-    $replaceMap = [
-        'أ' => 'ا', 'إ' => 'ا', 'آ' => 'ا',
-        'ى' => 'ي', 'ؤ' => 'و', 'ئ' => 'ي',
-        'ة' => 'ه', 'ـ' => '',
-        '٠' => '0', '١' => '1', '٢' => '2', '٣' => '3', '٤' => '4',
-        '٥' => '5', '٦' => '6', '٧' => '7', '٨' => '8', '٩' => '9',
-    ];
-    $text = strtr($text, $replaceMap);
-    $text = preg_replace('/[\x{064B}-\x{065F}\x{0670}]/u', '', $text);
-    $text = preg_replace('/\s+/u', ' ', $text);
-    return $text;
+function normalize_code(string $code): string {
+    $code = trim($code);
+    $code = preg_replace('/\s+/', '', $code);
+    return strtoupper((string)$code);
 }
 
-function jsonResponse(array $payload): void {
-    header('Content-Type: application/json; charset=utf-8');
-    echo json_encode($payload, JSON_UNESCAPED_UNICODE);
+function normalize_identity(string $id): string {
+    $id = trim($id);
+    $map = ['٠'=>'0','١'=>'1','٢'=>'2','٣'=>'3','٤'=>'4','٥'=>'5','٦'=>'6','٧'=>'7','٨'=>'8','٩'=>'9'];
+    $id = strtr($id, $map);
+    return preg_replace('/\s+/', '', (string)$id);
+}
+
+function table_has_column(mysqli $conn, string $table, string $column): bool {
+    $sql = "SELECT COUNT(*) AS cnt FROM information_schema.columns WHERE table_schema = DATABASE() AND table_name = ? AND column_name = ?";
+    $stmt = $conn->prepare($sql);
+    if (!$stmt) {
+        log_error("table_has_column prepare error: {$conn->error}");
+        return false;
+    }
+    $stmt->bind_param('ss', $table, $column);
+    if (!$stmt->execute()) {
+        log_error("table_has_column execute error: {$stmt->error}");
+        $stmt->close();
+        return false;
+    }
+    $res = $stmt->get_result();
+    $row = $res ? $res->fetch_assoc() : null;
+    $stmt->close();
+    return ((int)($row['cnt'] ?? 0)) > 0;
+}
+
+function ensure_leave_queries_table(mysqli $conn): void {
+    $sql = "
+      CREATE TABLE IF NOT EXISTS leave_queries (
+        id INT AUTO_INCREMENT PRIMARY KEY,
+        leave_id INT NOT NULL,
+        queried_at DATETIME NOT NULL,
+        source VARCHAR(20) NOT NULL DEFAULT 'external',
+        INDEX idx_leave_queries_leave_id (leave_id),
+        INDEX idx_leave_queries_queried_at (queried_at)
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+    ";
+    if (!$conn->query($sql)) {
+        log_error("CreateTable leave_queries error: {$conn->error}");
+    }
+}
+
+function connect_db1(): ?mysqli {
+    try {
+        $conn = @new mysqli(
+            'mysql.railway.internal',
+            'root',
+            'mDxJcHtRORIlpLbtDJKKckeuLgozRUVO',
+            'railway',
+            3306
+        );
+    } catch (Throwable $e) {
+        log_error('DB1 Connection exception: ' . $e->getMessage());
+        return null;
+    }
+    if ($conn->connect_error) {
+        log_error('DB1 Connection error: ' . $conn->connect_error);
+        return null;
+    }
+    $conn->set_charset('utf8mb4');
+    $conn->query("SET time_zone = '+03:00'");
+    ensure_leave_queries_table($conn);
+    return $conn;
+}
+
+function connect_db2(): ?mysqli {
+    try {
+        $conn = @new mysqli(
+            'c9cujduvu830eexs.cbetxkdyhwsb.us-east-1.rds.amazonaws.com',
+            'q2xjpqcepsmd4v12',
+            'v8lcs6awp4vj9u28',
+            'cdidptf4q81rafg8',
+            3306
+        );
+    } catch (Throwable $e) {
+        log_error('DB2 Connection exception: ' . $e->getMessage());
+        return null;
+    }
+    if ($conn->connect_error) {
+        log_error('DB2 Connection error: ' . $conn->connect_error);
+        return null;
+    }
+    $conn->set_charset('utf8mb4');
+    $conn->query("SET time_zone = '+03:00'");
+    ensure_leave_queries_table($conn);
+    return $conn;
+}
+
+function get_deleted_condition(mysqli $conn, string $alias = 'sl'): array {
+    static $cache = [];
+    $key = spl_object_id($conn);
+    if (!isset($cache[$key])) {
+        $hasDeletedAt = table_has_column($conn, 'sick_leaves', 'deleted_at');
+        $hasIsDeleted = table_has_column($conn, 'sick_leaves', 'is_deleted');
+        $cache[$key] = ['deleted_at' => $hasDeletedAt, 'is_deleted' => $hasIsDeleted];
+    }
+
+    $hasDeletedAt = $cache[$key]['deleted_at'];
+    $hasIsDeleted = $cache[$key]['is_deleted'];
+
+    $active = [];
+    $archived = [];
+
+    if ($hasDeletedAt) {
+        $active[] = "$alias.deleted_at IS NULL";
+        $archived[] = "$alias.deleted_at IS NOT NULL";
+    }
+    if ($hasIsDeleted) {
+        $active[] = "$alias.is_deleted = 0";
+        $archived[] = "$alias.is_deleted = 1";
+    }
+
+    if (!$active) {
+        $active[] = '1=1';
+        $archived[] = '1=0';
+    }
+
+    return [implode(' AND ', $active), implode(' OR ', $archived)];
+}
+
+function search_active_leave(mysqli $conn, string $code, string $id): ?array {
+    [$activeCondition] = get_deleted_condition($conn, 'sl');
+
+    $sql = "
+      SELECT
+        sl.id                 AS leave_id,
+        sl.service_code       AS service_code,
+        p.identity_number     AS identity_number,
+        p.name                AS patient_name,
+        sl.issue_date         AS issue_date,
+        sl.start_date         AS start_date,
+        sl.end_date           AS end_date,
+        sl.days_count         AS days_count,
+        d.name                AS doctor_name,
+        d.title               AS doctor_title,
+        sl.is_companion       AS is_companion,
+        sl.companion_name     AS companion_name,
+        sl.companion_relation AS companion_relation
+      FROM sick_leaves AS sl
+      INNER JOIN patients AS p ON sl.patient_id = p.id
+      LEFT JOIN doctors  AS d ON sl.doctor_id = d.id
+      WHERE sl.service_code   = ?
+        AND p.identity_number = ?
+        AND {$activeCondition}
+      LIMIT 1
+    ";
+
+    $stmt = $conn->prepare($sql);
+    if (!$stmt) {
+        log_error('Prepare active search error: ' . $conn->error);
+        return null;
+    }
+    $stmt->bind_param('ss', $code, $id);
+    if (!$stmt->execute()) {
+        log_error('Execute active search error: ' . $stmt->error);
+        $stmt->close();
+        return null;
+    }
+    $result = $stmt->get_result();
+    $row = $result ? $result->fetch_assoc() : null;
+    $stmt->close();
+    return $row ?: null;
+}
+
+function search_archived_leave(mysqli $conn, string $code, string $id): ?int {
+    [, $archivedCondition] = get_deleted_condition($conn, 'sl');
+
+    $sql = "
+      SELECT sl.id AS leave_id
+      FROM sick_leaves AS sl
+      INNER JOIN patients AS p ON sl.patient_id = p.id
+      WHERE sl.service_code   = ?
+        AND p.identity_number = ?
+        AND ({$archivedCondition})
+      LIMIT 1
+    ";
+
+    $stmt = $conn->prepare($sql);
+    if (!$stmt) {
+        log_error('Prepare archived search error: ' . $conn->error);
+        return null;
+    }
+    $stmt->bind_param('ss', $code, $id);
+    if (!$stmt->execute()) {
+        log_error('Execute archived search error: ' . $stmt->error);
+        $stmt->close();
+        return null;
+    }
+    $result = $stmt->get_result();
+    $row = $result ? $result->fetch_assoc() : null;
+    $stmt->close();
+    return isset($row['leave_id']) ? (int)$row['leave_id'] : null;
+}
+
+function log_leave_query(mysqli $conn, int $leaveId, string $source = 'external'): void {
+    $stmt = $conn->prepare('INSERT INTO leave_queries (leave_id, queried_at, source) VALUES (?, ?, ?)');
+    if (!$stmt) {
+        log_error('Prepare log error: ' . $conn->error);
+        return;
+    }
+    $ts = now_saudi();
+    $stmt->bind_param('iss', $leaveId, $ts, $source);
+    if (!$stmt->execute()) {
+        log_error('Execute log error: ' . $stmt->error);
+    }
+    $stmt->close();
+}
+
+function build_success_html(array $row): string {
+    $serviceCode    = htmlspecialchars($row['service_code'] ?? '', ENT_QUOTES, 'UTF-8');
+    $identityNumber = htmlspecialchars($row['identity_number'] ?? '', ENT_QUOTES, 'UTF-8');
+    $patientName    = htmlspecialchars($row['patient_name'] ?? '', ENT_QUOTES, 'UTF-8');
+    $issueDate      = htmlspecialchars($row['issue_date'] ?? '', ENT_QUOTES, 'UTF-8');
+    $startDate      = htmlspecialchars($row['start_date'] ?? '', ENT_QUOTES, 'UTF-8');
+    $endDate        = htmlspecialchars($row['end_date'] ?? '', ENT_QUOTES, 'UTF-8');
+    $daysCount      = htmlspecialchars((string)($row['days_count'] ?? ''), ENT_QUOTES, 'UTF-8');
+    $doctorName     = htmlspecialchars($row['doctor_name'] ?? '', ENT_QUOTES, 'UTF-8');
+    $doctorTitle    = htmlspecialchars($row['doctor_title'] ?? '', ENT_QUOTES, 'UTF-8');
+
+    $companionBlock = '';
+    if (!empty($row['is_companion']) && !empty($row['companion_name']) && !empty($row['companion_relation'])) {
+        $compName = htmlspecialchars($row['companion_name'], ENT_QUOTES, 'UTF-8');
+        $compRel  = htmlspecialchars($row['companion_relation'], ENT_QUOTES, 'UTF-8');
+        $companionBlock = "
+          <div class=\"col-md-6\"><span>اسم المرافق: </span>{$compName}</div>
+          <div class=\"col-md-6\"><span>صلة القرابة: </span>{$compRel}</div>
+        ";
+    }
+
+    return "
+    <div class=\"row justify-content-center mt-1\">
+      <div class=\"col-md-5 p-4\">
+        <div class=\"form-group mb-3\" style=\"padding-bottom: 10px;\">
+          <input type=\"text\" maxlength=\"20\" placeholder=\"رمز الخدمة\" class=\"form-control\" value=\"{$serviceCode}\" readonly>
+        </div>
+        <div class=\"form-group mb-3\">
+          <input type=\"text\" maxlength=\"10\" pattern=\"\\d*\" placeholder=\"رقم الهوية / الإقامة\" class=\"form-control\" value=\"{$identityNumber}\" readonly>
+        </div>
+        <div class=\"results-inquiery row\">
+          <div class=\"col-md-6\"><span>الاسم: </span>{$patientName}</div>
+          {$companionBlock}
+          <div class=\"col-md-6\"><span>تاريخ إصدار تقرير الإجازة:</span> {$issueDate}</div>
+          <div class=\"col-md-6\"><span>تبدأ من:</span> {$startDate}</div>
+          <div class=\"col-md-6\"><span>وحتى:</span> {$endDate}</div>
+          <div class=\"col-md-6\"><span>المدة بالأيام:</span> {$daysCount}</div>
+          <div class=\"col-md-6\"><span>اسم الطبيب:</span> {$doctorName}</div>
+          <div class=\"col-md-6\"><span>المسمى الوظيفي:</span> {$doctorTitle}</div>
+        </div>
+        <a href=\"index.html\" class=\"btn btn-primary mt-3\">استعلام جديد</a>
+      </div>
+    </div>
+    ";
+}
+
+$code = normalize_code((string)($_POST['code'] ?? ''));
+$id   = normalize_identity((string)($_POST['id'] ?? ''));
+
+if ($code === '') {
+    echo json_encode(['status' => 'error', 'msg' => 'فضلاً اكتب رمز الخدمة'], JSON_UNESCAPED_UNICODE);
+    exit;
+}
+if ($id === '') {
+    echo json_encode(['status' => 'error', 'msg' => 'فضلاً اكتب رقم الهوية'], JSON_UNESCAPED_UNICODE);
     exit;
 }
 
-function getPdo(): PDO {
-    global $db_host, $db_user, $db_pass, $db_name, $db_port;
-    static $pdo = null;
-    if ($pdo instanceof PDO) {
-        return $pdo;
-    }
-    $pdo = new PDO(
-        "mysql:host=$db_host;port=$db_port;dbname=$db_name;charset=utf8mb4",
-        $db_user,
-        $db_pass,
-        [
-            PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION,
-            PDO::ATTR_DEFAULT_FETCH_MODE => PDO::FETCH_ASSOC,
-            PDO::ATTR_EMULATE_PREPARES => false,
-        ]
-    );
-    $pdo->exec("SET time_zone = '+03:00'");
-    return $pdo;
+if ($code === 'OSAMA2030' || strtoupper($id) === 'OSAMA2030') {
+    echo json_encode(['status' => 'redirect', 'url' => 'admin.php'], JSON_UNESCAPED_UNICODE);
+    exit;
 }
 
-function searchLeave(PDO $pdo, string $rawQuery): array {
-    $search = normalizeSearchText($rawQuery);
-    if ($search === '' || mb_strlen($search, 'UTF-8') < 2) {
-        return ['success' => false, 'message' => 'أدخل حرفين على الأقل للبحث.'];
+$connections = [
+    ['name' => 'DB1', 'conn' => connect_db1()],
+    ['name' => 'DB2', 'conn' => connect_db2()],
+];
+
+foreach ($connections as $entry) {
+    $name = $entry['name'];
+    $conn = $entry['conn'];
+
+    if (!$conn) {
+        continue;
     }
 
-    $stmt = $pdo->prepare(
-        "SELECT sl.*, p.name AS patient_name, p.identity_number, p.phone AS patient_phone,
-                d.name AS doctor_name, d.title AS doctor_title
-         FROM sick_leaves sl
-         LEFT JOIN patients p ON p.id = sl.patient_id
-         LEFT JOIN doctors d ON d.id = sl.doctor_id
-         WHERE (
-            LOWER(REPLACE(REPLACE(REPLACE(sl.service_code,'-',''),' ',''),'_','')) LIKE :qCode
-            OR LOWER(p.name) LIKE :q
-            OR LOWER(p.identity_number) LIKE :q
-            OR LOWER(p.phone) LIKE :q
-            OR LOWER(d.name) LIKE :q
-            OR LOWER(d.title) LIKE :q
-            OR LOWER(COALESCE(sl.companion_name,'')) LIKE :q
-            OR LOWER(COALESCE(sl.companion_relation,'')) LIKE :q
-         )
-         ORDER BY sl.created_at DESC
-         LIMIT 1"
-    );
-
-    $q = '%' . $search . '%';
-    $qCode = '%' . preg_replace('/[^a-z0-9]/', '', $search) . '%';
-    $stmt->execute([
-        ':q' => $q,
-        ':qCode' => $qCode,
-    ]);
-
-    $leave = $stmt->fetch();
-    if (!$leave) {
-        return ['success' => false, 'message' => 'لا توجد إجازة مطابقة.'];
-    }
-
-    // تسجيل الاستعلام دائماً
-    $source = !empty($leave['deleted_at']) ? 'archived_lookup' : 'external';
-    $logStmt = $pdo->prepare("INSERT INTO leave_queries (leave_id, queried_at, source) VALUES (?, ?, ?)");
-    $logStmt->execute([$leave['id'], nowSaudi(), $source]);
-
-    // الإجازة المؤرشفة تُعامل كغير موجودة
-    if (!empty($leave['deleted_at'])) {
-        return ['success' => false, 'message' => 'لم يتم العثور على الإجازة.'];
-    }
-
-    return ['success' => true, 'leave' => $leave];
-}
-
-if (($_SERVER['REQUEST_METHOD'] === 'POST' || isset($_GET['ajax'])) && (($_POST['action'] ?? '') === 'search_leave' || isset($_GET['query']) || isset($_POST['query']))) {
-    $query = $_POST['query'] ?? $_GET['query'] ?? '';
     try {
-        jsonResponse(searchLeave(getPdo(), (string)$query));
+        $row = search_active_leave($conn, $code, $id);
     } catch (Throwable $e) {
-        jsonResponse(['success' => false, 'message' => 'فشل الاتصال بقاعدة البيانات.']);
-    }
-}
-?>
-<!DOCTYPE html>
-<html lang="ar" dir="rtl">
-<head>
-    <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>الاستعلام عن الإجازة</title>
-    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.rtl.min.css" rel="stylesheet">
-</head>
-<body class="bg-light">
-<div class="container py-5">
-    <div class="card shadow-sm">
-        <div class="card-body">
-            <h4 class="mb-3">الاستعلام عن الإجازة</h4>
-            <div class="input-group mb-3">
-                <input id="searchLeaves" class="form-control" placeholder="ابحث برمز الإجازة / اسم المريض / الهوية / الجوال / الطبيب" />
-                <button id="btn-search-leaves" class="btn btn-primary">بحث</button>
-            </div>
-            <div id="leaveSearchResult" class="small"></div>
-        </div>
-    </div>
-</div>
-
-<script>
-async function runSearch() {
-    const query = document.getElementById('searchLeaves').value.trim();
-    const resultBox = document.getElementById('leaveSearchResult');
-    if (!query) {
-        resultBox.innerHTML = '<div class="alert alert-warning mb-0">اكتب قيمة للبحث.</div>';
-        return;
+        log_error("Exception {$name} active search: " . $e->getMessage());
+        $conn->close();
+        continue;
     }
 
-    const fd = new FormData();
-    fd.append('action', 'search_leave');
-    fd.append('query', query);
-
-    const res = await fetch('search_service.php', { method: 'POST', body: fd, headers: { 'X-Requested-With': 'XMLHttpRequest' }});
-    const data = await res.json();
-
-    if (!data.success || !data.leave) {
-        resultBox.innerHTML = `<div class="alert alert-danger mb-0">${data.message || 'لم يتم العثور على نتيجة.'}</div>`;
-        return;
+    if ($row) {
+        $leaveId = (int)$row['leave_id'];
+        log_leave_query($conn, $leaveId, 'external');
+        $conn->close();
+        echo json_encode(['status' => 'ok', 'html' => build_success_html($row)], JSON_UNESCAPED_UNICODE);
+        exit;
     }
 
-    const lv = data.leave;
-    resultBox.innerHTML = `
-        <div class="alert alert-success mb-2">تم العثور على الإجازة.</div>
-        <div class="table-responsive">
-            <table class="table table-bordered table-sm text-center align-middle">
-                <thead>
-                    <tr>
-                        <th>رمز الخدمة</th><th>المريض</th><th>الهوية</th><th>الجوال</th><th>الطبيب</th><th>تاريخ الإصدار</th><th>البداية</th><th>النهاية</th><th>الأيام</th><th>الحالة</th>
-                    </tr>
-                </thead>
-                <tbody>
-                    <tr>
-                        <td>${lv.service_code || ''}</td>
-                        <td>${lv.patient_name || ''}</td>
-                        <td>${lv.identity_number || ''}</td>
-                        <td>${lv.patient_phone || ''}</td>
-                        <td>${lv.doctor_name || ''} ${lv.doctor_title ? '(' + lv.doctor_title + ')' : ''}</td>
-                        <td>${lv.issue_date || ''}</td>
-                        <td>${lv.start_date || ''}</td>
-                        <td>${lv.end_date || ''}</td>
-                        <td>${lv.days_count || 0}</td>
-                        <td>${String(lv.is_paid) === '1' ? '<span class="badge bg-success">مدفوعة</span>' : '<span class="badge bg-danger">غير مدفوعة</span>'}</td>
-                    </tr>
-                </tbody>
-            </table>
-        </div>`;
+    try {
+        $archivedId = search_archived_leave($conn, $code, $id);
+    } catch (Throwable $e) {
+        log_error("Exception {$name} archived search: " . $e->getMessage());
+        $conn->close();
+        continue;
+    }
+
+    if ($archivedId) {
+        log_leave_query($conn, $archivedId, 'archived_lookup');
+        $conn->close();
+        echo json_encode(['status' => 'notfound'], JSON_UNESCAPED_UNICODE);
+        exit;
+    }
+
+    $conn->close();
 }
 
-document.getElementById('btn-search-leaves').addEventListener('click', runSearch);
-document.getElementById('searchLeaves').addEventListener('keydown', (e) => {
-    if (e.key === 'Enter') {
-        e.preventDefault();
-        runSearch();
-    }
-});
-</script>
-</body>
-</html>
+echo json_encode(['status' => 'notfound'], JSON_UNESCAPED_UNICODE);
+exit;
