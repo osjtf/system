@@ -2141,11 +2141,6 @@ if ($loggedIn) {
                 <i class="bi bi-search"></i> سجل الاستعلامات
             </button>
         </li>
-        <li class="nav-item" role="presentation">
-            <button class="nav-link" id="tab-payments" data-bs-toggle="tab" data-bs-target="#pane-payments" type="button" role="tab">
-                <i class="bi bi-wallet2"></i> المدفوعات
-            </button>
-        </li>
     </ul>
 
     <div class="tab-content" id="mainTabContent">
@@ -2423,6 +2418,13 @@ if ($loggedIn) {
                             <input type="text" class="form-control" id="searchPatients" placeholder="بحث في المرضى...">
                             <button class="btn btn-gradient" id="btn-search-patients"><i class="bi bi-search"></i></button>
                         </div>
+                        <div class="btn-group btn-group-sm">
+                            <button class="btn btn-outline-success" id="patientSortMostPaid">الأكثر دفعاً</button>
+                            <button class="btn btn-outline-danger" id="patientSortMostUnpaid">الأكثر استحقاقاً</button>
+                            <button class="btn btn-outline-primary" id="patientSortMostLeaves">الأكثر إجازات</button>
+                            <button class="btn btn-outline-primary" id="patientSortLeastLeaves">الأقل عدد إجازات</button>
+                            <button class="btn btn-outline-secondary" id="patientSortReset"><i class="bi bi-arrow-counterclockwise"></i></button>
+                        </div>
                     </div>
                     <form id="addPatientForm" class="row g-2 mb-3">
                         <div class="col-md-3"><input type="text" class="form-control" name="patient_name" placeholder="اسم المريض" required></div>
@@ -2433,7 +2435,7 @@ if ($loggedIn) {
                     </form>
                     <div class="table-responsive">
                         <table class="table table-bordered table-hover table-striped text-center" id="patientsTable">
-                            <thead><tr><th>#</th><th>الاسم</th><th>رقم الهوية</th><th>الهاتف</th><th>المجلد</th><th>التحكم</th></tr></thead>
+                            <thead><tr><th>#</th><th>الاسم</th><th>رقم الهوية</th><th>الهاتف</th><th>المجلد</th><th>عدد الإجازات</th><th>مبلغ مدفوع</th><th>مبلغ مستحق</th><th>إجازات المريض</th><th>التحكم</th></tr></thead>
                             <tbody></tbody>
                         </table>
                     </div>
@@ -2520,7 +2522,7 @@ if ($loggedIn) {
         </div>
 
         <!-- ======================== تبويب المدفوعات ======================== -->
-        <div class="tab-pane fade" id="pane-payments" role="tabpanel">
+        <div class="tab-pane fade d-none" id="pane-payments" role="tabpanel">
             <div class="card-custom">
                 <div class="card-header d-flex justify-content-between align-items-center flex-wrap gap-2">
                     <span><i class="bi bi-wallet2 text-success"></i> المدفوعات لكل مريض</span>
@@ -3335,6 +3337,9 @@ function generateDoctorRow(doc) {
 }
 
 function generatePatientRow(p) {
+    const total = parseInt(p.total || 0, 10);
+    const paidAmount = parseFloat(p.paid_amount || 0).toFixed(2);
+    const unpaidAmount = parseFloat(p.unpaid_amount || 0).toFixed(2);
     return `
         <tr data-id="${p.id}">
             <td class="row-num"></td>
@@ -3342,6 +3347,10 @@ function generatePatientRow(p) {
             <td>${htmlspecialchars(p.identity_number)}</td>
             <td>${p.phone ? `<a href="${formatWhatsAppLink(p.phone)}" target="_blank" class="text-decoration-none"><i class="bi bi-whatsapp text-success"></i> ${htmlspecialchars(p.phone)}</a>` : ''}</td>
             <td>${p.folder_link ? `<a href="${htmlspecialchars(p.folder_link)}" target="_blank" class="btn btn-sm btn-outline-primary"><i class="bi bi-folder-symlink"></i> فتح</a>` : ''}</td>
+            <td><span class="badge bg-primary">${total}</span></td>
+            <td><span class="text-success fw-bold">${paidAmount}</span></td>
+            <td><span class="text-danger fw-bold">${unpaidAmount}</span></td>
+            <td><button class="btn btn-info btn-sm action-btn btn-view-patient-leaves" data-patient-id="${p.id}"><i class="bi bi-eye-fill"></i> عرض</button></td>
             <td>
                 <button class="btn btn-sm btn-gradient action-btn btn-edit-patient" data-id="${p.id}" data-name="${htmlspecialchars(p.name)}" data-identity="${htmlspecialchars(p.identity_number)}" data-phone="${htmlspecialchars(p.phone || '')}" data-folder="${htmlspecialchars(p.folder_link || '')}"><i class="bi bi-pencil"></i></button>
                 <button class="btn btn-sm btn-danger-custom action-btn btn-delete-patient" data-id="${p.id}"><i class="bi bi-trash3"></i></button>
@@ -4368,6 +4377,11 @@ document.addEventListener('DOMContentLoaded', () => {
     patientsTable.addEventListener('click', (e) => {
         const editBtn = e.target.closest('.btn-edit-patient');
         const delBtn = e.target.closest('.btn-delete-patient');
+        const viewBtn = e.target.closest('.btn-view-patient-leaves');
+        if (viewBtn) {
+            openPatientLeaves(viewBtn.dataset.patientId);
+            return;
+        }
         if (editBtn) {
             document.getElementById('edit_patient_id').value = editBtn.dataset.id;
             document.getElementById('edit_patient_name').value = editBtn.dataset.name;
@@ -4608,7 +4622,7 @@ document.addEventListener('DOMContentLoaded', () => {
         archived: { search: '' },
         queries: { search: '', fromDate: '', toDate: '', sortMode: 'newest' },
         doctors: { search: '' },
-        patients: { search: '' },
+        patients: { search: '', sortCol: 'total', sortOrder: 'desc' },
         payments: { search: '', sortCol: '', sortOrder: 'desc' },
         notifications: { search: '', sortMode: 'newest' }
     };
@@ -4660,7 +4674,12 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     function applyPatientsFilters() {
-        filterAndSortTable(patientsTable, currentTableData.patients, generatePatientRow, { search: filtersState.patients.search });
+        const metricsByPatient = new Map((currentTableData.payments || []).map(p => [String(p.id), p]));
+        const mergedPatients = (currentTableData.patients || []).map(p => ({
+            ...p,
+            ...(metricsByPatient.get(String(p.id)) || { total: 0, paid_amount: 0, unpaid_amount: 0, paid_count: 0, unpaid_count: 0 })
+        }));
+        filterAndSortTable(patientsTable, mergedPatients, generatePatientRow, { search: filtersState.patients.search }, filtersState.patients.sortCol, filtersState.patients.sortOrder);
     }
 
     function applyAllCurrentFilters() {
@@ -4786,6 +4805,32 @@ document.addEventListener('DOMContentLoaded', () => {
         filtersState.payments.sortCol = 'total';
         filtersState.payments.sortOrder = 'desc';
         applyPaymentsFilters();
+    });
+
+    document.getElementById('patientSortMostPaid').addEventListener('click', () => {
+        filtersState.patients.sortCol = 'paid_amount';
+        filtersState.patients.sortOrder = 'desc';
+        applyPatientsFilters();
+    });
+    document.getElementById('patientSortMostUnpaid').addEventListener('click', () => {
+        filtersState.patients.sortCol = 'unpaid_amount';
+        filtersState.patients.sortOrder = 'desc';
+        applyPatientsFilters();
+    });
+    document.getElementById('patientSortMostLeaves').addEventListener('click', () => {
+        filtersState.patients.sortCol = 'total';
+        filtersState.patients.sortOrder = 'desc';
+        applyPatientsFilters();
+    });
+    document.getElementById('patientSortLeastLeaves').addEventListener('click', () => {
+        filtersState.patients.sortCol = 'total';
+        filtersState.patients.sortOrder = 'asc';
+        applyPatientsFilters();
+    });
+    document.getElementById('patientSortReset').addEventListener('click', () => {
+        filtersState.patients.sortCol = 'total';
+        filtersState.patients.sortOrder = 'desc';
+        applyPatientsFilters();
     });
 
     document.getElementById('sortQueriesNewest').addEventListener('click', () => { filtersState.queries.sortMode = 'newest'; applyQueriesFilters(); });
