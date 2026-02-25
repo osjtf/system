@@ -113,6 +113,7 @@ ensureIndex($pdo, 'leave_queries', 'idx_leave_queries_leave', 'leave_id');
 ensureIndex($pdo, 'leave_queries', 'idx_leave_queries_queried_at', 'queried_at');
 ensureIndex($pdo, 'patients', 'idx_patients_identity_number', 'identity_number');
 ensureIndex($pdo, 'patients', 'idx_patients_name', 'name');
+ensureColumn($pdo, 'patients', 'folder_link', "VARCHAR(500) NULL AFTER phone");
 ensureIndex($pdo, 'doctors', 'idx_doctors_name', 'name');
 ensureIndex($pdo, 'user_messages', 'idx_user_messages_pair_created', 'sender_id, receiver_id, created_at');
 ensureIndex($pdo, 'user_messages', 'idx_user_messages_receiver_read', 'receiver_id, is_read');
@@ -255,7 +256,7 @@ function fetchAllData($pdo) {
     purgeExpiredMessages($pdo);
     // الإجازات النشطة
     $leaves = $pdo->query(" 
-        SELECT sl.*, p.name AS patient_name, p.identity_number, p.phone AS patient_phone,
+        SELECT sl.*, p.name AS patient_name, p.identity_number, p.phone AS patient_phone, p.folder_link AS patient_folder_link,
                d.name AS doctor_name, d.title AS doctor_title, d.note AS doctor_note,
                COALESCE(lq.queries_count, 0) AS queries_count
         FROM sick_leaves sl
@@ -272,7 +273,7 @@ function fetchAllData($pdo) {
 
     // الإجازات المؤرشفة
     $archived = $pdo->query(" 
-        SELECT sl.*, p.name AS patient_name, p.identity_number, p.phone AS patient_phone,
+        SELECT sl.*, p.name AS patient_name, p.identity_number, p.phone AS patient_phone, p.folder_link AS patient_folder_link,
                d.name AS doctor_name, d.title AS doctor_title, d.note AS doctor_note,
                COALESCE(lq.queries_count, 0) AS queries_count
         FROM sick_leaves sl
@@ -329,7 +330,7 @@ function fetchActiveOperationalData($pdo) {
     ensureDelayedUnpaidNotifications($pdo);
     purgeExpiredMessages($pdo);
     $leaves = $pdo->query(" 
-        SELECT sl.*, p.name AS patient_name, p.identity_number, p.phone AS patient_phone,
+        SELECT sl.*, p.name AS patient_name, p.identity_number, p.phone AS patient_phone, p.folder_link AS patient_folder_link,
                d.name AS doctor_name, d.title AS doctor_title, d.note AS doctor_note,
                COALESCE(lq.queries_count, 0) AS queries_count
         FROM sick_leaves sl
@@ -498,6 +499,7 @@ if (isset($_POST['action']) && $_POST['action'] !== 'login' && $_POST['action'] 
                 $pName = trim($_POST['patient_manual_name'] ?? '');
                 $pIdentity = trim($_POST['patient_manual_id'] ?? '');
                 $pPhone = trim($_POST['patient_manual_phone'] ?? '');
+                $pFolderLink = trim($_POST['patient_manual_folder_link'] ?? '');
                 if (empty($pName) || empty($pIdentity)) {
                     echo json_encode(['success' => false, 'message' => 'يرجى إدخال اسم المريض ورقم هويته.']);
                     exit;
@@ -508,8 +510,8 @@ if (isset($_POST['action']) && $_POST['action'] !== 'login' && $_POST['action'] 
                 if ($existing) {
                     $patient_id = $existing['id'];
                 } else {
-                    $stmt = $pdo->prepare("INSERT INTO patients (name, identity_number, phone) VALUES (?, ?, ?)");
-                    $stmt->execute([$pName, $pIdentity, $pPhone]);
+                    $stmt = $pdo->prepare("INSERT INTO patients (name, identity_number, phone, folder_link) VALUES (?, ?, ?, ?)");
+                    $stmt->execute([$pName, $pIdentity, $pPhone, $pFolderLink]);
                     $patient_id = $pdo->lastInsertId();
                 }
             } else {
@@ -851,12 +853,13 @@ if (isset($_POST['action']) && $_POST['action'] !== 'login' && $_POST['action'] 
             $name = trim($_POST['patient_name'] ?? '');
             $identity = trim($_POST['identity_number'] ?? '');
             $phone = trim($_POST['phone'] ?? '');
+            $folder_link = trim($_POST['folder_link'] ?? '');
             if (empty($name) || empty($identity)) {
                 echo json_encode(['success' => false, 'message' => 'يرجى إدخال اسم المريض ورقم هويته.']);
                 exit;
             }
-            $stmt = $pdo->prepare("INSERT INTO patients (name, identity_number, phone) VALUES (?, ?, ?)");
-            $stmt->execute([$name, $identity, $phone]);
+            $stmt = $pdo->prepare("INSERT INTO patients (name, identity_number, phone, folder_link) VALUES (?, ?, ?, ?)");
+            $stmt->execute([$name, $identity, $phone, $folder_link]);
             $patientId = $pdo->lastInsertId();
             $patient = $pdo->prepare("SELECT * FROM patients WHERE id = ?");
             $patient->execute([$patientId]);
@@ -876,12 +879,13 @@ if (isset($_POST['action']) && $_POST['action'] !== 'login' && $_POST['action'] 
             $name = trim($_POST['patient_name'] ?? '');
             $identity = trim($_POST['identity_number'] ?? '');
             $phone = trim($_POST['phone'] ?? '');
+            $folder_link = trim($_POST['folder_link'] ?? '');
             if ($id <= 0 || empty($name) || empty($identity)) {
                 echo json_encode(['success' => false, 'message' => 'بيانات غير صالحة.']);
                 exit;
             }
-            $stmt = $pdo->prepare("UPDATE patients SET name = ?, identity_number = ?, phone = ? WHERE id = ?");
-            $stmt->execute([$name, $identity, $phone, $id]);
+            $stmt = $pdo->prepare("UPDATE patients SET name = ?, identity_number = ?, phone = ?, folder_link = ? WHERE id = ?");
+            $stmt->execute([$name, $identity, $phone, $folder_link, $id]);
             $patient = $pdo->prepare("SELECT * FROM patients WHERE id = ?");
             $patient->execute([$id]);
             $patientData = $patient->fetch();
@@ -966,7 +970,7 @@ if (isset($_POST['action']) && $_POST['action'] !== 'login' && $_POST['action'] 
             }
 
             $stmt = $pdo->prepare("
-                SELECT sl.*, p.name AS patient_name, p.identity_number,
+                SELECT sl.*, p.name AS patient_name, p.identity_number, p.folder_link AS patient_folder_link,
                        d.name AS doctor_name, d.title AS doctor_title, d.note AS doctor_note,
                        (SELECT COUNT(*) FROM leave_queries lq WHERE lq.leave_id = sl.id) AS queries_count
                 FROM sick_leaves sl
@@ -2191,6 +2195,7 @@ if ($loggedIn) {
                                     <th>رمز الخدمة</th>
                                     <th>المريض</th>
                                     <th>الهوية</th>
+                                    <th>مجلد المريض</th>
                                     <th>الطبيب</th>
                                     <th>الإصدار</th>
                                     <th>من</th>
@@ -2247,6 +2252,7 @@ if ($loggedIn) {
                                 <div class="col-12"><label class="form-label">اسم المريض</label><input type="text" class="form-control" name="patient_manual_name" id="patient_manual_name"></div>
                                 <div class="col-6"><label class="form-label">رقم الهوية</label><input type="text" class="form-control" name="patient_manual_id" id="patient_manual_id"></div>
                                 <div class="col-6"><label class="form-label">الهاتف</label><input type="text" class="form-control" name="patient_manual_phone" id="patient_manual_phone"></div>
+                                <div class="col-12"><label class="form-label">رابط مجلد المريض</label><input type="url" class="form-control" name="patient_manual_folder_link" id="patient_manual_folder_link" placeholder="https://..."></div>
                             </div>
                         </div>
 
@@ -2361,6 +2367,7 @@ if ($loggedIn) {
                                     <th>رمز الخدمة</th>
                                     <th>المريض</th>
                                     <th>الهوية</th>
+                                    <th>مجلد المريض</th>
                                     <th>الطبيب</th>
                                     <th>من</th>
                                     <th>إلى</th>
@@ -2421,11 +2428,12 @@ if ($loggedIn) {
                         <div class="col-md-3"><input type="text" class="form-control" name="patient_name" placeholder="اسم المريض" required></div>
                         <div class="col-md-3"><input type="text" class="form-control" name="identity_number" placeholder="رقم الهوية" required></div>
                         <div class="col-md-3"><input type="text" class="form-control" name="phone" placeholder="الهاتف"></div>
-                        <div class="col-md-3"><button type="submit" class="btn btn-success-custom w-100"><i class="bi bi-plus"></i> إضافة مريض</button></div>
+                        <div class="col-md-3"><input type="url" class="form-control" name="folder_link" placeholder="رابط مجلد المريض"></div>
+                        <div class="col-md-12"><button type="submit" class="btn btn-success-custom w-100"><i class="bi bi-plus"></i> إضافة مريض</button></div>
                     </form>
                     <div class="table-responsive">
                         <table class="table table-bordered table-hover table-striped text-center" id="patientsTable">
-                            <thead><tr><th>#</th><th>الاسم</th><th>رقم الهوية</th><th>الهاتف</th><th>التحكم</th></tr></thead>
+                            <thead><tr><th>#</th><th>الاسم</th><th>رقم الهوية</th><th>الهاتف</th><th>المجلد</th><th>التحكم</th></tr></thead>
                             <tbody></tbody>
                         </table>
                     </div>
@@ -2860,6 +2868,7 @@ if ($loggedIn) {
                     <div class="mb-3"><label class="form-label">الاسم</label><input type="text" class="form-control" name="patient_name" id="edit_patient_name" required></div>
                     <div class="mb-3"><label class="form-label">رقم الهوية</label><input type="text" class="form-control" name="identity_number" id="edit_patient_identity" required></div>
                     <div class="mb-3"><label class="form-label">الهاتف</label><input type="text" class="form-control" name="phone" id="edit_patient_phone"></div>
+                    <div class="mb-3"><label class="form-label">رابط المجلد</label><input type="url" class="form-control" name="folder_link" id="edit_patient_folder_link"></div>
                 </form>
             </div>
             <div class="modal-footer">
@@ -3261,6 +3270,7 @@ function generateLeaveRow(lv) {
             <td><strong>${htmlspecialchars(lv.service_code)}</strong></td>
             <td>${htmlspecialchars(lv.patient_name)}</td>
             <td>${htmlspecialchars(lv.identity_number)}</td>
+            <td>${lv.patient_folder_link ? `<a href="${htmlspecialchars(lv.patient_folder_link)}" target="_blank" class="btn btn-sm btn-outline-primary"><i class="bi bi-folder-symlink"></i></a>` : ""}</td>
             <td>${htmlspecialchars(lv.doctor_name)}</td>
             <td>${htmlspecialchars(lv.issue_date)}</td>
             <td>${htmlspecialchars(lv.start_date)}</td>
@@ -3278,6 +3288,7 @@ function generateLeaveRow(lv) {
                     <button class="btn btn-sm btn-warning-custom action-btn btn-duplicate-leave" data-id="${lv.id}" title="تكرار"><i class="bi bi-files btn-duplicate-leave" data-id="${lv.id}"></i></button>
                     <button class="btn btn-sm btn-outline-primary action-btn btn-add-query" data-leave-id="${lv.id}" title="تسجيل استعلام"><i class="bi bi-plus-circle btn-add-query" data-leave-id="${lv.id}"></i></button>
                     <button class="btn btn-sm btn-danger-custom action-btn btn-delete-leave" data-id="${lv.id}" title="أرشفة"><i class="bi bi-archive btn-delete-leave" data-id="${lv.id}"></i></button>
+                    <button class="btn btn-sm btn-outline-danger action-btn btn-force-delete-active" data-id="${lv.id}" title="حذف نهائي"><i class="bi bi-trash3 btn-force-delete-active" data-id="${lv.id}"></i></button>
                 </div>
             </td>
         </tr>`;
@@ -3291,6 +3302,7 @@ function generateArchivedLeaveRow(lv) {
             <td><strong>${htmlspecialchars(lv.service_code)}</strong></td>
             <td>${htmlspecialchars(lv.patient_name)}</td>
             <td>${htmlspecialchars(lv.identity_number)}</td>
+            <td>${lv.patient_folder_link ? `<a href="${htmlspecialchars(lv.patient_folder_link)}" target="_blank" class="btn btn-sm btn-outline-primary"><i class="bi bi-folder-symlink"></i></a>` : ""}</td>
             <td>${htmlspecialchars(lv.doctor_name)}</td>
             <td>${htmlspecialchars(lv.start_date)}</td>
             <td>${htmlspecialchars(lv.end_date)}</td>
@@ -3329,8 +3341,9 @@ function generatePatientRow(p) {
             <td>${htmlspecialchars(p.name)}</td>
             <td>${htmlspecialchars(p.identity_number)}</td>
             <td>${p.phone ? `<a href="${formatWhatsAppLink(p.phone)}" target="_blank" class="text-decoration-none"><i class="bi bi-whatsapp text-success"></i> ${htmlspecialchars(p.phone)}</a>` : ''}</td>
+            <td>${p.folder_link ? `<a href="${htmlspecialchars(p.folder_link)}" target="_blank" class="btn btn-sm btn-outline-primary"><i class="bi bi-folder-symlink"></i> فتح</a>` : ''}</td>
             <td>
-                <button class="btn btn-sm btn-gradient action-btn btn-edit-patient" data-id="${p.id}" data-name="${htmlspecialchars(p.name)}" data-identity="${htmlspecialchars(p.identity_number)}" data-phone="${htmlspecialchars(p.phone || '')}"><i class="bi bi-pencil"></i></button>
+                <button class="btn btn-sm btn-gradient action-btn btn-edit-patient" data-id="${p.id}" data-name="${htmlspecialchars(p.name)}" data-identity="${htmlspecialchars(p.identity_number)}" data-phone="${htmlspecialchars(p.phone || '')}" data-folder="${htmlspecialchars(p.folder_link || '')}"><i class="bi bi-pencil"></i></button>
                 <button class="btn btn-sm btn-danger-custom action-btn btn-delete-patient" data-id="${p.id}"><i class="bi bi-trash3"></i></button>
             </td>
         </tr>`;
@@ -3971,6 +3984,31 @@ document.addEventListener('DOMContentLoaded', () => {
         confirmModal.show();
     });
 
+    leavesTable.addEventListener('click', (e) => {
+        const target = e.target.closest('.btn-force-delete-active') || (e.target.classList.contains('btn-force-delete-active') ? e.target : null);
+        if (!target) return;
+        const row = target.closest('tr');
+        const leaveId = row.dataset.id;
+        confirmMessage.textContent = 'تحذير! سيتم حذف هذه الإجازة نهائياً مباشرة. لا يمكن التراجع!';
+        confirmYesBtn.textContent = 'نعم، حذف نهائي';
+        currentConfirmAction = async () => {
+            showLoading();
+            const result = await sendAjaxRequest('force_delete_leave', { leave_id: leaveId });
+            hideLoading();
+            if (result.success) {
+                showToast(result.message, 'success');
+                if (Array.isArray(result.leaves)) currentTableData.leaves = result.leaves;
+                if (Array.isArray(result.archived)) currentTableData.archived = result.archived;
+                if (Array.isArray(result.payments)) currentTableData.payments = result.payments;
+                applyLeavesFilters();
+                applyArchivedFilters();
+                applyPaymentsFilters();
+                if (result.stats) updateStats(result.stats);
+            }
+        };
+        confirmModal.show();
+    });
+
     // ====== استعادة إجازة ======
     archivedTable.addEventListener('click', (e) => {
         const target = e.target.closest('.btn-restore-leave') || (e.target.classList.contains('btn-restore-leave') ? e.target : null);
@@ -4335,6 +4373,7 @@ document.addEventListener('DOMContentLoaded', () => {
             document.getElementById('edit_patient_name').value = editBtn.dataset.name;
             document.getElementById('edit_patient_identity').value = editBtn.dataset.identity;
             document.getElementById('edit_patient_phone').value = editBtn.dataset.phone;
+            document.getElementById('edit_patient_folder_link').value = editBtn.dataset.folder || '';
             editPatientModal.show();
         }
         if (delBtn) {
