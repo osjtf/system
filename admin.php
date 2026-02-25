@@ -5059,48 +5059,68 @@ document.addEventListener('DOMContentLoaded', () => {
         });
     });
 
-    // ====== عرض إجازات المريض من المدفوعات ======
-    paymentsTable.addEventListener('click', async (e) => {
-        const target = e.target.closest('.btn-view-patient-leaves') || (e.target.classList.contains('btn-view-patient-leaves') ? e.target : null);
-        if (!target) return;
-        const patientId = target.dataset.patientId;
+    // ====== عرض إجازات المريض ======
+    async function openPatientLeaves(patientId) {
         showLoading();
         const result = await sendAjaxRequest('fetch_leaves_by_patient', { patient_id: patientId });
         hideLoading();
-        if (result.success && result.leaves) {
-            let html = '<div class="table-responsive"><table class="table table-bordered table-sm"><thead><tr><th>رمز الخدمة</th><th>تاريخ البداية</th><th>تاريخ النهاية</th><th>الأيام</th><th>الحالة</th><th>المبلغ</th><th>إجراء</th></tr></thead><tbody>';
-            result.leaves.forEach(lv => {
-                html += `<tr>
-                    <td>${htmlspecialchars(lv.service_code)}</td>
-                    <td>${htmlspecialchars(lv.start_date)}</td>
-                    <td>${htmlspecialchars(lv.end_date)}</td>
-                    <td>${lv.days_count}</td>
-                    <td>${lv.is_paid == 1 ? '<span class="badge bg-success">مدفوعة</span>' : '<span class="badge bg-danger">غير مدفوعة</span>'}</td>
-                    <td>${parseFloat(lv.payment_amount).toFixed(2)}</td>
-                    <td>
-                        ${lv.is_paid == 0 ? `<button class="btn btn-sm btn-success-custom btn-mark-paid-inline" data-leave-id="${lv.id}" data-amount="${lv.payment_amount}"><i class="bi bi-cash-coin"></i> تأكيد الدفع</button>` : '<span class="text-success">✓</span>'}
-                    </td>
-                </tr>`;
-            });
-            html += '</tbody></table></div>';
-            leaveDetailsContainer.innerHTML = html;
-            leaveDetailsModal.show();
 
-            // أزرار الدفع المباشر
-            leaveDetailsContainer.querySelectorAll('.btn-mark-paid-inline').forEach(btn => {
-                btn.addEventListener('click', async () => {
-                    showLoading();
-                    const res = await sendAjaxRequest('mark_leave_paid', { leave_id: btn.dataset.leaveId, amount: btn.dataset.amount });
-                    hideLoading();
-                    if (res.success) {
-                        showToast(res.message, 'success');
-                        leaveDetailsModal.hide();
-                        await fetchAllLeaves();
-                    }
-                });
-            });
+        if (!(result.success && result.leaves)) {
+            leaveDetailsContainer.innerHTML = '<div class="alert alert-danger text-center mb-0">تعذر جلب إجازات المريض.</div>';
+            leaveDetailsModal.show();
+            return;
         }
-    });
+
+        let html = '<div class="table-responsive"><table class="table table-bordered table-sm align-middle text-center"><thead><tr><th>رمز الخدمة</th><th>الطبيب</th><th>تاريخ الإصدار</th><th>بداية</th><th>نهاية</th><th>الأيام</th><th>النوع</th><th>الحالة</th><th>المبلغ</th><th>تاريخ الإضافة</th><th>إجراء</th></tr></thead><tbody>';
+        result.leaves.forEach(lv => {
+            html += `<tr>
+                <td><strong>${htmlspecialchars(lv.service_code || '')}</strong></td>
+                <td>${htmlspecialchars(lv.doctor_name || 'غير محدد')}<br><small class="text-muted">${htmlspecialchars(lv.doctor_title || '')}</small></td>
+                <td>${htmlspecialchars(lv.issue_date || '')}</td>
+                <td>${htmlspecialchars(lv.start_date || '')}</td>
+                <td>${htmlspecialchars(lv.end_date || '')}</td>
+                <td>${parseInt(lv.days_count || 0, 10)}</td>
+                <td>${lv.is_companion == 1 ? 'مرافق' : 'أساسي'}</td>
+                <td>${lv.is_paid == 1 ? '<span class="badge bg-success">مدفوعة</span>' : '<span class="badge bg-danger">غير مدفوعة</span>'}</td>
+                <td>${parseFloat(lv.payment_amount || 0).toFixed(2)}</td>
+                <td>${formatSaudiDateTime(lv.created_at)}</td>
+                <td>
+                    ${lv.is_paid == 0 ? `<button class="btn btn-sm btn-success-custom btn-mark-paid-inline" data-leave-id="${lv.id}" data-amount="${lv.payment_amount}"><i class="bi bi-cash-coin"></i> دفع</button>` : '<span class="text-success">✓</span>'}
+                </td>
+            </tr>`;
+        });
+        html += '</tbody></table></div>';
+
+        leaveDetailsContainer.innerHTML = html;
+        leaveDetailsModal.show();
+
+        leaveDetailsContainer.querySelectorAll('.btn-mark-paid-inline').forEach(btn => {
+            btn.addEventListener('click', () => {
+                document.getElementById('payConfirmMessage').textContent = 'تأكيد دفع هذه الإجازة؟ يمكنك تعديل السعر قبل التأكيد.';
+                document.getElementById('confirmPayAmount').value = btn.dataset.amount;
+                currentConfirmAction = async () => {
+                    const amount = document.getElementById('confirmPayAmount').value;
+                    showLoading();
+                    const payRes = await sendAjaxRequest('mark_leave_paid', { leave_id: btn.dataset.leaveId, amount: amount });
+                    hideLoading();
+                    if (payRes.success) {
+                        showToast(payRes.message, 'success');
+                        await fetchAllLeaves();
+                        await openPatientLeaves(patientId);
+                    }
+                };
+                payConfirmModal.show();
+            });
+        });
+    }
+
+    if (paymentsTable) {
+        paymentsTable.addEventListener('click', async (e) => {
+            const target = e.target.closest('.btn-view-patient-leaves') || (e.target.classList.contains('btn-view-patient-leaves') ? e.target : null);
+            if (!target) return;
+            await openPatientLeaves(target.dataset.patientId);
+        });
+    }
 
     // ====== عرض إجازة من الاستعلامات ======
     queriesTable.addEventListener('click', async (e) => {
