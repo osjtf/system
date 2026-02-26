@@ -989,17 +989,33 @@ if (isset($_POST['action']) && $_POST['action'] !== 'login' && $_POST['action'] 
 
 
         case 'fetch_admin_statistics':
-            if (($_SESSION['admin_role'] ?? 'user') !== 'admin') {
-                echo json_encode(['success' => false, 'message' => 'غير مصرح']);
-                break;
+            $role = $_SESSION['admin_role'] ?? 'user';
+            $canViewFinancial = ($role === 'admin');
+
+            $rangeDays = max(1, min(365, intval($_POST['range_days'] ?? 30)));
+            $fromDate = trim($_POST['from_date'] ?? '');
+            $toDate = trim($_POST['to_date'] ?? '');
+            if (!preg_match('/^\d{4}-\d{2}-\d{2}$/', $fromDate)) {
+                $fromDate = date('Y-m-d', strtotime("-" . ($rangeDays - 1) . " days"));
+            }
+            if (!preg_match('/^\d{4}-\d{2}-\d{2}$/', $toDate)) {
+                $toDate = date('Y-m-d');
+            }
+            if ($fromDate > $toDate) {
+                [$fromDate, $toDate] = [$toDate, $fromDate];
             }
 
             $summary = [
+                'can_view_financial' => $canViewFinancial,
+                'range_days' => $rangeDays,
+                'from_date' => $fromDate,
+                'to_date' => $toDate,
                 'totals' => getStats($pdo),
                 'today_total' => 0,
                 'today_paid' => 0,
                 'today_unpaid' => 0,
-                'avg_daily_last_30' => 0,
+                'avg_daily' => 0,
+                'consistency_rate' => 0,
                 'top_doctors' => [],
                 'top_patients' => [],
                 'daily' => []
@@ -1008,11 +1024,36 @@ if (isset($_POST['action']) && $_POST['action'] !== 'login' && $_POST['action'] 
             $summary['today_total'] = (int)$pdo->query("SELECT COUNT(*) FROM sick_leaves WHERE deleted_at IS NULL AND DATE(created_at) = CURDATE()")->fetchColumn();
             $summary['today_paid'] = (int)$pdo->query("SELECT COUNT(*) FROM sick_leaves WHERE deleted_at IS NULL AND is_paid = 1 AND DATE(created_at) = CURDATE()")->fetchColumn();
             $summary['today_unpaid'] = (int)$pdo->query("SELECT COUNT(*) FROM sick_leaves WHERE deleted_at IS NULL AND is_paid = 0 AND DATE(created_at) = CURDATE()")->fetchColumn();
-            $summary['avg_daily_last_30'] = (float)$pdo->query("SELECT COALESCE(AVG(day_count),0) FROM (SELECT DATE(created_at) d, COUNT(*) day_count FROM sick_leaves WHERE deleted_at IS NULL AND created_at >= DATE_SUB(NOW(), INTERVAL 30 DAY) GROUP BY DATE(created_at)) t")->fetchColumn();
 
-            $summary['top_doctors'] = $pdo->query("SELECT d.name, d.title, COUNT(*) leaves_count FROM sick_leaves sl LEFT JOIN doctors d ON d.id = sl.doctor_id WHERE sl.deleted_at IS NULL GROUP BY sl.doctor_id ORDER BY leaves_count DESC LIMIT 5")->fetchAll();
-            $summary['top_patients'] = $pdo->query("SELECT p.name, p.identity_number, COUNT(*) leaves_count, SUM(CASE WHEN sl.is_paid = 1 THEN sl.payment_amount ELSE 0 END) paid_amount, SUM(CASE WHEN sl.is_paid = 0 THEN sl.payment_amount ELSE 0 END) unpaid_amount FROM sick_leaves sl LEFT JOIN patients p ON p.id = sl.patient_id WHERE sl.deleted_at IS NULL GROUP BY sl.patient_id ORDER BY leaves_count DESC LIMIT 5")->fetchAll();
-            $summary['daily'] = $pdo->query("SELECT DATE(created_at) day_date, COUNT(*) total_count, SUM(CASE WHEN is_paid = 1 THEN 1 ELSE 0 END) paid_count, SUM(CASE WHEN is_paid = 0 THEN 1 ELSE 0 END) unpaid_count FROM sick_leaves WHERE deleted_at IS NULL AND created_at >= DATE_SUB(NOW(), INTERVAL 30 DAY) GROUP BY DATE(created_at) ORDER BY day_date DESC")->fetchAll();
+            $avgStmt = $pdo->prepare("SELECT COALESCE(AVG(day_count),0) FROM (SELECT DATE(created_at) d, COUNT(*) day_count FROM sick_leaves WHERE deleted_at IS NULL AND DATE(created_at) BETWEEN ? AND ? GROUP BY DATE(created_at)) t");
+            $avgStmt->execute([$fromDate, $toDate]);
+            $summary['avg_daily'] = (float)$avgStmt->fetchColumn();
+
+            $consistencyStmt = $pdo->prepare("SELECT (COUNT(DISTINCT DATE(created_at)) * 100.0 / GREATEST(DATEDIFF(?, ?) + 1, 1)) FROM sick_leaves WHERE deleted_at IS NULL AND DATE(created_at) BETWEEN ? AND ?");
+            $consistencyStmt->execute([$toDate, $fromDate, $fromDate, $toDate]);
+            $summary['consistency_rate'] = round((float)$consistencyStmt->fetchColumn(), 2);
+
+            $topDoctorsStmt = $pdo->prepare("SELECT d.name, d.title, COUNT(*) leaves_count FROM sick_leaves sl LEFT JOIN doctors d ON d.id = sl.doctor_id WHERE sl.deleted_at IS NULL AND DATE(sl.created_at) BETWEEN ? AND ? GROUP BY sl.doctor_id ORDER BY leaves_count DESC LIMIT 5");
+            $topDoctorsStmt->execute([$fromDate, $toDate]);
+            $summary['top_doctors'] = $topDoctorsStmt->fetchAll();
+
+            $topPatientsStmt = $pdo->prepare("SELECT p.name, p.identity_number, COUNT(*) leaves_count, SUM(CASE WHEN sl.is_paid = 1 THEN sl.payment_amount ELSE 0 END) paid_amount, SUM(CASE WHEN sl.is_paid = 0 THEN sl.payment_amount ELSE 0 END) unpaid_amount FROM sick_leaves sl LEFT JOIN patients p ON p.id = sl.patient_id WHERE sl.deleted_at IS NULL AND DATE(sl.created_at) BETWEEN ? AND ? GROUP BY sl.patient_id ORDER BY leaves_count DESC LIMIT 5");
+            $topPatientsStmt->execute([$fromDate, $toDate]);
+            $summary['top_patients'] = $topPatientsStmt->fetchAll();
+
+            $dailyStmt = $pdo->prepare("SELECT DATE(created_at) day_date, COUNT(*) total_count, SUM(CASE WHEN is_paid = 1 THEN 1 ELSE 0 END) paid_count, SUM(CASE WHEN is_paid = 0 THEN 1 ELSE 0 END) unpaid_count FROM sick_leaves WHERE deleted_at IS NULL AND DATE(created_at) BETWEEN ? AND ? GROUP BY DATE(created_at) ORDER BY day_date DESC");
+            $dailyStmt->execute([$fromDate, $toDate]);
+            $summary['daily'] = $dailyStmt->fetchAll();
+
+            if (!$canViewFinancial) {
+                $summary['totals']['paid_amount'] = null;
+                $summary['totals']['unpaid_amount'] = null;
+                foreach ($summary['top_patients'] as &$tp) {
+                    $tp['paid_amount'] = null;
+                    $tp['unpaid_amount'] = null;
+                }
+                unset($tp);
+            }
 
             echo json_encode(['success' => true, 'data' => $summary]);
             break;
@@ -1617,7 +1658,23 @@ if ($loggedIn) {
         }
 
         /* ======================== البطاقات الإحصائية ======================== */
-        .stats-grid {
+        
+        .stats-lux-card {
+            border: 1px solid rgba(67,97,238,.2);
+            background: linear-gradient(180deg, rgba(67,97,238,.04), rgba(76,201,240,.03));
+        }
+        .lux-chart-wrap {
+            border: 1px solid rgba(0,0,0,.08);
+            border-radius: 12px;
+            padding: 12px;
+            background: linear-gradient(135deg, rgba(255,255,255,.9), rgba(248,250,255,.9));
+            box-shadow: inset 0 1px 0 rgba(255,255,255,.65);
+        }
+        .dark-mode .lux-chart-wrap {
+            background: linear-gradient(135deg, rgba(30,41,59,.7), rgba(17,24,39,.8));
+            border-color: rgba(148,163,184,.25);
+        }
+.stats-grid {
             display: grid;
             grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
             gap: 12px;
@@ -2091,7 +2148,6 @@ if ($loggedIn) {
 
 <div class="container-fluid p-3">
     <!-- ======================== البطاقات الإحصائية ======================== -->
-<?php if ($_SESSION['admin_role'] === 'admin'): ?>
     <div class="stats-grid" id="statsGrid">
         <div class="stat-card">
             <div class="stat-icon"><i class="bi bi-file-earmark-medical"></i></div>
@@ -2123,6 +2179,7 @@ if ($loggedIn) {
             <div class="stat-value" id="stat-doctors"><?php echo $stats['doctors']; ?></div>
             <div class="stat-label">الأطباء</div>
         </div>
+        <?php if ($_SESSION['admin_role'] === 'admin'): ?>
         <div class="stat-card">
             <div class="stat-icon"><i class="bi bi-cash-stack"></i></div>
             <div class="stat-value" id="stat-paid-amount"><?php echo number_format($stats['paid_amount'], 2); ?></div>
@@ -2133,8 +2190,8 @@ if ($loggedIn) {
             <div class="stat-value" id="stat-unpaid-amount"><?php echo number_format($stats['unpaid_amount'], 2); ?></div>
             <div class="stat-label">المبالغ المستحقة</div>
         </div>
+        <?php endif; ?>
     </div>
-    <?php endif; ?>
 
     <!-- ======================== التبويبات ======================== -->
     <ul class="nav nav-tabs mb-3" id="mainTabs" role="tablist">
@@ -2173,13 +2230,11 @@ if ($loggedIn) {
                 <i class="bi bi-search"></i> سجل الاستعلامات
             </button>
         </li>
-        <?php if ($_SESSION['admin_role'] === 'admin'): ?>
         <li class="nav-item" role="presentation">
             <button class="nav-link" id="tab-admin-stats" data-bs-toggle="tab" data-bs-target="#pane-admin-stats" type="button" role="tab">
                 <i class="bi bi-bar-chart-line"></i> الإحصائيات
             </button>
         </li>
-        <?php endif; ?>
     </ul>
 
     <div class="tab-content" id="mainTabContent">
@@ -2561,16 +2616,36 @@ if ($loggedIn) {
         </div>
 
 
-        <?php if ($_SESSION['admin_role'] === 'admin'): ?>
         <div class="tab-pane fade" id="pane-admin-stats" role="tabpanel">
-            <div class="card-custom">
-                <div class="card-header d-flex justify-content-between align-items-center">
+            <div class="card-custom stats-lux-card">
+                <div class="card-header d-flex justify-content-between align-items-center flex-wrap gap-2">
                     <span><i class="bi bi-bar-chart-line text-primary"></i> الإحصائيات المتقدمة</span>
-                    <button class="btn btn-sm btn-outline-secondary" id="refreshAdminStats"><i class="bi bi-arrow-repeat"></i> تحديث</button>
+                    <div class="d-flex gap-2 flex-wrap align-items-center">
+                        <select id="adminStatsRangePreset" class="form-select form-select-sm" style="min-width:130px;">
+                            <option value="30">آخر 30 يوم</option>
+                            <option value="90">آخر 90 يوم</option>
+                            <option value="100">آخر 100 يوم</option>
+                            <option value="7">آخر 7 أيام</option>
+                            <option value="custom">تاريخ مخصص</option>
+                        </select>
+                        <input type="date" id="adminStatsFromDate" class="form-control form-control-sm" style="max-width:150px;">
+                        <input type="date" id="adminStatsToDate" class="form-control form-control-sm" style="max-width:150px;">
+                        <button class="btn btn-sm btn-gradient" id="applyAdminStatsRange"><i class="bi bi-funnel"></i> تطبيق</button>
+                        <button class="btn btn-sm btn-outline-secondary" id="refreshAdminStats"><i class="bi bi-arrow-repeat"></i> تحديث</button>
+                    </div>
                 </div>
                 <div class="card-body">
                     <div class="row g-2 mb-3" id="adminStatsCards"></div>
-                    <h6 class="mt-2">إحصائيات يومية (آخر 30 يوم)</h6>
+
+                    <div class="lux-chart-wrap mb-3">
+                        <div class="d-flex justify-content-between align-items-center mb-2">
+                            <h6 class="mb-0">اتجاه الإجازات اليومي</h6>
+                            <small class="text-muted">إجمالي/مدفوع/غير مدفوع</small>
+                        </div>
+                        <canvas id="adminStatsChart" height="120"></canvas>
+                    </div>
+
+                    <h6 class="mt-2">إحصائيات يومية</h6>
                     <div class="table-responsive mb-3">
                         <table class="table table-bordered table-sm text-center" id="adminDailyStatsTable">
                             <thead><tr><th>اليوم</th><th>عدد الإجازات</th><th>مدفوعة</th><th>غير مدفوعة</th></tr></thead>
@@ -2583,14 +2658,13 @@ if ($loggedIn) {
                             <ul class="list-group" id="adminTopDoctors"></ul>
                         </div>
                         <div class="col-md-6">
-                            <h6>أعلى المرضى (إجازات/مدفوع/مستحق)</h6>
+                            <h6>أعلى المرضى</h6>
                             <ul class="list-group" id="adminTopPatients"></ul>
                         </div>
                     </div>
                 </div>
             </div>
         </div>
-        <?php endif; ?>
 
         <!-- ======================== تبويب المدفوعات ======================== -->
         <div class="tab-pane fade d-none" id="pane-payments" role="tabpanel">
@@ -3531,29 +3605,100 @@ function updateChatUnreadBadge(count) {
 }
 
 
+function drawAdminStatsChart(dailyRows) {
+    const canvas = document.getElementById('adminStatsChart');
+    if (!canvas) return;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return;
+
+    const rows = [...(dailyRows || [])].reverse();
+    const w = canvas.width = canvas.clientWidth || 900;
+    const h = canvas.height = 220;
+    ctx.clearRect(0, 0, w, h);
+
+    if (!rows.length) {
+        ctx.fillStyle = '#6b7280';
+        ctx.font = '14px sans-serif';
+        ctx.fillText('لا توجد بيانات للرسم البياني', 20, 40);
+        return;
+    }
+
+    const pad = { l: 40, r: 12, t: 14, b: 30 };
+    const maxY = Math.max(...rows.map(r => parseInt(r.total_count || 0, 10)), 1);
+    const stepX = (w - pad.l - pad.r) / Math.max(rows.length - 1, 1);
+    const y = val => h - pad.b - ((val / maxY) * (h - pad.t - pad.b));
+
+    ctx.strokeStyle = 'rgba(148,163,184,.35)';
+    ctx.lineWidth = 1;
+    for (let i = 0; i <= 4; i++) {
+        const yy = pad.t + ((h - pad.t - pad.b) * i / 4);
+        ctx.beginPath();
+        ctx.moveTo(pad.l, yy);
+        ctx.lineTo(w - pad.r, yy);
+        ctx.stroke();
+    }
+
+    function drawLine(field, color) {
+        ctx.beginPath();
+        rows.forEach((r, i) => {
+            const x = pad.l + i * stepX;
+            const yy = y(parseInt(r[field] || 0, 10));
+            if (i === 0) ctx.moveTo(x, yy); else ctx.lineTo(x, yy);
+        });
+        ctx.strokeStyle = color;
+        ctx.lineWidth = 2.5;
+        ctx.stroke();
+    }
+
+    drawLine('total_count', '#2563eb');
+    drawLine('paid_count', '#059669');
+    drawLine('unpaid_count', '#dc2626');
+
+    const legends = [
+        ['إجمالي', '#2563eb'],
+        ['مدفوع', '#059669'],
+        ['غير مدفوع', '#dc2626']
+    ];
+    legends.forEach((l, i) => {
+        const lx = 20 + i * 110;
+        const ly = h - 10;
+        ctx.fillStyle = l[1];
+        ctx.fillRect(lx, ly - 8, 12, 3);
+        ctx.fillStyle = '#334155';
+        ctx.font = '12px sans-serif';
+        ctx.fillText(l[0], lx + 18, ly);
+    });
+}
+
 function renderAdminStats(data) {
-    if (!IS_ADMIN || !data) return;
     const cards = document.getElementById('adminStatsCards');
     const dailyTbody = document.querySelector('#adminDailyStatsTable tbody');
     const topDoctors = document.getElementById('adminTopDoctors');
     const topPatients = document.getElementById('adminTopPatients');
-    if (!cards || !dailyTbody || !topDoctors || !topPatients) return;
+    if (!cards || !dailyTbody || !topDoctors || !topPatients || !data) return;
 
     const t = data.totals || {};
+    const canViewFinancial = !!data.can_view_financial;
     const cardItems = [
         ['إجمالي الإجازات النشطة', t.total || 0, 'primary'],
         ['المدفوعة', t.paid || 0, 'success'],
         ['غير المدفوعة', t.unpaid || 0, 'danger'],
-        ['إجمالي المدفوعات', parseFloat(t.paid_amount || 0).toFixed(2), 'success'],
-        ['إجمالي المستحقات', parseFloat(t.unpaid_amount || 0).toFixed(2), 'danger'],
         ['إجازات اليوم', data.today_total || 0, 'info'],
         ['مدفوعة اليوم', data.today_paid || 0, 'success'],
         ['غير مدفوعة اليوم', data.today_unpaid || 0, 'warning'],
-        ['متوسط يومي (30 يوم)', parseFloat(data.avg_daily_last_30 || 0).toFixed(2), 'secondary']
+        ['متوسط يومي', parseFloat(data.avg_daily || 0).toFixed(2), 'secondary'],
+        ['ثبات النشاط %', parseFloat(data.consistency_rate || 0).toFixed(1) + '%', 'dark']
     ];
+    if (canViewFinancial) {
+        cardItems.splice(3, 0,
+            ['إجمالي المدفوعات', parseFloat(t.paid_amount || 0).toFixed(2), 'success'],
+            ['إجمالي المستحقات', parseFloat(t.unpaid_amount || 0).toFixed(2), 'danger']
+        );
+    }
+
     cards.innerHTML = cardItems.map(([label,val,color]) => `
         <div class="col-md-4 col-lg-3">
-            <div class="card border-${color}">
+            <div class="card border-${color} h-100 shadow-sm">
                 <div class="card-body py-2">
                     <div class="small text-muted">${label}</div>
                     <div class="h5 mb-0">${val}</div>
@@ -3570,26 +3715,52 @@ function renderAdminStats(data) {
     `).join('') || '<li class="list-group-item text-muted">لا توجد بيانات</li>';
 
     topPatients.innerHTML = (data.top_patients || []).map(p => `
-        <li class="list-group-item"><div class="d-flex justify-content-between"><span>${htmlspecialchars(p.name || 'غير محدد')} (${htmlspecialchars(p.identity_number || '-')})</span><strong>${p.leaves_count || 0}</strong></div><small class="text-success">مدفوع: ${parseFloat(p.paid_amount || 0).toFixed(2)}</small> - <small class="text-danger">مستحق: ${parseFloat(p.unpaid_amount || 0).toFixed(2)}</small></li>
+        <li class="list-group-item"><div class="d-flex justify-content-between"><span>${htmlspecialchars(p.name || 'غير محدد')} (${htmlspecialchars(p.identity_number || '-')})</span><strong>${p.leaves_count || 0}</strong></div>${canViewFinancial ? `<small class="text-success">مدفوع: ${parseFloat(p.paid_amount || 0).toFixed(2)}</small> - <small class="text-danger">مستحق: ${parseFloat(p.unpaid_amount || 0).toFixed(2)}</small>` : '<small class="text-muted">البيانات المالية للمشرف فقط</small>'}</li>
     `).join('') || '<li class="list-group-item text-muted">لا توجد بيانات</li>';
+
+    drawAdminStatsChart(data.daily || []);
 }
 
 async function fetchAdminStats() {
-    if (!IS_ADMIN) return;
-    const result = await sendAjaxRequest('fetch_admin_statistics', {});
+    const preset = document.getElementById('adminStatsRangePreset')?.value || '30';
+    let rangeDays = 30;
+    const payload = {};
+
+    if (preset === 'custom') {
+        payload.from_date = document.getElementById('adminStatsFromDate')?.value || '';
+        payload.to_date = document.getElementById('adminStatsToDate')?.value || '';
+    } else {
+        rangeDays = parseInt(preset, 10) || 30;
+        payload.range_days = rangeDays;
+        const to = new Date();
+        const from = new Date();
+        from.setDate(to.getDate() - (rangeDays - 1));
+        const toVal = to.toISOString().slice(0,10);
+        const fromVal = from.toISOString().slice(0,10);
+        const fromEl = document.getElementById('adminStatsFromDate');
+        const toEl = document.getElementById('adminStatsToDate');
+        if (fromEl) fromEl.value = fromVal;
+        if (toEl) toEl.value = toVal;
+    }
+
+    const result = await sendAjaxRequest('fetch_admin_statistics', payload);
     if (result.success) renderAdminStats(result.data);
 }
 
 function updateStats(stats) {
     if (!stats) return;
-    document.getElementById('stat-total').textContent = stats.total || 0;
-    document.getElementById('stat-paid').textContent = stats.paid || 0;
-    document.getElementById('stat-unpaid').textContent = stats.unpaid || 0;
-    document.getElementById('stat-archived').textContent = stats.archived || 0;
-    document.getElementById('stat-patients').textContent = stats.patients || 0;
-    document.getElementById('stat-doctors').textContent = stats.doctors || 0;
-    document.getElementById('stat-paid-amount').textContent = parseFloat(stats.paid_amount || 0).toFixed(2);
-    document.getElementById('stat-unpaid-amount').textContent = parseFloat(stats.unpaid_amount || 0).toFixed(2);
+    const setText = (id, val) => {
+        const el = document.getElementById(id);
+        if (el) el.textContent = val;
+    };
+    setText('stat-total', stats.total || 0);
+    setText('stat-paid', stats.paid || 0);
+    setText('stat-unpaid', stats.unpaid || 0);
+    setText('stat-archived', stats.archived || 0);
+    setText('stat-patients', stats.patients || 0);
+    setText('stat-doctors', stats.doctors || 0);
+    setText('stat-paid-amount', parseFloat(stats.paid_amount || 0).toFixed(2));
+    setText('stat-unpaid-amount', parseFloat(stats.unpaid_amount || 0).toFixed(2));
 }
 
 function updateDoctorSelects(doctors) {
@@ -5269,14 +5440,31 @@ document.addEventListener('DOMContentLoaded', () => {
     });
 
 
-    if (IS_ADMIN) {
-        document.getElementById('tab-admin-stats')?.addEventListener('click', () => {
-            fetchAdminStats();
-        });
-        document.getElementById('refreshAdminStats')?.addEventListener('click', () => {
-            fetchAdminStats();
-        });
-    }
+    document.getElementById('tab-admin-stats')?.addEventListener('click', () => {
+        fetchAdminStats();
+    });
+    document.getElementById('refreshAdminStats')?.addEventListener('click', () => {
+        fetchAdminStats();
+    });
+    document.getElementById('applyAdminStatsRange')?.addEventListener('click', () => {
+        fetchAdminStats();
+    });
+    document.getElementById('adminStatsRangePreset')?.addEventListener('change', (e) => {
+        const custom = e.target.value === 'custom';
+        document.getElementById('adminStatsFromDate')?.toggleAttribute('disabled', !custom);
+        document.getElementById('adminStatsToDate')?.toggleAttribute('disabled', !custom);
+        if (!custom) fetchAdminStats();
+    });
+
+    const toDateDefault = new Date();
+    const fromDateDefault = new Date();
+    fromDateDefault.setDate(toDateDefault.getDate() - 29);
+    const fromInput = document.getElementById('adminStatsFromDate');
+    const toInput = document.getElementById('adminStatsToDate');
+    if (fromInput) fromInput.value = fromDateDefault.toISOString().slice(0, 10);
+    if (toInput) toInput.value = toDateDefault.toISOString().slice(0, 10);
+    if (fromInput) fromInput.setAttribute('disabled', 'disabled');
+    if (toInput) toInput.setAttribute('disabled', 'disabled');
 
     // ====== التحميل الأولي ======
     applyAllCurrentFilters();
