@@ -987,6 +987,36 @@ if (isset($_POST['action']) && $_POST['action'] !== 'login' && $_POST['action'] 
             }
             break;
 
+
+        case 'fetch_admin_statistics':
+            if (($_SESSION['admin_role'] ?? 'user') !== 'admin') {
+                echo json_encode(['success' => false, 'message' => 'غير مصرح']);
+                break;
+            }
+
+            $summary = [
+                'totals' => getStats($pdo),
+                'today_total' => 0,
+                'today_paid' => 0,
+                'today_unpaid' => 0,
+                'avg_daily_last_30' => 0,
+                'top_doctors' => [],
+                'top_patients' => [],
+                'daily' => []
+            ];
+
+            $summary['today_total'] = (int)$pdo->query("SELECT COUNT(*) FROM sick_leaves WHERE deleted_at IS NULL AND DATE(created_at) = CURDATE()")->fetchColumn();
+            $summary['today_paid'] = (int)$pdo->query("SELECT COUNT(*) FROM sick_leaves WHERE deleted_at IS NULL AND is_paid = 1 AND DATE(created_at) = CURDATE()")->fetchColumn();
+            $summary['today_unpaid'] = (int)$pdo->query("SELECT COUNT(*) FROM sick_leaves WHERE deleted_at IS NULL AND is_paid = 0 AND DATE(created_at) = CURDATE()")->fetchColumn();
+            $summary['avg_daily_last_30'] = (float)$pdo->query("SELECT COALESCE(AVG(day_count),0) FROM (SELECT DATE(created_at) d, COUNT(*) day_count FROM sick_leaves WHERE deleted_at IS NULL AND created_at >= DATE_SUB(NOW(), INTERVAL 30 DAY) GROUP BY DATE(created_at)) t")->fetchColumn();
+
+            $summary['top_doctors'] = $pdo->query("SELECT d.name, d.title, COUNT(*) leaves_count FROM sick_leaves sl LEFT JOIN doctors d ON d.id = sl.doctor_id WHERE sl.deleted_at IS NULL GROUP BY sl.doctor_id ORDER BY leaves_count DESC LIMIT 5")->fetchAll();
+            $summary['top_patients'] = $pdo->query("SELECT p.name, p.identity_number, COUNT(*) leaves_count, SUM(CASE WHEN sl.is_paid = 1 THEN sl.payment_amount ELSE 0 END) paid_amount, SUM(CASE WHEN sl.is_paid = 0 THEN sl.payment_amount ELSE 0 END) unpaid_amount FROM sick_leaves sl LEFT JOIN patients p ON p.id = sl.patient_id WHERE sl.deleted_at IS NULL GROUP BY sl.patient_id ORDER BY leaves_count DESC LIMIT 5")->fetchAll();
+            $summary['daily'] = $pdo->query("SELECT DATE(created_at) day_date, COUNT(*) total_count, SUM(CASE WHEN is_paid = 1 THEN 1 ELSE 0 END) paid_count, SUM(CASE WHEN is_paid = 0 THEN 1 ELSE 0 END) unpaid_count FROM sick_leaves WHERE deleted_at IS NULL AND created_at >= DATE_SUB(NOW(), INTERVAL 30 DAY) GROUP BY DATE(created_at) ORDER BY day_date DESC")->fetchAll();
+
+            echo json_encode(['success' => true, 'data' => $summary]);
+            break;
+
         case 'fetch_notifications':
             ensureDelayedUnpaidNotifications($pdo);
             $notifications = $pdo->query(" 
@@ -2061,6 +2091,7 @@ if ($loggedIn) {
 
 <div class="container-fluid p-3">
     <!-- ======================== البطاقات الإحصائية ======================== -->
+<?php if ($_SESSION['admin_role'] === 'admin'): ?>
     <div class="stats-grid" id="statsGrid">
         <div class="stat-card">
             <div class="stat-icon"><i class="bi bi-file-earmark-medical"></i></div>
@@ -2103,6 +2134,7 @@ if ($loggedIn) {
             <div class="stat-label">المبالغ المستحقة</div>
         </div>
     </div>
+    <?php endif; ?>
 
     <!-- ======================== التبويبات ======================== -->
     <ul class="nav nav-tabs mb-3" id="mainTabs" role="tablist">
@@ -2141,6 +2173,13 @@ if ($loggedIn) {
                 <i class="bi bi-search"></i> سجل الاستعلامات
             </button>
         </li>
+        <?php if ($_SESSION['admin_role'] === 'admin'): ?>
+        <li class="nav-item" role="presentation">
+            <button class="nav-link" id="tab-admin-stats" data-bs-toggle="tab" data-bs-target="#pane-admin-stats" type="button" role="tab">
+                <i class="bi bi-bar-chart-line"></i> الإحصائيات
+            </button>
+        </li>
+        <?php endif; ?>
     </ul>
 
     <div class="tab-content" id="mainTabContent">
@@ -2520,6 +2559,38 @@ if ($loggedIn) {
                 </div>
             </div>
         </div>
+
+
+        <?php if ($_SESSION['admin_role'] === 'admin'): ?>
+        <div class="tab-pane fade" id="pane-admin-stats" role="tabpanel">
+            <div class="card-custom">
+                <div class="card-header d-flex justify-content-between align-items-center">
+                    <span><i class="bi bi-bar-chart-line text-primary"></i> الإحصائيات المتقدمة</span>
+                    <button class="btn btn-sm btn-outline-secondary" id="refreshAdminStats"><i class="bi bi-arrow-repeat"></i> تحديث</button>
+                </div>
+                <div class="card-body">
+                    <div class="row g-2 mb-3" id="adminStatsCards"></div>
+                    <h6 class="mt-2">إحصائيات يومية (آخر 30 يوم)</h6>
+                    <div class="table-responsive mb-3">
+                        <table class="table table-bordered table-sm text-center" id="adminDailyStatsTable">
+                            <thead><tr><th>اليوم</th><th>عدد الإجازات</th><th>مدفوعة</th><th>غير مدفوعة</th></tr></thead>
+                            <tbody></tbody>
+                        </table>
+                    </div>
+                    <div class="row g-3">
+                        <div class="col-md-6">
+                            <h6>أعلى الأطباء (عدد إجازات)</h6>
+                            <ul class="list-group" id="adminTopDoctors"></ul>
+                        </div>
+                        <div class="col-md-6">
+                            <h6>أعلى المرضى (إجازات/مدفوع/مستحق)</h6>
+                            <ul class="list-group" id="adminTopPatients"></ul>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+        <?php endif; ?>
 
         <!-- ======================== تبويب المدفوعات ======================== -->
         <div class="tab-pane fade d-none" id="pane-payments" role="tabpanel">
@@ -3457,6 +3528,56 @@ function updateChatUnreadBadge(count) {
     const c = parseInt(count || 0, 10);
     badge.textContent = c;
     badge.style.display = c > 0 ? 'inline-block' : 'none';
+}
+
+
+function renderAdminStats(data) {
+    if (!IS_ADMIN || !data) return;
+    const cards = document.getElementById('adminStatsCards');
+    const dailyTbody = document.querySelector('#adminDailyStatsTable tbody');
+    const topDoctors = document.getElementById('adminTopDoctors');
+    const topPatients = document.getElementById('adminTopPatients');
+    if (!cards || !dailyTbody || !topDoctors || !topPatients) return;
+
+    const t = data.totals || {};
+    const cardItems = [
+        ['إجمالي الإجازات النشطة', t.total || 0, 'primary'],
+        ['المدفوعة', t.paid || 0, 'success'],
+        ['غير المدفوعة', t.unpaid || 0, 'danger'],
+        ['إجمالي المدفوعات', parseFloat(t.paid_amount || 0).toFixed(2), 'success'],
+        ['إجمالي المستحقات', parseFloat(t.unpaid_amount || 0).toFixed(2), 'danger'],
+        ['إجازات اليوم', data.today_total || 0, 'info'],
+        ['مدفوعة اليوم', data.today_paid || 0, 'success'],
+        ['غير مدفوعة اليوم', data.today_unpaid || 0, 'warning'],
+        ['متوسط يومي (30 يوم)', parseFloat(data.avg_daily_last_30 || 0).toFixed(2), 'secondary']
+    ];
+    cards.innerHTML = cardItems.map(([label,val,color]) => `
+        <div class="col-md-4 col-lg-3">
+            <div class="card border-${color}">
+                <div class="card-body py-2">
+                    <div class="small text-muted">${label}</div>
+                    <div class="h5 mb-0">${val}</div>
+                </div>
+            </div>
+        </div>`).join('');
+
+    dailyTbody.innerHTML = (data.daily || []).map(r => `
+        <tr><td>${htmlspecialchars(r.day_date || '')}</td><td>${r.total_count || 0}</td><td>${r.paid_count || 0}</td><td>${r.unpaid_count || 0}</td></tr>
+    `).join('') || '<tr><td colspan="4" class="text-muted">لا توجد بيانات</td></tr>';
+
+    topDoctors.innerHTML = (data.top_doctors || []).map(d => `
+        <li class="list-group-item d-flex justify-content-between"><span>${htmlspecialchars(d.name || 'غير محدد')} <small class="text-muted">${htmlspecialchars(d.title || '')}</small></span><strong>${d.leaves_count || 0}</strong></li>
+    `).join('') || '<li class="list-group-item text-muted">لا توجد بيانات</li>';
+
+    topPatients.innerHTML = (data.top_patients || []).map(p => `
+        <li class="list-group-item"><div class="d-flex justify-content-between"><span>${htmlspecialchars(p.name || 'غير محدد')} (${htmlspecialchars(p.identity_number || '-')})</span><strong>${p.leaves_count || 0}</strong></div><small class="text-success">مدفوع: ${parseFloat(p.paid_amount || 0).toFixed(2)}</small> - <small class="text-danger">مستحق: ${parseFloat(p.unpaid_amount || 0).toFixed(2)}</small></li>
+    `).join('') || '<li class="list-group-item text-muted">لا توجد بيانات</li>';
+}
+
+async function fetchAdminStats() {
+    if (!IS_ADMIN) return;
+    const result = await sendAjaxRequest('fetch_admin_statistics', {});
+    if (result.success) renderAdminStats(result.data);
 }
 
 function updateStats(stats) {
@@ -5146,6 +5267,16 @@ document.addEventListener('DOMContentLoaded', () => {
             leaveDetailsModal.show();
         }
     });
+
+
+    if (IS_ADMIN) {
+        document.getElementById('tab-admin-stats')?.addEventListener('click', () => {
+            fetchAdminStats();
+        });
+        document.getElementById('refreshAdminStats')?.addEventListener('click', () => {
+            fetchAdminStats();
+        });
+    }
 
     // ====== التحميل الأولي ======
     applyAllCurrentFilters();
