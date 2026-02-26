@@ -3402,7 +3402,163 @@ function exportTableToExcel(tableEl, filename) {
 
 function printTableContent(tableEl, title) {
     const win = window.open('', '_blank');
-    win.document.write(`<html dir="rtl"><head><title>${title}</title><style>body{font-family:Cairo,sans-serif;direction:rtl}table{width:100%;border-collapse:collapse}th,td{border:1px solid #ddd;padding:6px;text-align:center;font-size:12px}th{background:#2c3e50;color:#fff}h2{text-align:center}</style></head><body><h2>${title}</h2>${tableEl.outerHTML}</body></html>`);
+    win.document.write(`<html dir="rtl"><head><title>${title}</title><style>body{font-family:Cairo,sans-serif;direction:rtl}table{width:100%;border-collapse:collapse}th,td{border:1px solid #ddd;padding:6px;text-align:center;font-size:12px}th{background:#2c3e50;color:#fff}h2{text-align:center}
+
+        /* ===== Radical UI Refresh ===== */
+        body {
+            background:
+                radial-gradient(1200px 600px at 100% -10%, rgba(67,97,238,.12), transparent 60%),
+                radial-gradient(900px 500px at -10% 20%, rgba(0,176,255,.10), transparent 55%),
+                var(--bg-color);
+        }
+        .dark-mode body,
+        body.dark-mode {
+            background:
+                radial-gradient(1200px 600px at 100% -10%, rgba(96,165,250,.12), transparent 60%),
+                radial-gradient(900px 500px at -10% 20%, rgba(34,211,238,.10), transparent 55%),
+                var(--bg-color);
+        }
+
+        .top-navbar {
+            backdrop-filter: blur(10px);
+            background: linear-gradient(135deg, rgba(26,115,232,.92), rgba(88,86,214,.88));
+            border-bottom: 1px solid rgba(255,255,255,.18);
+            box-shadow: 0 10px 28px rgba(17,24,39,.18);
+        }
+        .dark-mode .top-navbar {
+            background: linear-gradient(135deg, rgba(30,41,59,.9), rgba(15,23,42,.95));
+            border-bottom-color: rgba(148,163,184,.2);
+        }
+
+        #mainTabs {
+            border: 1px solid rgba(99,102,241,.16);
+            background: rgba(255,255,255,.75);
+            backdrop-filter: blur(8px);
+            border-radius: 16px;
+            padding: 8px;
+            gap: 6px;
+            box-shadow: 0 10px 20px rgba(2,6,23,.05);
+        }
+        #mainTabs .nav-link {
+            border: none;
+            border-radius: 12px;
+            color: #334155;
+            padding: 10px 14px;
+            transition: .25s ease;
+            font-weight: 600;
+        }
+        #mainTabs .nav-link:hover {
+            background: rgba(67,97,238,.08);
+            color: var(--primary-color);
+            transform: translateY(-1px);
+        }
+        #mainTabs .nav-link.active {
+            background: linear-gradient(135deg, #4361ee, #3a86ff);
+            color: #fff;
+            box-shadow: 0 8px 18px rgba(67,97,238,.35);
+        }
+        .dark-mode #mainTabs {
+            background: rgba(17,24,39,.55);
+            border-color: rgba(148,163,184,.22);
+        }
+        .dark-mode #mainTabs .nav-link { color: #cbd5e1; }
+        .dark-mode #mainTabs .nav-link:hover { background: rgba(148,163,184,.15); color: #fff; }
+
+        .stat-card {
+            border: 1px solid rgba(99,102,241,.14);
+            background: linear-gradient(160deg, rgba(255,255,255,.92), rgba(248,250,252,.88));
+            border-radius: 16px;
+            box-shadow: 0 10px 25px rgba(15,23,42,.08);
+        }
+        .dark-mode .stat-card {
+            background: linear-gradient(160deg, rgba(30,41,59,.92), rgba(15,23,42,.90));
+            border-color: rgba(148,163,184,.22);
+            box-shadow: 0 10px 30px rgba(0,0,0,.35);
+        }
+        .stat-card .stat-icon {
+            width: 42px; height: 42px;
+            border-radius: 12px;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            background: rgba(67,97,238,.12);
+        }
+        .dark-mode .stat-card .stat-icon { background: rgba(96,165,250,.2); }
+
+        .card-custom {
+            border: 1px solid rgba(15,23,42,.08);
+            border-radius: 18px;
+            overflow: hidden;
+            background: linear-gradient(180deg, rgba(255,255,255,.95), rgba(255,255,255,.9));
+            box-shadow: 0 14px 30px rgba(15,23,42,.08);
+        }
+        .card-custom .card-header {
+            border-bottom: 1px solid rgba(99,102,241,.12);
+            background: linear-gradient(120deg, rgba(99,102,241,.07), rgba(14,165,233,.07));
+            font-weight: 700;
+        }
+        .dark-mode .card-custom {
+            border-color: rgba(148,163,184,.16);
+            background: linear-gradient(180deg, rgba(15,23,42,.94), rgba(17,24,39,.92));
+            box-shadow: 0 16px 36px rgba(0,0,0,.35);
+        }
+        .dark-mode .card-custom .card-header {
+            border-bottom-color: rgba(148,163,184,.16);
+            background: linear-gradient(120deg, rgba(59,130,246,.15), rgba(34,211,238,.08));
+        }
+
+        .table-responsive {
+            border: 1px solid rgba(148,163,184,.18);
+            border-radius: 14px;
+            overflow: hidden;
+            background: rgba(255,255,255,.6);
+        }
+        .dark-mode .table-responsive {
+            background: rgba(15,23,42,.4);
+            border-color: rgba(148,163,184,.24);
+        }
+        .table thead th {
+            background: linear-gradient(135deg, rgba(67,97,238,.12), rgba(14,165,233,.10));
+            font-weight: 700;
+        }
+        .dark-mode .table thead th {
+            background: linear-gradient(135deg, rgba(59,130,246,.24), rgba(34,211,238,.16));
+            color: #e2e8f0;
+        }
+
+        .form-control, .form-select {
+            border-radius: 12px;
+            border: 1px solid rgba(148,163,184,.3);
+            background: rgba(255,255,255,.85);
+        }
+        .form-control:focus, .form-select:focus {
+            border-color: rgba(67,97,238,.55);
+            box-shadow: 0 0 0 3px rgba(67,97,238,.15);
+        }
+        .dark-mode .form-control, .dark-mode .form-select {
+            background: rgba(30,41,59,.7);
+            border-color: rgba(148,163,184,.3);
+            color: #f1f5f9;
+        }
+
+        .btn-gradient, .btn-success-custom, .btn-danger-custom {
+            border-radius: 12px;
+            box-shadow: 0 8px 18px rgba(15,23,42,.14);
+        }
+        .btn-gradient:hover, .btn-success-custom:hover, .btn-danger-custom:hover {
+            transform: translateY(-2px) scale(1.01);
+        }
+
+        .modal-content {
+            border-radius: 18px;
+            border: 1px solid rgba(148,163,184,.2);
+            box-shadow: 0 18px 40px rgba(2,6,23,.28);
+        }
+        .dark-mode .modal-content {
+            border-color: rgba(148,163,184,.26);
+            box-shadow: 0 18px 42px rgba(0,0,0,.5);
+        }
+</style></head><body><h2>${title}</h2>${tableEl.outerHTML}</body></html>`);
     win.document.close();
     win.print();
 }
