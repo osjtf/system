@@ -2354,18 +2354,34 @@ $uiDarkGlowEnabled = getSetting($pdo, 'dark_glow_enabled', '1') === '1' ? '1' : 
             padding: 10px 8px;
             vertical-align: middle;
             border-color: var(--border);
-            color: var(--text);
+            color: #111827;
+            font-weight: 600;
+        }
+
+        .table tbody td a,
+        .table tbody td .text-dark,
+        .table tbody td .text-muted,
+        .table tbody td span,
+        .table tbody td small {
+            color: #0f172a !important;
+            text-shadow: none !important;
         }
 
         .dark-mode .table tbody td {
-            color: #e2e8f0;
-            border-color: rgba(148,163,184,0.12);
+            color: #111827 !important;
+            border-color: rgba(148,163,184,0.25);
+            background: rgba(248,250,252,0.96);
+            text-shadow: none !important;
         }
 
         .dark-mode .table tbody td a,
         .dark-mode .table tbody td .btn-link,
-        .dark-mode .table tbody td .text-dark {
-            color: #93c5fd !important;
+        .dark-mode .table tbody td .text-dark,
+        .dark-mode .table tbody td .text-muted,
+        .dark-mode .table tbody td span,
+        .dark-mode .table tbody td small {
+            color: #0f172a !important;
+            text-shadow: none !important;
         }
 
         .dark-mode .table .no-results td {
@@ -2379,13 +2395,15 @@ $uiDarkGlowEnabled = getSetting($pdo, 'dark_glow_enabled', '1') === '1' ? '1' : 
         .dark-mode .table-responsive,
         .dark-mode .table-responsive .form-control,
         .dark-mode .table-responsive .form-select {
-            color: #e5edf9;
+            color: #111827 !important;
+            text-shadow: none !important;
         }
 
         .dark-mode .table tbody td small,
         .dark-mode .table tbody td .small,
         .dark-mode .table tbody td .text-muted {
-            color: #c3d2e8 !important;
+            color: #334155 !important;
+            text-shadow: none !important;
         }
 
         .dark-mode .table .btn-outline-secondary {
@@ -2400,9 +2418,6 @@ $uiDarkGlowEnabled = getSetting($pdo, 'dark_glow_enabled', '1') === '1' ? '1' : 
 
         /* تخصيص لون بيانات الدارك مود (من الإعدادات) */
         .dark-mode .stat-value,
-        .dark-mode .table tbody td,
-        .dark-mode .table tbody td strong,
-        .dark-mode .table tbody td .badge,
         .dark-mode .list-group-item,
         .dark-mode .chat-text,
         .dark-mode .card-header,
@@ -2411,7 +2426,6 @@ $uiDarkGlowEnabled = getSetting($pdo, 'dark_glow_enabled', '1') === '1' ? '1' : 
             text-shadow: var(--dark-glow-shadow);
         }
 
-        .dark-mode .table tbody td a,
         .dark-mode .table.mobile-readable td::before,
         .dark-mode .text-muted {
             color: var(--dark-data-color) !important;
@@ -3189,12 +3203,13 @@ $uiDarkGlowEnabled = getSetting($pdo, 'dark_glow_enabled', '1') === '1' ? '1' : 
             }
 
             .dark-mode .table.mobile-readable td {
-                color: #edf4ff !important;
+                color: #111827 !important;
+                background: #f8fafc;
                 border-bottom-color: rgba(148,163,184,0.28) !important;
             }
 
             .dark-mode .table.mobile-readable td::before {
-                color: #93c5fd;
+                color: #334155;
             }
 
             #chatMessagesBox { height: 320px; }
