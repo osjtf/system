@@ -208,6 +208,16 @@ function setSetting(PDO $pdo, string $key, string $value): void {
     $stmt->execute([$key, $value]);
 }
 
+function sanitizeHexColor(string $color, string $fallback): string {
+    $color = trim($color);
+    if (preg_match('/^#([0-9a-fA-F]{6})$/', $color)) return strtolower($color);
+    if (preg_match('/^#([0-9a-fA-F]{3})$/', $color)) {
+        $c = strtolower($color);
+        return '#' . $c[1] . $c[1] . $c[2] . $c[2] . $c[3] . $c[3];
+    }
+    return $fallback;
+}
+
 function getUnreadMessagesCount(PDO $pdo, int $userId): int {
     if ($userId <= 0) return 0;
     $stmt = $pdo->prepare("SELECT COUNT(*) FROM user_messages WHERE receiver_id = ? AND is_read = 0 AND deleted_at IS NULL");
@@ -1349,6 +1359,48 @@ if (isset($_POST['action']) && $_POST['action'] !== 'login' && $_POST['action'] 
             echo json_encode(['success' => true, 'message' => 'تم تنظيف المحادثات حسب المدة.']);
             break;
 
+
+        case 'fetch_ui_preferences':
+            echo json_encode([
+                'success' => true,
+                'preferences' => [
+                    'dark_text_color' => getSetting($pdo, 'dark_text_color', '#d8c8ff'),
+                    'dark_glow_enabled' => getSetting($pdo, 'dark_glow_enabled', '1'),
+                    'dark_glow_color' => getSetting($pdo, 'dark_glow_color', '#8b5cf6'),
+                    'font_family' => getSetting($pdo, 'ui_font_family', 'Cairo')
+                ]
+            ]);
+            break;
+
+        case 'save_ui_preferences':
+            if (($_SESSION['admin_role'] ?? 'user') !== 'admin') {
+                echo json_encode(['success' => false, 'message' => 'ليس لديك صلاحية.']);
+                break;
+            }
+            $allowedFonts = ['Cairo','Tajawal','Almarai','Changa','IBM Plex Sans Arabic'];
+            $fontFamily = trim((string)($_POST['font_family'] ?? 'Cairo'));
+            if (!in_array($fontFamily, $allowedFonts, true)) $fontFamily = 'Cairo';
+            $darkTextColor = sanitizeHexColor((string)($_POST['dark_text_color'] ?? '#d8c8ff'), '#d8c8ff');
+            $darkGlowColor = sanitizeHexColor((string)($_POST['dark_glow_color'] ?? '#8b5cf6'), '#8b5cf6');
+            $darkGlowEnabled = (($_POST['dark_glow_enabled'] ?? '1') === '1') ? '1' : '0';
+
+            setSetting($pdo, 'ui_font_family', $fontFamily);
+            setSetting($pdo, 'dark_text_color', $darkTextColor);
+            setSetting($pdo, 'dark_glow_color', $darkGlowColor);
+            setSetting($pdo, 'dark_glow_enabled', $darkGlowEnabled);
+
+            echo json_encode([
+                'success' => true,
+                'message' => 'تم حفظ إعدادات المظهر بنجاح.',
+                'preferences' => [
+                    'dark_text_color' => $darkTextColor,
+                    'dark_glow_enabled' => $darkGlowEnabled,
+                    'dark_glow_color' => $darkGlowColor,
+                    'font_family' => $fontFamily
+                ]
+            ]);
+            break;
+
         // ======================== إدارة المستخدمين ========================
         case 'add_user':
             if ($_SESSION['admin_role'] !== 'admin') {
@@ -1533,6 +1585,14 @@ if ($loggedIn) {
     $doctors = $patients = $leaves = $archived = $queries = $notifications_payment = $payments = $users = $chat_users = [];
     $stats = ['total' => 0, 'active' => 0, 'archived' => 0, 'patients' => 0, 'doctors' => 0, 'paid' => 0, 'unpaid' => 0, 'paid_amount' => 0, 'unpaid_amount' => 0];
 }
+
+
+$uiFontFamily = getSetting($pdo, 'ui_font_family', 'Cairo');
+$allowedUiFonts = ['Cairo','Tajawal','Almarai','Changa','IBM Plex Sans Arabic'];
+if (!in_array($uiFontFamily, $allowedUiFonts, true)) $uiFontFamily = 'Cairo';
+$uiDarkTextColor = sanitizeHexColor(getSetting($pdo, 'dark_text_color', '#d8c8ff') ?? '#d8c8ff', '#d8c8ff');
+$uiDarkGlowColor = sanitizeHexColor(getSetting($pdo, 'dark_glow_color', '#8b5cf6') ?? '#8b5cf6', '#8b5cf6');
+$uiDarkGlowEnabled = getSetting($pdo, 'dark_glow_enabled', '1') === '1' ? '1' : '0';
 ?>
 <!DOCTYPE html>
 <html lang="ar" dir="rtl">
@@ -1542,7 +1602,7 @@ if ($loggedIn) {
     <title>لوحة تحكم الإجازات المرضية</title>
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.rtl.min.css" rel="stylesheet">
     <link href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.0/font/bootstrap-icons.css" rel="stylesheet">
-    <link href="https://fonts.googleapis.com/css2?family=Cairo:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
+    <link href="https://fonts.googleapis.com/css2?family=Almarai:wght@300;400;700;800&family=Cairo:wght@300;400;500;600;700;800&family=Changa:wght@300;400;500;600;700;800&family=IBM+Plex+Sans+Arabic:wght@300;400;500;600;700&family=Tajawal:wght@300;400;500;700;800&display=swap" rel="stylesheet">
     <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf-autotable/3.5.25/jspdf.plugin.autotable.min.js"></script>
@@ -1608,6 +1668,10 @@ if ($loggedIn) {
             --grad-warning: linear-gradient(135deg, #f59e0b, #fbbf24);
             --grad-dark: linear-gradient(135deg, #1e293b, #334155, #475569);
             --grad-glass: linear-gradient(135deg, rgba(255,255,255,0.9), rgba(255,255,255,0.7));
+            --app-font-family: '<?php echo addslashes($uiFontFamily); ?>', sans-serif;
+            --dark-data-color: <?php echo htmlspecialchars($uiDarkTextColor, ENT_QUOTES, 'UTF-8'); ?>;
+            --dark-glow-color: <?php echo htmlspecialchars($uiDarkGlowColor, ENT_QUOTES, 'UTF-8'); ?>;
+            --dark-glow-shadow: <?php echo ($uiDarkGlowEnabled === '1') ? ('0 0 10px ' . htmlspecialchars($uiDarkGlowColor, ENT_QUOTES, 'UTF-8')) : 'none'; ?>;
         }
 
         /* ═══════════════ المتغيرات - دارك مود (نصوص واضحة جداً) ═══════════════ */
@@ -1633,7 +1697,7 @@ if ($loggedIn) {
         * { box-sizing: border-box; margin: 0; padding: 0; }
 
         body {
-            font-family: 'Cairo', sans-serif;
+            font-family: var(--app-font-family);
             background: var(--bg);
             color: var(--text);
             direction: rtl;
@@ -2334,6 +2398,25 @@ if ($loggedIn) {
             color: #fff;
         }
 
+        /* تخصيص لون بيانات الدارك مود (من الإعدادات) */
+        .dark-mode .stat-value,
+        .dark-mode .table tbody td,
+        .dark-mode .table tbody td strong,
+        .dark-mode .table tbody td .badge,
+        .dark-mode .list-group-item,
+        .dark-mode .chat-text,
+        .dark-mode .card-header,
+        .dark-mode .modal-title {
+            color: var(--dark-data-color) !important;
+            text-shadow: var(--dark-glow-shadow);
+        }
+
+        .dark-mode .table tbody td a,
+        .dark-mode .table.mobile-readable td::before,
+        .dark-mode .text-muted {
+            color: var(--dark-data-color) !important;
+        }
+
         .table-hover tbody tr {
             transition: all var(--t-fast) var(--ease);
         }
@@ -2364,85 +2447,6 @@ if ($loggedIn) {
         .table.mobile-readable td::before {
             content: attr(data-label);
             display: none;
-        }
-
-
-        .table-view-switch .btn.active {
-            background: var(--primary);
-            border-color: var(--primary);
-            color: #fff;
-            box-shadow: 0 6px 18px rgba(99,102,241,0.35);
-        }
-
-        body.table-view-compact .table thead th { padding: 9px 7px; font-size: 11px; }
-        body.table-view-compact .table tbody td { padding: 7px 6px; font-size: 12px; }
-        body.table-view-compact .action-btn { padding: 2px 6px; font-size: 10px; }
-
-        body.table-view-cards .table.mobile-readable thead { display: none; }
-        body.table-view-cards .table.mobile-readable,
-        body.table-view-cards .table.mobile-readable tbody,
-        body.table-view-cards .table.mobile-readable tr,
-        body.table-view-cards .table.mobile-readable td {
-            display: block;
-            width: 100%;
-            text-align: right !important;
-        }
-        body.table-view-cards .table.mobile-readable tr {
-            margin-bottom: 10px;
-            border: 1px solid var(--border);
-            border-radius: 12px;
-            background: var(--card);
-            box-shadow: 0 8px 20px rgba(15,23,42,0.06);
-            padding: 8px;
-        }
-        body.table-view-cards .table.mobile-readable td {
-            border: none !important;
-            border-bottom: 1px dashed rgba(148,163,184,0.25) !important;
-            padding: 8px 8px 8px 44% !important;
-            position: relative;
-            min-height: 36px;
-        }
-        body.table-view-cards .table.mobile-readable td:last-child { border-bottom: none !important; }
-        body.table-view-cards .table.mobile-readable td::before {
-            display: block;
-            position: absolute;
-            inset-inline-end: 8px;
-            top: 8px;
-            width: 40%;
-            font-weight: 700;
-            color: var(--text-muted);
-            white-space: nowrap;
-            overflow: hidden;
-            text-overflow: ellipsis;
-        }
-
-        .dark-mode .stat-value,
-        .dark-mode .table tbody td,
-        .dark-mode .table tbody td strong,
-        .dark-mode .table tbody td .badge,
-        .dark-mode .list-group-item,
-        .dark-mode .chat-text {
-            color: #d8c8ff !important;
-            text-shadow: 0 0 10px rgba(139,92,246,0.35);
-        }
-
-        .dark-mode .table thead th,
-        .dark-mode .card-header,
-        .dark-mode .modal-title {
-            color: #e9ddff !important;
-            text-shadow: 0 0 12px rgba(139,92,246,0.35);
-        }
-
-        .dark-mode .table tbody td a,
-        .dark-mode .table.mobile-readable td::before,
-        .dark-mode .text-muted {
-            color: #bda4ff !important;
-        }
-
-        .dark-mode.table-view-cards .table.mobile-readable tr,
-        .dark-mode body.table-view-cards .table.mobile-readable tr {
-            background: linear-gradient(145deg, #1b1532, #111827);
-            border-color: rgba(167,139,250,0.45);
         }
 
         /* ═══════════════ المراسلات بأسلوب تيليجرام ═══════════════ */
@@ -3278,18 +3282,13 @@ if ($loggedIn) {
             <span class="badge bg-danger pulse-badge" id="notifCount">0</span>
         </button>
         <?php if ($_SESSION['admin_role'] === 'admin'): ?>
-        <button class="btn btn-outline-light btn-sm" data-bs-toggle="modal" data-bs-target="#addUserModal" id="btnAddUser" title="إدارة المستخدمين">
-            <i class="bi bi-people"></i>
+        <button class="btn btn-outline-light btn-sm" data-bs-toggle="modal" data-bs-target="#settingsModal" id="btnSettings" title="الإعدادات">
+            <i class="bi bi-gear-fill"></i>
         </button>
         <?php endif; ?>
         <button class="btn btn-outline-light btn-sm" id="refreshAll" title="تحديث البيانات">
             <i class="bi bi-arrow-clockwise"></i>
         </button>
-        <div class="btn-group btn-group-sm table-view-switch" role="group" aria-label="طرق عرض الجداول">
-            <button class="btn btn-outline-light btn-table-view active" data-view="default" title="العرض الافتراضي"><i class="bi bi-table"></i></button>
-            <button class="btn btn-outline-light btn-table-view" data-view="compact" title="عرض مضغوط"><i class="bi bi-distribute-vertical"></i></button>
-            <button class="btn btn-outline-light btn-table-view" data-view="cards" title="عرض بطاقات"><i class="bi bi-grid-3x2-gap"></i></button>
-        </div>
         <?php if ($_SESSION['admin_role'] === 'admin'): ?>
         <button class="btn btn-success btn-sm" id="markAllPaidBtn" title="جعل كل الإجازات مدفوعة"><i class="bi bi-check2-all"></i></button>
         <button class="btn btn-warning btn-sm" id="resetAllPaymentsBtn" title="تصفير المدفوعات والمستحقات"><i class="bi bi-eraser"></i></button>
@@ -4185,6 +4184,55 @@ if ($loggedIn) {
 </div>
 
 <?php if ($_SESSION['admin_role'] === 'admin'): ?>
+<!-- ======================== مودال الإعدادات ======================== -->
+<div class="modal fade" id="settingsModal" tabindex="-1" aria-hidden="true">
+    <div class="modal-dialog modal-lg modal-dialog-centered modal-dialog-scrollable">
+        <div class="modal-content">
+            <div class="modal-header" style="background: var(--grad-dark); color: #fff;">
+                <h5 class="modal-title"><i class="bi bi-gear-fill"></i> الإعدادات المتقدمة</h5>
+                <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body">
+                <div class="d-flex justify-content-between align-items-center flex-wrap gap-2 mb-3">
+                    <h6 class="mb-0"><i class="bi bi-palette-fill text-primary"></i> تخصيص مظهر الوضع الداكن</h6>
+                    <button class="btn btn-sm btn-outline-primary" id="openUsersManagerFromSettings"><i class="bi bi-people"></i> إدارة المستخدمين</button>
+                </div>
+                <form id="uiAppearanceForm" class="row g-3">
+                    <div class="col-md-6">
+                        <label class="form-label">لون النص في الدارك مود</label>
+                        <input type="color" class="form-control form-control-color" id="settingDarkTextColor" value="#d8c8ff">
+                    </div>
+                    <div class="col-md-6">
+                        <label class="form-label">لون الإشعاع</label>
+                        <input type="color" class="form-control form-control-color" id="settingDarkGlowColor" value="#8b5cf6">
+                    </div>
+                    <div class="col-md-6">
+                        <label class="form-label">نوع الخط</label>
+                        <select class="form-select" id="settingFontFamily">
+                            <option value="Cairo">Cairo</option>
+                            <option value="Tajawal">Tajawal</option>
+                            <option value="Almarai">Almarai</option>
+                            <option value="Changa">Changa</option>
+                            <option value="IBM Plex Sans Arabic">IBM Plex Sans Arabic</option>
+                        </select>
+                    </div>
+                    <div class="col-md-6 d-flex align-items-end">
+                        <div class="form-check form-switch">
+                            <input class="form-check-input" type="checkbox" role="switch" id="settingDarkGlowEnabled" checked>
+                            <label class="form-check-label" for="settingDarkGlowEnabled">تفعيل الإشعاع للنص</label>
+                        </div>
+                    </div>
+                    <div class="col-12 d-flex gap-2 justify-content-end">
+                        <button type="button" class="btn btn-outline-secondary" id="resetAppearanceSettings"><i class="bi bi-arrow-counterclockwise"></i> افتراضي</button>
+                        <button type="submit" class="btn btn-gradient"><i class="bi bi-save2"></i> حفظ الإعدادات</button>
+                    </div>
+                </form>
+            </div>
+            <div class="modal-footer"><button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">إغلاق</button></div>
+        </div>
+    </div>
+</div>
+
 <!-- ======================== مودال إدارة المستخدمين ======================== -->
 <div class="modal fade" id="addUserModal" tabindex="-1" aria-hidden="true">
     <div class="modal-dialog modal-xl modal-dialog-centered modal-dialog-scrollable">
@@ -4288,6 +4336,12 @@ if ($loggedIn) {
 // ======================== البيانات الأولية من PHP ========================
 const CSRF_TOKEN = '<?php echo csrf_token(); ?>';
 const IS_ADMIN = <?php echo ($loggedIn && $_SESSION['admin_role'] === 'admin') ? 'true' : 'false'; ?>;
+const INITIAL_UI_PREFERENCES = {
+    dark_text_color: <?php echo json_encode($uiDarkTextColor); ?>,
+    dark_glow_enabled: <?php echo json_encode($uiDarkGlowEnabled); ?>,
+    dark_glow_color: <?php echo json_encode($uiDarkGlowColor); ?>,
+    font_family: <?php echo json_encode($uiFontFamily); ?>
+};
 const IS_LOGGED_IN = <?php echo $loggedIn ? 'true' : 'false'; ?>;
 const REQUEST_URL = window.location.pathname;
 
@@ -5067,7 +5121,7 @@ document.addEventListener('DOMContentLoaded', () => {
         });
     }
 
-    ['editLeaveModal','duplicateLeaveModal','confirmModal','leaveDetailsModal','viewQueriesModal','paymentNotifsModal','payConfirmModal','editDoctorModal','editPatientModal','addUserModal','editUserModal','sessionsModal'].forEach(setupModalStacking);
+    ['editLeaveModal','duplicateLeaveModal','confirmModal','leaveDetailsModal','viewQueriesModal','paymentNotifsModal','payConfirmModal','editDoctorModal','editPatientModal','settingsModal','addUserModal','editUserModal','sessionsModal'].forEach(setupModalStacking);
 
     const confirmMessage = document.getElementById('confirmMessage');
     const confirmYesBtn = document.getElementById('confirmYesBtn');
@@ -5905,7 +5959,6 @@ document.addEventListener('DOMContentLoaded', () => {
 
         updateTable(usersTable, currentTableData.users, generateUserRow);
 
-        // btnAddUser already opens modal via data-bs-toggle attribute
 
         document.getElementById('saveNewUser').addEventListener('click', async () => {
             showLoading();
@@ -6025,12 +6078,79 @@ document.addEventListener('DOMContentLoaded', () => {
         });
     }
 
+
+    // ====== الإعدادات ======
+    if (IS_ADMIN) {
+        document.getElementById('openUsersManagerFromSettings')?.addEventListener('click', () => {
+            const settingsModal = bootstrap.Modal.getInstance(document.getElementById('settingsModal'));
+            if (settingsModal) settingsModal.hide();
+            const usersModalEl = document.getElementById('addUserModal');
+            if (usersModalEl) bootstrap.Modal.getOrCreateInstance(usersModalEl).show();
+        });
+
+        document.getElementById('settingsModal')?.addEventListener('show.bs.modal', async () => {
+            const result = await sendAjaxRequest('fetch_ui_preferences', {});
+            if (result.success && result.preferences) {
+                hydrateSettingsForm(result.preferences);
+                applyAppearancePreferences(result.preferences);
+            } else {
+                hydrateSettingsForm(INITIAL_UI_PREFERENCES);
+            }
+        });
+
+        document.getElementById('resetAppearanceSettings')?.addEventListener('click', () => {
+            const defaults = { dark_text_color: '#d8c8ff', dark_glow_color: '#8b5cf6', dark_glow_enabled: '1', font_family: 'Cairo' };
+            hydrateSettingsForm(defaults);
+            applyAppearancePreferences(defaults);
+        });
+
+        document.getElementById('uiAppearanceForm')?.addEventListener('submit', async (e) => {
+            e.preventDefault();
+            const pref = {
+                dark_text_color: document.getElementById('settingDarkTextColor')?.value || '#d8c8ff',
+                dark_glow_color: document.getElementById('settingDarkGlowColor')?.value || '#8b5cf6',
+                dark_glow_enabled: document.getElementById('settingDarkGlowEnabled')?.checked ? '1' : '0',
+                font_family: document.getElementById('settingFontFamily')?.value || 'Cairo'
+            };
+            const result = await sendAjaxRequest('save_ui_preferences', pref);
+            if (result.success) {
+                applyAppearancePreferences(result.preferences || pref);
+                showToast(result.message || 'تم الحفظ.', 'success');
+            }
+        });
+    }
+
     // ====== المراسلات ======
     let activeChatPeerId = null;
     let currentReplyMessage = null;
     let mediaRecorder = null;
     let voiceChunks = [];
     let chatMaxUploadMB = 50;
+
+    function applyAppearancePreferences(pref = {}) {
+        const root = document.documentElement;
+        const textColor = pref.dark_text_color || '#d8c8ff';
+        const glowColor = pref.dark_glow_color || '#8b5cf6';
+        const glowEnabled = String(pref.dark_glow_enabled || '1') === '1';
+        const fontFamily = pref.font_family || 'Cairo';
+        root.style.setProperty('--dark-data-color', textColor);
+        root.style.setProperty('--dark-glow-color', glowColor);
+        root.style.setProperty('--dark-glow-shadow', glowEnabled ? `0 0 10px ${glowColor}` : 'none');
+        root.style.setProperty('--app-font-family', `'${fontFamily}', sans-serif`);
+    }
+
+    function hydrateSettingsForm(pref = {}) {
+        const text = document.getElementById('settingDarkTextColor');
+        const glow = document.getElementById('settingDarkGlowColor');
+        const enabled = document.getElementById('settingDarkGlowEnabled');
+        const font = document.getElementById('settingFontFamily');
+        if (text) text.value = pref.dark_text_color || '#d8c8ff';
+        if (glow) glow.value = pref.dark_glow_color || '#8b5cf6';
+        if (enabled) enabled.checked = String(pref.dark_glow_enabled || '1') === '1';
+        if (font) font.value = pref.font_family || 'Cairo';
+    }
+
+    applyAppearancePreferences(INITIAL_UI_PREFERENCES);
 
     function renderChatUsers(list) {
         const sel = document.getElementById('chatPeerSelect');
@@ -6437,20 +6557,6 @@ document.addEventListener('DOMContentLoaded', () => {
             confirmModal.show();
         });
     }
-
-    // أوضاع عرض الجداول
-    function applyTableViewMode(mode) {
-        const m = ['default', 'compact', 'cards'].includes(mode) ? mode : 'default';
-        document.body.classList.remove('table-view-default', 'table-view-compact', 'table-view-cards');
-        document.body.classList.add(`table-view-${m}`);
-        document.querySelectorAll('.btn-table-view').forEach(btn => btn.classList.toggle('active', btn.dataset.view === m));
-        localStorage.setItem('tableViewMode', m);
-    }
-    const savedTableMode = localStorage.getItem('tableViewMode') || 'default';
-    applyTableViewMode(savedTableMode);
-    document.querySelectorAll('.btn-table-view').forEach(btn => {
-        btn.addEventListener('click', () => applyTableViewMode(btn.dataset.view || 'default'));
-    });
 
     renderChatUsers(currentTableData.chat_users || []);
     refreshChatUsers();
