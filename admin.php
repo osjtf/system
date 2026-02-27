@@ -22,7 +22,7 @@ date_default_timezone_set('Asia/Riyadh');
 header('X-Frame-Options: SAMEORIGIN');
 header('X-Content-Type-Options: nosniff');
 header('Referrer-Policy: strict-origin-when-cross-origin');
-header('Permissions-Policy: geolocation=(), microphone=(), camera=()');
+header('Permissions-Policy: geolocation=(), microphone=(self), camera=()');
 
 // ======================== إعدادات قاعدة البيانات ========================
 $db_host = 'mysql.railway.internal';
@@ -1428,7 +1428,7 @@ if (isset($_POST['action']) && $_POST['action'] !== 'login' && $_POST['action'] 
             $darkTextColor = sanitizeHexColor((string)($_POST['dark_text_color'] ?? '#d8c8ff'), '#d8c8ff');
             $darkGlowColor = sanitizeHexColor((string)($_POST['dark_glow_color'] ?? '#8b5cf6'), '#8b5cf6');
             $darkGlowEnabled = (($_POST['dark_glow_enabled'] ?? '1') === '1') ? '1' : '0';
-            $allowedViewModes = ['table','compact','cards','zebra'];
+            $allowedViewModes = ['table','compact','cards','zebra','glass','minimal'];
             $dataViewMode = trim((string)($_POST['data_view_mode'] ?? 'table'));
             if (!in_array($dataViewMode, $allowedViewModes, true)) $dataViewMode = 'table';
 
@@ -1644,7 +1644,7 @@ $uiDarkTextColor = sanitizeHexColor(getSetting($pdo, 'dark_text_color', '#d8c8ff
 $uiDarkGlowColor = sanitizeHexColor(getSetting($pdo, 'dark_glow_color', '#8b5cf6') ?? '#8b5cf6', '#8b5cf6');
 $uiDarkGlowEnabled = getSetting($pdo, 'dark_glow_enabled', '1') === '1' ? '1' : '0';
 $uiDataViewMode = getSetting($pdo, 'ui_data_view_mode', 'table') ?: 'table';
-if (!in_array($uiDataViewMode, ['table','compact','cards','zebra'], true)) $uiDataViewMode = 'table';
+if (!in_array($uiDataViewMode, ['table','compact','cards','zebra','glass','minimal'], true)) $uiDataViewMode = 'table';
 ?>
 <!DOCTYPE html>
 <html lang="ar" dir="rtl">
@@ -2559,6 +2559,25 @@ if (!in_array($uiDataViewMode, ['table','compact','cards','zebra'], true)) $uiDa
         .dark-mode body.data-view-zebra .table tbody tr:nth-child(odd),
         body.dark-mode.data-view-zebra .table tbody tr:nth-child(odd) { background: rgba(255,255,255,0.12); }
 
+        body.data-view-glass .table-responsive {
+            background: linear-gradient(135deg, rgba(255,255,255,0.55), rgba(241,245,249,0.75));
+            backdrop-filter: blur(10px);
+            border-color: rgba(99,102,241,0.25);
+        }
+        .dark-mode body.data-view-glass .table-responsive,
+        body.dark-mode.data-view-glass .table-responsive {
+            background: linear-gradient(135deg, rgba(15,23,42,0.55), rgba(30,41,59,0.7));
+            border-color: rgba(129,140,248,0.45);
+        }
+
+        body.data-view-minimal .table,
+        body.data-view-minimal .table th,
+        body.data-view-minimal .table td {
+            border: none !important;
+            box-shadow: none !important;
+        }
+        body.data-view-minimal .table tbody td { border-bottom: 1px solid rgba(148,163,184,0.2) !important; }
+
         /* ═══════════════ المراسلات بأسلوب تيليجرام ═══════════════ */
         .chat-layout {
             background: linear-gradient(180deg, #f8fafc, #eef2ff);
@@ -3251,20 +3270,21 @@ if (!in_array($uiDataViewMode, ['table','compact','cards','zebra'], true)) $uiDa
             .modal-content { border-radius: 18px; margin: 8px; }
             .nav-tabs .nav-link { padding: 8px 14px; font-size: 12px; }
 
-            .table.mobile-readable thead {
+            /* على الجوال: الكروت تتفعّل فقط إذا اخترت وضع cards */
+            body.data-view-cards .table.mobile-readable thead {
                 display: none;
             }
 
-            .table.mobile-readable,
-            .table.mobile-readable tbody,
-            .table.mobile-readable tr,
-            .table.mobile-readable td {
+            body.data-view-cards .table.mobile-readable,
+            body.data-view-cards .table.mobile-readable tbody,
+            body.data-view-cards .table.mobile-readable tr,
+            body.data-view-cards .table.mobile-readable td {
                 display: block;
                 width: 100%;
                 text-align: right !important;
             }
 
-            .table.mobile-readable tr {
+            body.data-view-cards .table.mobile-readable tr {
                 margin-bottom: 10px;
                 border: 1px solid var(--border);
                 border-radius: 12px;
@@ -3273,7 +3293,7 @@ if (!in_array($uiDataViewMode, ['table','compact','cards','zebra'], true)) $uiDa
                 padding: 8px;
             }
 
-            .table.mobile-readable td {
+            body.data-view-cards .table.mobile-readable td {
                 border: none !important;
                 border-bottom: 1px dashed rgba(148,163,184,0.25) !important;
                 padding: 8px 8px 8px 44% !important;
@@ -3281,11 +3301,11 @@ if (!in_array($uiDataViewMode, ['table','compact','cards','zebra'], true)) $uiDa
                 min-height: 36px;
             }
 
-            .table.mobile-readable td:last-child {
+            body.data-view-cards .table.mobile-readable td:last-child {
                 border-bottom: none !important;
             }
 
-            .table.mobile-readable td::before {
+            body.data-view-cards .table.mobile-readable td::before {
                 display: block;
                 position: absolute;
                 inset-inline-end: 8px;
@@ -3298,19 +3318,23 @@ if (!in_array($uiDataViewMode, ['table','compact','cards','zebra'], true)) $uiDa
                 text-overflow: ellipsis;
             }
 
+            body.data-view-compact .table tbody td { padding: 6px 5px; font-size: 11px; }
 
-            .dark-mode .table.mobile-readable tr {
+            .dark-mode body.data-view-cards .table.mobile-readable tr,
+            body.dark-mode.data-view-cards .table.mobile-readable tr {
                 background: linear-gradient(145deg, #182337, #111827);
                 border-color: rgba(148,163,184,0.35);
             }
 
-            .dark-mode .table.mobile-readable td {
+            .dark-mode body.data-view-cards .table.mobile-readable td,
+            body.dark-mode.data-view-cards .table.mobile-readable td {
                 color: #111827 !important;
                 background: #f8fafc;
                 border-bottom-color: rgba(148,163,184,0.28) !important;
             }
 
-            .dark-mode .table.mobile-readable td::before {
+            .dark-mode body.data-view-cards .table.mobile-readable td::before,
+            body.dark-mode.data-view-cards .table.mobile-readable td::before {
                 color: #334155;
             }
 
@@ -4339,6 +4363,8 @@ if (!in_array($uiDataViewMode, ['table','compact','cards','zebra'], true)) $uiDa
                                             <option value="emerald_glow">زمردي مشع</option>
                                             <option value="sunset_gold">غروب ذهبي</option>
                                             <option value="mono_clear">أسود واضح بدون إشعاع</option>
+                                            <option value="glass_lux">زجاجي فاخر</option>
+                                            <option value="minimal_clean">Minimal نظيف</option>
                                         </select>
                                     </div>
                                     <div class="col-md-6 d-flex gap-2 flex-wrap" id="quickColorMixes">
@@ -4389,6 +4415,8 @@ if (!in_array($uiDataViewMode, ['table','compact','cards','zebra'], true)) $uiDa
                             <option value="compact">جدول مضغوط</option>
                             <option value="cards">بطاقات بيانات</option>
                             <option value="zebra">جدول بخطوط متبادلة واضحة</option>
+                            <option value="glass">زجاجي احترافي</option>
+                            <option value="minimal">أقل تفاصيل (Minimal)</option>
                         </select>
                     </div>
                     <div class="col-12 d-flex gap-2 justify-content-end">
@@ -6291,6 +6319,8 @@ document.addEventListener('DOMContentLoaded', () => {
             deep_ocean: { dark_text_color: '#dbeafe', dark_glow_color: '#2563eb', dark_glow_enabled: '1', font_family: 'IBM Plex Sans Arabic', data_view_mode: 'compact' },
             emerald_glow: { dark_text_color: '#dcfce7', dark_glow_color: '#10b981', dark_glow_enabled: '1', font_family: 'Tajawal', data_view_mode: 'cards' },
             sunset_gold: { dark_text_color: '#fde68a', dark_glow_color: '#f59e0b', dark_glow_enabled: '1', font_family: 'Changa', data_view_mode: 'zebra' },
+            glass_lux: { dark_text_color: '#e2e8f0', dark_glow_color: '#6366f1', dark_glow_enabled: '1', font_family: 'Readex Pro', data_view_mode: 'glass' },
+            minimal_clean: { dark_text_color: '#111827', dark_glow_color: '#111827', dark_glow_enabled: '0', font_family: 'Noto Kufi Arabic', data_view_mode: 'minimal' },
             mono_clear: { dark_text_color: '#111827', dark_glow_color: '#111827', dark_glow_enabled: '0', font_family: 'Noto Kufi Arabic', data_view_mode: 'table' }
         };
 
@@ -6341,12 +6371,13 @@ document.addEventListener('DOMContentLoaded', () => {
     let currentReplyMessage = null;
     let mediaRecorder = null;
     let voiceChunks = [];
+    let pendingVoiceFile = null;
     let chatMaxUploadMB = 50;
 
     function applyDataViewMode(mode = 'table') {
-        const allowed = ['table','compact','cards','zebra'];
+        const allowed = ['table','compact','cards','zebra','glass','minimal'];
         const m = allowed.includes(mode) ? mode : 'table';
-        document.body.classList.remove('data-view-table','data-view-compact','data-view-cards','data-view-zebra');
+        document.body.classList.remove('data-view-table','data-view-compact','data-view-cards','data-view-zebra','data-view-glass','data-view-minimal');
         document.body.classList.add(`data-view-${m}`);
         // إعادة رسم سريعة للتأكد من تطبيق النمط على كل الجداول مباشرة
         try { applyAllCurrentFilters(); } catch (_) {}
@@ -6817,7 +6848,7 @@ document.addEventListener('DOMContentLoaded', () => {
         const input = document.getElementById('chatMessageInput');
         const text = (input?.value || '').trim();
         const fileInput = document.getElementById('chatFileInput');
-        const file = fileInput?.files?.[0] || null;
+        const file = fileInput?.files?.[0] || pendingVoiceFile || null;
         if (!activeChatPeerId || (!text && !file)) return;
         if (activeChatPeerId === '__monitor__') {
             showToast('وضع المراقبة للقراءة فقط.', 'warning');
@@ -6833,6 +6864,7 @@ document.addEventListener('DOMContentLoaded', () => {
         if (result.success) {
             input.value = '';
             if (fileInput) fileInput.value = '';
+            pendingVoiceFile = null;
             currentReplyMessage = null;
             const rp = document.getElementById('chatReplyPreview'); if (rp) { rp.classList.add('d-none'); rp.textContent = ''; }
             await loadChatMessages();
@@ -6870,8 +6902,17 @@ document.addEventListener('DOMContentLoaded', () => {
                     return;
                 }
                 const file = new File([blob], `voice_${Date.now()}.${ext}`, { type: mime });
+                pendingVoiceFile = file;
                 const fileInput = document.getElementById('chatFileInput');
-                const dt = new DataTransfer(); dt.items.add(file); fileInput.files = dt.files;
+                if (fileInput) {
+                    try {
+                        const dt = new DataTransfer();
+                        dt.items.add(file);
+                        fileInput.files = dt.files;
+                    } catch (_) {
+                        // بعض المتصفحات (خصوصًا على بعض أجهزة أندرويد) لا تسمح بتعيين files برمجيًا
+                    }
+                }
                 stream.getTracks().forEach(t => t.stop());
                 document.getElementById('recordVoiceBtn')?.classList.remove('d-none');
                 document.getElementById('stopVoiceBtn')?.classList.add('d-none');
@@ -6891,6 +6932,11 @@ document.addEventListener('DOMContentLoaded', () => {
     document.getElementById('clearChatFileBtn')?.addEventListener('click', () => {
         const f = document.getElementById('chatFileInput');
         if (f) f.value = '';
+        pendingVoiceFile = null;
+    });
+    document.getElementById('chatFileInput')?.addEventListener('change', () => {
+        // إذا اختار المستخدم ملفًا يدويًا نتجاهل الملف الصوتي المؤقت
+        pendingVoiceFile = null;
     });
     document.getElementById('chatMessagesBox')?.addEventListener('click', async (e) => {
         const del = e.target.closest('.btn-delete-chat-message');
