@@ -1271,7 +1271,9 @@ if (isset($_POST['action']) && $_POST['action'] !== 'login' && $_POST['action'] 
                 }
                 $fileName = $upload['name'];
                 $filePath = 'uploads/chat/' . $safe;
-                $messageType = (str_starts_with($mimeType, 'image/')) ? 'image' : ((str_starts_with($mimeType, 'audio/')) ? 'voice' : 'file');
+                $audioExts = ['mp3','wav','ogg','m4a','aac','webm'];
+                $isAudioByExt = in_array($ext, $audioExts, true);
+                $messageType = (str_starts_with($mimeType, 'image/')) ? 'image' : ((str_starts_with($mimeType, 'audio/') || $isAudioByExt) ? 'voice' : 'file');
             }
 
             if ($messageText === '' && !$filePath) {
@@ -2668,6 +2670,38 @@ if (!in_array($uiDataViewMode, ['table','compact','cards','zebra','glass','minim
             border: 1px solid rgba(148,163,184,0.25);
         }
         .chat-media audio { width: min(300px, 100%); display: block; }
+        .chat-voice-player {
+            display: grid;
+            gap: 8px;
+            width: min(320px, 100%);
+            background: rgba(15,23,42,0.04);
+            border: 1px solid rgba(99,102,241,0.18);
+            border-radius: 12px;
+            padding: 8px;
+        }
+        .msg-other .chat-voice-player {
+            background: rgba(255,255,255,0.14);
+            border-color: rgba(255,255,255,0.2);
+        }
+        .chat-voice-speeds {
+            display: inline-flex;
+            gap: 6px;
+            flex-wrap: wrap;
+        }
+        .chat-voice-speed {
+            border: 1px solid rgba(99,102,241,0.35);
+            border-radius: 999px;
+            background: transparent;
+            padding: 2px 8px;
+            font-size: 11px;
+            font-weight: 700;
+            color: inherit;
+            cursor: pointer;
+        }
+        .chat-voice-speed.active {
+            background: rgba(99,102,241,0.18);
+            border-color: rgba(99,102,241,0.65);
+        }
         .chat-media .chat-file-link {
             max-width: 100%;
             display: inline-flex;
@@ -6459,11 +6493,15 @@ document.addEventListener('DOMContentLoaded', () => {
             const scopeBadge = isGlobal ? '<span class="badge bg-info ms-1">مجموعة الكل</span>' : '<span class="badge bg-secondary ms-1">خاص</span>';
             const peerTarget = isGlobal ? 'مجموعة الكل' : (m.receiver_name || '');
             const peerInfo = monitorMode ? `<span class="small text-muted">${htmlspecialchars(m.sender_name || '')} → ${htmlspecialchars(peerTarget)}</span>${scopeBadge}` : '';
+            const fileExt = (m.file_name || m.file_path || '').split('.').pop().toLowerCase();
+            const mime = String(m.mime_type || '').toLowerCase();
+            const isImage = m.message_type === 'image';
+            const isVoice = m.message_type === 'voice' || mime.startsWith('audio/') || ['mp3','wav','ogg','m4a','aac','webm'].includes(fileExt);
             const fileHtml = m.file_path
-                ? (m.message_type === 'image'
+                ? (isImage
                     ? `<div class="chat-media"><img class="chat-image-preview" src="${htmlspecialchars(m.file_path)}" alt="مرفق صورة"></div>`
-                    : (m.message_type === 'voice'
-                        ? `<div class="chat-media"><audio controls preload="metadata" src="${htmlspecialchars(m.file_path)}"></audio></div>`
+                    : (isVoice
+                        ? `<div class="chat-media"><div class="chat-voice-player"><audio controls preload="metadata" playsinline src="${htmlspecialchars(m.file_path)}"></audio><div class="chat-voice-speeds" role="group" aria-label="سرعة تشغيل الفويس"><button type="button" class="chat-voice-speed active" data-rate="1">1x</button><button type="button" class="chat-voice-speed" data-rate="1.5">1.5x</button><button type="button" class="chat-voice-speed" data-rate="2">2x</button></div></div></div>`
                         : `<div class="chat-media"><a href="${htmlspecialchars(m.file_path)}" target="_blank" class="btn btn-sm btn-outline-primary chat-file-link"><i class="bi bi-paperclip"></i> ${htmlspecialchars(m.file_name || 'ملف')}</a></div>`))
                 : '';
             const replyHtml = m.reply_to_id
@@ -6939,6 +6977,19 @@ document.addEventListener('DOMContentLoaded', () => {
         pendingVoiceFile = null;
     });
     document.getElementById('chatMessagesBox')?.addEventListener('click', async (e) => {
+        const speedBtn = e.target.closest('.chat-voice-speed');
+        if (speedBtn) {
+            const voiceWrap = speedBtn.closest('.chat-voice-player');
+            const audioEl = voiceWrap?.querySelector('audio');
+            const nextRate = parseFloat(speedBtn.dataset.rate || '1');
+            if (audioEl && Number.isFinite(nextRate) && nextRate > 0) {
+                audioEl.playbackRate = nextRate;
+                voiceWrap?.querySelectorAll('.chat-voice-speed').forEach(b => b.classList.remove('active'));
+                speedBtn.classList.add('active');
+            }
+            return;
+        }
+
         const del = e.target.closest('.btn-delete-chat-message');
         if (del) {
             const result = await sendAjaxRequest('delete_message', { message_id: del.dataset.id });
