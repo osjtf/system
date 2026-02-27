@@ -3448,13 +3448,19 @@ if (!in_array($uiDataViewMode, ['table','compact','cards','zebra'], true)) $uiDa
         <?php if ($_SESSION['admin_role'] === 'admin'): ?>
         <div class="stat-card">
             <div class="stat-icon"><i class="bi bi-cash-stack"></i></div>
-            <div class="stat-value" id="stat-paid-amount"><?php echo number_format($stats['paid_amount'], 2); ?></div>
-            <div class="stat-label">المبالغ المدفوعة</div>
+            <div class="stat-value sensitive-value" id="stat-paid-amount" data-raw="<?php echo number_format($stats['paid_amount'], 2, '.', ''); ?>">*****</div>
+            <div class="stat-label d-flex align-items-center justify-content-center gap-2">
+                <span>المبالغ المدفوعة</span>
+                <button type="button" class="btn-sensitive-toggle" data-target="stat-paid-amount" title="إظهار/إخفاء"><i class="bi bi-eye"></i></button>
+            </div>
         </div>
         <div class="stat-card">
             <div class="stat-icon"><i class="bi bi-cash"></i></div>
-            <div class="stat-value" id="stat-unpaid-amount"><?php echo number_format($stats['unpaid_amount'], 2); ?></div>
-            <div class="stat-label">المبالغ المستحقة</div>
+            <div class="stat-value sensitive-value" id="stat-unpaid-amount" data-raw="<?php echo number_format($stats['unpaid_amount'], 2, '.', ''); ?>">*****</div>
+            <div class="stat-label d-flex align-items-center justify-content-center gap-2">
+                <span>المبالغ المستحقة</span>
+                <button type="button" class="btn-sensitive-toggle" data-target="stat-unpaid-amount" title="إظهار/إخفاء"><i class="bi bi-eye"></i></button>
+            </div>
         </div>
         <?php endif; ?>
     </div>
@@ -5157,8 +5163,20 @@ function updateStats(stats) {
     setText('stat-archived', stats.archived || 0);
     setText('stat-patients', stats.patients || 0);
     setText('stat-doctors', stats.doctors || 0);
-    setText('stat-paid-amount', parseFloat(stats.paid_amount || 0).toFixed(2));
-    setText('stat-unpaid-amount', parseFloat(stats.unpaid_amount || 0).toFixed(2));
+
+    const paidAmountEl = document.getElementById('stat-paid-amount');
+    const unpaidAmountEl = document.getElementById('stat-unpaid-amount');
+    if (paidAmountEl) paidAmountEl.dataset.raw = parseFloat(stats.paid_amount || 0).toFixed(2);
+    if (unpaidAmountEl) unpaidAmountEl.dataset.raw = parseFloat(stats.unpaid_amount || 0).toFixed(2);
+    refreshSensitiveValuesMask();
+}
+
+function refreshSensitiveValuesMask() {
+    document.querySelectorAll('.sensitive-value').forEach(el => {
+        const visible = el.dataset.visible === '1';
+        const raw = el.dataset.raw || '0.00';
+        el.textContent = visible ? raw : '*****';
+    });
 }
 
 function updateDoctorSelects(doctors) {
@@ -6310,7 +6328,8 @@ document.addEventListener('DOMContentLoaded', () => {
                 dark_text_color: document.getElementById('settingDarkTextColor')?.value || '#d8c8ff',
                 dark_glow_color: document.getElementById('settingDarkGlowColor')?.value || '#8b5cf6',
                 dark_glow_enabled: document.getElementById('settingDarkGlowEnabled')?.checked ? '1' : '0',
-                font_family: document.getElementById('settingFontFamily')?.value || 'Cairo'
+                font_family: document.getElementById('settingFontFamily')?.value || 'Cairo',
+                data_view_mode: document.getElementById('settingDataViewMode')?.value || 'table'
             };
             const result = await sendAjaxRequest('save_ui_preferences', pref);
             if (result.success) {
@@ -6821,10 +6840,6 @@ document.addEventListener('DOMContentLoaded', () => {
     
     document.getElementById('recordVoiceBtn')?.addEventListener('click', async () => {
         try {
-            if (!window.isSecureContext) {
-                showToast('تسجيل الفويس يحتاج اتصال آمن HTTPS أو localhost.', 'warning');
-                return;
-            }
             if (!window.MediaRecorder || !navigator.mediaDevices?.getUserMedia) {
                 showToast('المتصفح لا يدعم تسجيل الفويس مباشرة. يمكنك رفع ملف صوتي يدويًا.', 'warning');
                 return;
@@ -7055,6 +7070,18 @@ document.addEventListener('DOMContentLoaded', () => {
 
     // ====== التحميل الأولي ======
     applyAllCurrentFilters();
+    refreshSensitiveValuesMask();
+    document.querySelectorAll('.btn-sensitive-toggle').forEach(btn => {
+        btn.addEventListener('click', () => {
+            const targetId = btn.dataset.target;
+            const target = targetId ? document.getElementById(targetId) : null;
+            if (!target) return;
+            const next = target.dataset.visible === '1' ? '0' : '1';
+            target.dataset.visible = next;
+            btn.innerHTML = next === '1' ? '<i class="bi bi-eye-slash"></i>' : '<i class="bi bi-eye"></i>';
+            refreshSensitiveValuesMask();
+        });
+    });
     updateDoctorSelects(currentTableData.doctors);
     updatePatientSelects(currentTableData.patients);
 
