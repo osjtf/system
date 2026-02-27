@@ -11,9 +11,18 @@
  * 5. تحسينات عامة في الأداء والأمان
  */
 
+ini_set('session.use_only_cookies', '1');
+ini_set('session.cookie_httponly', '1');
+ini_set('session.cookie_secure', (!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off') ? '1' : '0');
+ini_set('session.cookie_samesite', 'Strict');
+ini_set('session.use_strict_mode', '1');
 session_start();
 
 date_default_timezone_set('Asia/Riyadh');
+header('X-Frame-Options: SAMEORIGIN');
+header('X-Content-Type-Options: nosniff');
+header('Referrer-Policy: strict-origin-when-cross-origin');
+header('Permissions-Policy: geolocation=(), microphone=(), camera=()');
 
 // ======================== إعدادات قاعدة البيانات ========================
 $db_host = 'mysql.railway.internal';
@@ -61,6 +70,31 @@ $pdo->exec("CREATE TABLE IF NOT EXISTS user_sessions (
     FOREIGN KEY (user_id) REFERENCES admin_users(id) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci");
 
+$pdo->exec("CREATE TABLE IF NOT EXISTS user_messages (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    sender_id INT NOT NULL,
+    receiver_id INT NOT NULL,
+    message_text TEXT NOT NULL,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    is_read TINYINT(1) DEFAULT 0,
+    FOREIGN KEY (sender_id) REFERENCES admin_users(id) ON DELETE CASCADE,
+    FOREIGN KEY (receiver_id) REFERENCES admin_users(id) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci");
+
+$pdo->exec("CREATE TABLE IF NOT EXISTS app_settings (
+    setting_key VARCHAR(100) PRIMARY KEY,
+    setting_value TEXT,
+    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci");
+
+function ensureColumn(PDO $pdo, string $table, string $column, string $definition): void {
+    $stmt = $pdo->prepare("SELECT COUNT(*) FROM information_schema.columns WHERE table_schema = DATABASE() AND table_name = ? AND column_name = ?");
+    $stmt->execute([$table, $column]);
+    if ((int)$stmt->fetchColumn() === 0) {
+        $pdo->exec("ALTER TABLE $table ADD COLUMN $column $definition");
+    }
+}
+
 function ensureIndex(PDO $pdo, string $table, string $indexName, string $columns): void {
     $check = $pdo->prepare("SELECT COUNT(*) FROM information_schema.statistics WHERE table_schema = DATABASE() AND table_name = ? AND index_name = ?");
     $check->execute([$table, $indexName]);
@@ -79,7 +113,18 @@ ensureIndex($pdo, 'leave_queries', 'idx_leave_queries_leave', 'leave_id');
 ensureIndex($pdo, 'leave_queries', 'idx_leave_queries_queried_at', 'queried_at');
 ensureIndex($pdo, 'patients', 'idx_patients_identity_number', 'identity_number');
 ensureIndex($pdo, 'patients', 'idx_patients_name', 'name');
+ensureColumn($pdo, 'patients', 'folder_link', "VARCHAR(500) NULL AFTER phone");
 ensureIndex($pdo, 'doctors', 'idx_doctors_name', 'name');
+ensureIndex($pdo, 'user_messages', 'idx_user_messages_pair_created', 'sender_id, receiver_id, created_at');
+ensureIndex($pdo, 'user_messages', 'idx_user_messages_receiver_read', 'receiver_id, is_read');
+ensureColumn($pdo, 'user_messages', 'message_type', "ENUM('text','image','file','voice') DEFAULT 'text' AFTER message_text");
+ensureColumn($pdo, 'user_messages', 'file_name', "VARCHAR(255) NULL AFTER message_type");
+ensureColumn($pdo, 'user_messages', 'file_path', "VARCHAR(500) NULL AFTER file_name");
+ensureColumn($pdo, 'user_messages', 'mime_type', "VARCHAR(150) NULL AFTER file_path");
+ensureColumn($pdo, 'user_messages', 'file_size', "INT NULL AFTER mime_type");
+ensureColumn($pdo, 'user_messages', 'deleted_at', "DATETIME NULL AFTER is_read");
+ensureColumn($pdo, 'user_messages', 'reply_to_id', "INT NULL AFTER deleted_at");
+ensureIndex($pdo, 'user_messages', 'idx_user_messages_deleted', 'deleted_at');
 
 // إنشاء مستخدم افتراضي إذا لم يوجد أي مستخدم
 $stmt = $pdo->query("SELECT COUNT(*) as cnt FROM admin_users");
@@ -143,34 +188,75 @@ function getStats($pdo) {
     return $stats;
 }
 
+function nowSaudi(): string {
+    return (new DateTime('now', new DateTimeZone('Asia/Riyadh')))->format('Y-m-d H:i:s');
+}
+
+function getSetting(PDO $pdo, string $key, ?string $default = null): ?string {
+    $stmt = $pdo->prepare("SELECT setting_value FROM app_settings WHERE setting_key = ?");
+    $stmt->execute([$key]);
+    $v = $stmt->fetchColumn();
+    return $v === false ? $default : (string)$v;
+}
+
+function setSetting(PDO $pdo, string $key, string $value): void {
+    $stmt = $pdo->prepare("INSERT INTO app_settings (setting_key, setting_value) VALUES (?, ?) ON DUPLICATE KEY UPDATE setting_value = VALUES(setting_value)");
+    $stmt->execute([$key, $value]);
+}
+
+function getUnreadMessagesCount(PDO $pdo, int $userId): int {
+    if ($userId <= 0) return 0;
+    $stmt = $pdo->prepare("SELECT COUNT(*) FROM user_messages WHERE receiver_id = ? AND is_read = 0 AND deleted_at IS NULL");
+    $stmt->execute([$userId]);
+    return intval($stmt->fetchColumn());
+}
+
+function purgeExpiredMessages(PDO $pdo): void {
+    $hours = intval(getSetting($pdo, 'chat_retention_hours', '0'));
+    if ($hours <= 0) return;
+    $threshold = (new DateTime('now', new DateTimeZone('Asia/Riyadh')))->modify("-{$hours} hours")->format('Y-m-d H:i:s');
+    $stmt = $pdo->prepare("SELECT id, file_path FROM user_messages WHERE deleted_at IS NULL AND created_at <= ?");
+    $stmt->execute([$threshold]);
+    $rows = $stmt->fetchAll();
+    if (!$rows) return;
+    foreach ($rows as $r) {
+        if (!empty($r['file_path'])) {
+            $full = __DIR__ . '/' . ltrim($r['file_path'], '/');
+            if (is_file($full)) @unlink($full);
+        }
+    }
+    $pdo->prepare("UPDATE user_messages SET deleted_at = ? WHERE deleted_at IS NULL AND created_at <= ?")->execute([nowSaudi(), $threshold]);
+}
+
 function generateServiceCode($pdo, $prefix, $issueDate = null) {
     $prefix = strtoupper(trim($prefix));
     if (!in_array($prefix, ['GSL', 'PSL'])) {
         $prefix = 'GSL';
     }
 
-    $dateObj = DateTime::createFromFormat('Y-m-d', (string)$issueDate) ?: new DateTime('now', new DateTimeZone('Asia/Riyadh'));
-    $datePart = $dateObj->format('Ymd');
-    $base = $prefix . $datePart;
+    $issueDateObj = DateTime::createFromFormat('Y-m-d', (string)$issueDate, new DateTimeZone('Asia/Riyadh'));
+    if (!$issueDateObj) {
+        $issueDateObj = new DateTime('now', new DateTimeZone('Asia/Riyadh'));
+    }
+    $datePart = $issueDateObj->format('ymd');
 
-    $stmt = $pdo->prepare("SELECT service_code FROM sick_leaves WHERE service_code LIKE ? ORDER BY id DESC LIMIT 1");
-    $stmt->execute([$base . '%']);
+    $stmt = $pdo->query("SELECT service_code FROM sick_leaves ORDER BY id DESC LIMIT 1");
     $last = $stmt->fetchColumn();
-
-    if ($last && preg_match('/^(?:GSL|PSL)\d{8}(\d+)$/', $last, $m)) {
+    $num = 1;
+    if ($last && preg_match('/^(?:GSL|PSL)\d{6}(\d+)$/', $last, $m)) {
         $num = intval($m[1]) + 1;
-    } else {
-        $num = 1;
     }
 
-    return $base . str_pad((string)$num, 4, '0', STR_PAD_LEFT);
+    return $prefix . $datePart . str_pad((string)$num, 5, '0', STR_PAD_LEFT);
 }
+
 
 function fetchAllData($pdo) {
     ensureDelayedUnpaidNotifications($pdo);
+    purgeExpiredMessages($pdo);
     // الإجازات النشطة
     $leaves = $pdo->query(" 
-        SELECT sl.*, p.name AS patient_name, p.identity_number, p.phone AS patient_phone,
+        SELECT sl.*, p.name AS patient_name, p.identity_number, p.phone AS patient_phone, p.folder_link AS patient_folder_link,
                d.name AS doctor_name, d.title AS doctor_title, d.note AS doctor_note,
                COALESCE(lq.queries_count, 0) AS queries_count
         FROM sick_leaves sl
@@ -182,12 +268,12 @@ function fetchAllData($pdo) {
             GROUP BY leave_id
         ) lq ON lq.leave_id = sl.id
         WHERE sl.deleted_at IS NULL
-        ORDER BY sl.created_at DESC
+        ORDER BY sl.created_at DESC, sl.id DESC
     ")->fetchAll();
 
     // الإجازات المؤرشفة
     $archived = $pdo->query(" 
-        SELECT sl.*, p.name AS patient_name, p.identity_number, p.phone AS patient_phone,
+        SELECT sl.*, p.name AS patient_name, p.identity_number, p.phone AS patient_phone, p.folder_link AS patient_folder_link,
                d.name AS doctor_name, d.title AS doctor_title, d.note AS doctor_note,
                COALESCE(lq.queries_count, 0) AS queries_count
         FROM sick_leaves sl
@@ -199,7 +285,7 @@ function fetchAllData($pdo) {
             GROUP BY leave_id
         ) lq ON lq.leave_id = sl.id
         WHERE sl.deleted_at IS NOT NULL
-        ORDER BY sl.deleted_at DESC
+        ORDER BY sl.deleted_at DESC, sl.id DESC
     ")->fetchAll();
 
     // سجل الاستعلامات
@@ -214,7 +300,7 @@ function fetchAllData($pdo) {
 
     // إشعارات المدفوعات
     $notifications_payment = $pdo->query("
-        SELECT n.*, sl.payment_amount, sl.service_code, sl.patient_id, p.name AS patient_name
+        SELECT n.*, sl.payment_amount, sl.service_code, sl.patient_id, p.name AS patient_name, p.phone AS patient_phone
         FROM notifications n
         LEFT JOIN sick_leaves sl ON n.leave_id = sl.id
         LEFT JOIN patients p ON sl.patient_id = p.id
@@ -242,8 +328,9 @@ function fetchAllData($pdo) {
 
 function fetchActiveOperationalData($pdo) {
     ensureDelayedUnpaidNotifications($pdo);
+    purgeExpiredMessages($pdo);
     $leaves = $pdo->query(" 
-        SELECT sl.*, p.name AS patient_name, p.identity_number, p.phone AS patient_phone,
+        SELECT sl.*, p.name AS patient_name, p.identity_number, p.phone AS patient_phone, p.folder_link AS patient_folder_link,
                d.name AS doctor_name, d.title AS doctor_title, d.note AS doctor_note,
                COALESCE(lq.queries_count, 0) AS queries_count
         FROM sick_leaves sl
@@ -255,11 +342,11 @@ function fetchActiveOperationalData($pdo) {
             GROUP BY leave_id
         ) lq ON lq.leave_id = sl.id
         WHERE sl.deleted_at IS NULL
-        ORDER BY sl.created_at DESC
+        ORDER BY sl.created_at DESC, sl.id DESC
     ")->fetchAll();
 
     $notifications_payment = $pdo->query(" 
-        SELECT n.*, sl.payment_amount, sl.service_code, sl.patient_id, p.name AS patient_name
+        SELECT n.*, sl.payment_amount, sl.service_code, sl.patient_id, p.name AS patient_name, p.phone AS patient_phone
         FROM notifications n
         LEFT JOIN sick_leaves sl ON n.leave_id = sl.id
         LEFT JOIN patients p ON sl.patient_id = p.id
@@ -290,7 +377,6 @@ function ensureDelayedUnpaidNotifications($pdo): void {
         LEFT JOIN notifications n ON n.leave_id = sl.id AND n.type = 'payment'
         WHERE sl.deleted_at IS NULL
           AND sl.is_paid = 0
-          AND sl.payment_amount > 0
           AND sl.created_at <= (NOW() - INTERVAL 5 MINUTE)
           AND n.id IS NULL
     ");
@@ -298,11 +384,12 @@ function ensureDelayedUnpaidNotifications($pdo): void {
     $rows = $stmt->fetchAll();
     if (!$rows) return;
 
-    $ins = $pdo->prepare("INSERT INTO notifications (type, leave_id, message) VALUES ('payment', ?, ?)");
+    $ins = $pdo->prepare("INSERT INTO notifications (type, leave_id, message, created_at) VALUES ('payment', ?, ?, ?)");
     foreach ($rows as $row) {
         $ins->execute([
             $row['id'],
-            "إجازة غير مدفوعة منذ أكثر من 5 دقائق برمز {$row['service_code']} بمبلغ {$row['payment_amount']}"
+            "إجازة غير مدفوعة منذ أكثر من 5 دقائق برمز {$row['service_code']} بمبلغ {$row['payment_amount']}",
+            nowSaudi()
         ]);
     }
 }
@@ -310,6 +397,17 @@ function ensureDelayedUnpaidNotifications($pdo): void {
 // ======================== معالجة تسجيل الدخول والخروج ========================
 if (isset($_POST['action']) && $_POST['action'] === 'login') {
     header('Content-Type: application/json; charset=utf-8');
+
+    $maxAttempts = 5;
+    $lockMinutes = 15;
+    $_SESSION['login_attempts'] = $_SESSION['login_attempts'] ?? 0;
+    $_SESSION['login_lock_until'] = $_SESSION['login_lock_until'] ?? null;
+
+    if (!empty($_SESSION['login_lock_until']) && time() < intval($_SESSION['login_lock_until'])) {
+        $remain = ceil((intval($_SESSION['login_lock_until']) - time()) / 60);
+        echo json_encode(['success' => false, 'message' => "تم قفل تسجيل الدخول مؤقتاً. حاول بعد {$remain} دقيقة."]);
+        exit;
+    }
     $username = trim($_POST['username'] ?? '');
     $password = $_POST['password'] ?? '';
     
@@ -323,6 +421,9 @@ if (isset($_POST['action']) && $_POST['action'] === 'login') {
     $user = $stmt->fetch();
     
     if ($user && password_verify($password, $user['password_hash'])) {
+        session_regenerate_id(true);
+        $_SESSION['login_attempts'] = 0;
+        $_SESSION['login_lock_until'] = null;
         $_SESSION['admin_logged_in'] = true;
         $_SESSION['admin_user_id'] = $user['id'];
         $_SESSION['admin_username'] = $user['username'];
@@ -336,7 +437,14 @@ if (isset($_POST['action']) && $_POST['action'] === 'login') {
         
         echo json_encode(['success' => true, 'message' => 'تم تسجيل الدخول بنجاح.']);
     } else {
-        echo json_encode(['success' => false, 'message' => 'اسم المستخدم أو كلمة المرور غير صحيحة.']);
+        $_SESSION['login_attempts'] = intval($_SESSION['login_attempts'] ?? 0) + 1;
+        if ($_SESSION['login_attempts'] >= $maxAttempts) {
+            $_SESSION['login_lock_until'] = time() + ($lockMinutes * 60);
+            $_SESSION['login_attempts'] = 0;
+            echo json_encode(['success' => false, 'message' => 'تم تجاوز عدد المحاولات المسموح. تم القفل مؤقتاً 15 دقيقة.']);
+        } else {
+            echo json_encode(['success' => false, 'message' => 'اسم المستخدم أو كلمة المرور غير صحيحة.']);
+        }
     }
     exit;
 }
@@ -344,8 +452,8 @@ if (isset($_POST['action']) && $_POST['action'] === 'login') {
 if (isset($_POST['action']) && $_POST['action'] === 'logout') {
     // تسجيل وقت الخروج
     if (isset($_SESSION['session_record_id'])) {
-        $stmt = $pdo->prepare("UPDATE user_sessions SET logout_at = NOW() WHERE id = ?");
-        $stmt->execute([$_SESSION['session_record_id']]);
+        $stmt = $pdo->prepare("UPDATE user_sessions SET logout_at = ? WHERE id = ?");
+        $stmt->execute([nowSaudi(), $_SESSION['session_record_id']]);
     }
     session_destroy();
     header('Content-Type: application/json; charset=utf-8');
@@ -374,7 +482,9 @@ if (isset($_POST['action']) && $_POST['action'] !== 'login' && $_POST['action'] 
         case 'fetch_all_leaves':
             $data = fetchAllData($pdo);
             $data['doctors'] = $pdo->query("SELECT * FROM doctors ORDER BY name")->fetchAll();
+            $data['patients'] = $pdo->query("SELECT * FROM patients ORDER BY name")->fetchAll();
             $data['stats'] = getStats($pdo);
+            $data['unread_messages_count'] = getUnreadMessagesCount($pdo, intval($_SESSION['admin_user_id'] ?? 0));
             $data['success'] = true;
             echo json_encode($data);
             break;
@@ -389,6 +499,7 @@ if (isset($_POST['action']) && $_POST['action'] !== 'login' && $_POST['action'] 
                 $pName = trim($_POST['patient_manual_name'] ?? '');
                 $pIdentity = trim($_POST['patient_manual_id'] ?? '');
                 $pPhone = trim($_POST['patient_manual_phone'] ?? '');
+                $pFolderLink = trim($_POST['patient_manual_folder_link'] ?? '');
                 if (empty($pName) || empty($pIdentity)) {
                     echo json_encode(['success' => false, 'message' => 'يرجى إدخال اسم المريض ورقم هويته.']);
                     exit;
@@ -399,8 +510,8 @@ if (isset($_POST['action']) && $_POST['action'] !== 'login' && $_POST['action'] 
                 if ($existing) {
                     $patient_id = $existing['id'];
                 } else {
-                    $stmt = $pdo->prepare("INSERT INTO patients (name, identity_number, phone) VALUES (?, ?, ?)");
-                    $stmt->execute([$pName, $pIdentity, $pPhone]);
+                    $stmt = $pdo->prepare("INSERT INTO patients (name, identity_number, phone, folder_link) VALUES (?, ?, ?, ?)");
+                    $stmt->execute([$pName, $pIdentity, $pPhone, $pFolderLink]);
                     $patient_id = $pdo->lastInsertId();
                 }
             } else {
@@ -461,12 +572,13 @@ if (isset($_POST['action']) && $_POST['action'] !== 'login' && $_POST['action'] 
             // إضافة إشعار دفع إذا كانت غير مدفوعة
             if (!$is_paid && $payment_amount > 0) {
                 $leaveId = $pdo->lastInsertId();
-                $stmt = $pdo->prepare("INSERT INTO notifications (type, leave_id, message) VALUES ('payment', ?, ?)");
-                $stmt->execute([$leaveId, "إجازة جديدة غير مدفوعة برمز $service_code بمبلغ $payment_amount"]);
+                $stmt = $pdo->prepare("INSERT INTO notifications (type, leave_id, message, created_at) VALUES ('payment', ?, ?, ?)");
+                $stmt->execute([$leaveId, "إجازة جديدة غير مدفوعة برمز $service_code بمبلغ $payment_amount", nowSaudi()]);
             }
 
             $data = fetchActiveOperationalData($pdo);
             $data['doctors'] = $pdo->query("SELECT * FROM doctors ORDER BY name")->fetchAll();
+            $data['patients'] = $pdo->query("SELECT * FROM patients ORDER BY name")->fetchAll();
             $data['stats'] = getStats($pdo);
             $data['success'] = true;
             $data['message'] = "تمت إضافة الإجازة بنجاح. رمز الخدمة: $service_code";
@@ -513,28 +625,29 @@ if (isset($_POST['action']) && $_POST['action'] !== 'login' && $_POST['action'] 
                 $stmt = $pdo->prepare("UPDATE sick_leaves SET 
                     service_code = ?, issue_date = ?, start_date = ?, end_date = ?, days_count = ?,
                     is_companion = ?, companion_name = ?, companion_relation = ?,
-                    is_paid = ?, payment_amount = ?, doctor_id = ?, updated_at = NOW()
+                    is_paid = ?, payment_amount = ?, doctor_id = ?, updated_at = ?
                     WHERE id = ?");
                 $stmt->execute([
                     $service_code, $issue_date, $start_date, $end_date, $days_count,
                     $is_companion, $companion_name, $companion_relation,
-                    $is_paid, $payment_amount, $doctor_id_edit, $leave_id
+                    $is_paid, $payment_amount, $doctor_id_edit, nowSaudi(), $leave_id
                 ]);
             } else {
                 $stmt = $pdo->prepare("UPDATE sick_leaves SET 
                     service_code = ?, issue_date = ?, start_date = ?, end_date = ?, days_count = ?,
                     is_companion = ?, companion_name = ?, companion_relation = ?,
-                    is_paid = ?, payment_amount = ?, updated_at = NOW()
+                    is_paid = ?, payment_amount = ?, updated_at = ?
                     WHERE id = ?");
                 $stmt->execute([
                     $service_code, $issue_date, $start_date, $end_date, $days_count,
                     $is_companion, $companion_name, $companion_relation,
-                    $is_paid, $payment_amount, $leave_id
+                    $is_paid, $payment_amount, nowSaudi(), $leave_id
                 ]);
             }
 
             $data = fetchActiveOperationalData($pdo);
             $data['doctors'] = $pdo->query("SELECT * FROM doctors ORDER BY name")->fetchAll();
+            $data['patients'] = $pdo->query("SELECT * FROM patients ORDER BY name")->fetchAll();
             $data['stats'] = getStats($pdo);
             $data['success'] = true;
             $data['message'] = 'تم تعديل الإجازة بنجاح.';
@@ -598,12 +711,13 @@ if (isset($_POST['action']) && $_POST['action'] !== 'login' && $_POST['action'] 
 
             if (!$is_paid && $payment_amount > 0) {
                 $leaveId = $pdo->lastInsertId();
-                $stmt = $pdo->prepare("INSERT INTO notifications (type, leave_id, message) VALUES ('payment', ?, ?)");
-                $stmt->execute([$leaveId, "إجازة مكررة غير مدفوعة برمز $service_code بمبلغ $payment_amount"]);
+                $stmt = $pdo->prepare("INSERT INTO notifications (type, leave_id, message, created_at) VALUES ('payment', ?, ?, ?)");
+                $stmt->execute([$leaveId, "إجازة مكررة غير مدفوعة برمز $service_code بمبلغ $payment_amount", nowSaudi()]);
             }
 
             $data = fetchActiveOperationalData($pdo);
             $data['doctors'] = $pdo->query("SELECT * FROM doctors ORDER BY name")->fetchAll();
+            $data['patients'] = $pdo->query("SELECT * FROM patients ORDER BY name")->fetchAll();
             $data['stats'] = getStats($pdo);
             $data['success'] = true;
             $data['message'] = "تم تكرار الإجازة بنجاح. رمز الخدمة الجديد: $service_code";
@@ -612,8 +726,8 @@ if (isset($_POST['action']) && $_POST['action'] !== 'login' && $_POST['action'] 
 
         case 'delete_leave':
             $leave_id = intval($_POST['leave_id'] ?? 0);
-            $stmt = $pdo->prepare("UPDATE sick_leaves SET deleted_at = NOW() WHERE id = ? AND deleted_at IS NULL");
-            $stmt->execute([$leave_id]);
+            $stmt = $pdo->prepare("UPDATE sick_leaves SET deleted_at = ? WHERE id = ? AND deleted_at IS NULL");
+            $stmt->execute([nowSaudi(), $leave_id]);
             $data = fetchAllData($pdo);
             $data['stats'] = getStats($pdo);
             $data['success'] = true;
@@ -667,6 +781,7 @@ if (isset($_POST['action']) && $_POST['action'] !== 'login' && $_POST['action'] 
             $pdo->prepare("DELETE FROM notifications WHERE leave_id = ? AND type = 'payment'")->execute([$leave_id]);
             $data = fetchActiveOperationalData($pdo);
             $data['doctors'] = $pdo->query("SELECT * FROM doctors ORDER BY name")->fetchAll();
+            $data['patients'] = $pdo->query("SELECT * FROM patients ORDER BY name")->fetchAll();
             $data['stats'] = getStats($pdo);
             $data['success'] = true;
             $data['message'] = 'تم تأكيد الدفع بنجاح.';
@@ -738,12 +853,13 @@ if (isset($_POST['action']) && $_POST['action'] !== 'login' && $_POST['action'] 
             $name = trim($_POST['patient_name'] ?? '');
             $identity = trim($_POST['identity_number'] ?? '');
             $phone = trim($_POST['phone'] ?? '');
+            $folder_link = trim($_POST['folder_link'] ?? '');
             if (empty($name) || empty($identity)) {
                 echo json_encode(['success' => false, 'message' => 'يرجى إدخال اسم المريض ورقم هويته.']);
                 exit;
             }
-            $stmt = $pdo->prepare("INSERT INTO patients (name, identity_number, phone) VALUES (?, ?, ?)");
-            $stmt->execute([$name, $identity, $phone]);
+            $stmt = $pdo->prepare("INSERT INTO patients (name, identity_number, phone, folder_link) VALUES (?, ?, ?, ?)");
+            $stmt->execute([$name, $identity, $phone, $folder_link]);
             $patientId = $pdo->lastInsertId();
             $patient = $pdo->prepare("SELECT * FROM patients WHERE id = ?");
             $patient->execute([$patientId]);
@@ -763,12 +879,13 @@ if (isset($_POST['action']) && $_POST['action'] !== 'login' && $_POST['action'] 
             $name = trim($_POST['patient_name'] ?? '');
             $identity = trim($_POST['identity_number'] ?? '');
             $phone = trim($_POST['phone'] ?? '');
+            $folder_link = trim($_POST['folder_link'] ?? '');
             if ($id <= 0 || empty($name) || empty($identity)) {
                 echo json_encode(['success' => false, 'message' => 'بيانات غير صالحة.']);
                 exit;
             }
-            $stmt = $pdo->prepare("UPDATE patients SET name = ?, identity_number = ?, phone = ? WHERE id = ?");
-            $stmt->execute([$name, $identity, $phone, $id]);
+            $stmt = $pdo->prepare("UPDATE patients SET name = ?, identity_number = ?, phone = ?, folder_link = ? WHERE id = ?");
+            $stmt->execute([$name, $identity, $phone, $folder_link, $id]);
             $patient = $pdo->prepare("SELECT * FROM patients WHERE id = ?");
             $patient->execute([$id]);
             $patientData = $patient->fetch();
@@ -825,8 +942,8 @@ if (isset($_POST['action']) && $_POST['action'] !== 'login' && $_POST['action'] 
 
         case 'add_query':
             $leave_id = intval($_POST['leave_id'] ?? 0);
-            $stmt = $pdo->prepare("INSERT INTO leave_queries (leave_id, queried_at, source) VALUES (?, NOW(), 'admin')");
-            $stmt->execute([$leave_id]);
+            $stmt = $pdo->prepare("INSERT INTO leave_queries (leave_id, queried_at, source) VALUES (?, ?, 'admin')");
+            $stmt->execute([$leave_id, nowSaudi()]);
             $new_count = $pdo->prepare("SELECT COUNT(*) FROM leave_queries WHERE leave_id = ?");
             $new_count->execute([$leave_id]);
             echo json_encode(['success' => true, 'message' => 'تم تسجيل الاستعلام.', 'new_count' => $new_count->fetchColumn()]);
@@ -845,7 +962,7 @@ if (isset($_POST['action']) && $_POST['action'] !== 'login' && $_POST['action'] 
             }
 
             $source = $status['deleted_at'] ? 'archived_lookup' : 'admin_lookup';
-            $pdo->prepare("INSERT INTO leave_queries (leave_id, queried_at, source) VALUES (?, NOW(), ?)")->execute([$leave_id, $source]);
+            $pdo->prepare("INSERT INTO leave_queries (leave_id, queried_at, source) VALUES (?, ?, ?)")->execute([$leave_id, nowSaudi(), $source]);
 
             if ($status['deleted_at']) {
                 echo json_encode(['success' => false, 'message' => 'لم يتم العثور على الإجازة.']);
@@ -853,7 +970,7 @@ if (isset($_POST['action']) && $_POST['action'] !== 'login' && $_POST['action'] 
             }
 
             $stmt = $pdo->prepare("
-                SELECT sl.*, p.name AS patient_name, p.identity_number,
+                SELECT sl.*, p.name AS patient_name, p.identity_number, p.folder_link AS patient_folder_link,
                        d.name AS doctor_name, d.title AS doctor_title, d.note AS doctor_note,
                        (SELECT COUNT(*) FROM leave_queries lq WHERE lq.leave_id = sl.id) AS queries_count
                 FROM sick_leaves sl
@@ -870,10 +987,81 @@ if (isset($_POST['action']) && $_POST['action'] !== 'login' && $_POST['action'] 
             }
             break;
 
+
+        case 'fetch_admin_statistics':
+            $role = $_SESSION['admin_role'] ?? 'user';
+            $canViewFinancial = ($role === 'admin');
+
+            $rangeDays = max(1, min(365, intval($_POST['range_days'] ?? 30)));
+            $fromDate = trim($_POST['from_date'] ?? '');
+            $toDate = trim($_POST['to_date'] ?? '');
+            if (!preg_match('/^\d{4}-\d{2}-\d{2}$/', $fromDate)) {
+                $fromDate = date('Y-m-d', strtotime("-" . ($rangeDays - 1) . " days"));
+            }
+            if (!preg_match('/^\d{4}-\d{2}-\d{2}$/', $toDate)) {
+                $toDate = date('Y-m-d');
+            }
+            if ($fromDate > $toDate) {
+                [$fromDate, $toDate] = [$toDate, $fromDate];
+            }
+
+            $summary = [
+                'can_view_financial' => $canViewFinancial,
+                'range_days' => $rangeDays,
+                'from_date' => $fromDate,
+                'to_date' => $toDate,
+                'totals' => getStats($pdo),
+                'today_total' => 0,
+                'today_paid' => 0,
+                'today_unpaid' => 0,
+                'avg_daily' => 0,
+                'consistency_rate' => 0,
+                'top_doctors' => [],
+                'top_patients' => [],
+                'daily' => []
+            ];
+
+            $summary['today_total'] = (int)$pdo->query("SELECT COUNT(*) FROM sick_leaves WHERE deleted_at IS NULL AND DATE(created_at) = CURDATE()")->fetchColumn();
+            $summary['today_paid'] = (int)$pdo->query("SELECT COUNT(*) FROM sick_leaves WHERE deleted_at IS NULL AND is_paid = 1 AND DATE(created_at) = CURDATE()")->fetchColumn();
+            $summary['today_unpaid'] = (int)$pdo->query("SELECT COUNT(*) FROM sick_leaves WHERE deleted_at IS NULL AND is_paid = 0 AND DATE(created_at) = CURDATE()")->fetchColumn();
+
+            $avgStmt = $pdo->prepare("SELECT COALESCE(AVG(day_count),0) FROM (SELECT DATE(created_at) d, COUNT(*) day_count FROM sick_leaves WHERE deleted_at IS NULL AND DATE(created_at) BETWEEN ? AND ? GROUP BY DATE(created_at)) t");
+            $avgStmt->execute([$fromDate, $toDate]);
+            $summary['avg_daily'] = (float)$avgStmt->fetchColumn();
+
+            $consistencyStmt = $pdo->prepare("SELECT (COUNT(DISTINCT DATE(created_at)) * 100.0 / GREATEST(DATEDIFF(?, ?) + 1, 1)) FROM sick_leaves WHERE deleted_at IS NULL AND DATE(created_at) BETWEEN ? AND ?");
+            $consistencyStmt->execute([$toDate, $fromDate, $fromDate, $toDate]);
+            $summary['consistency_rate'] = round((float)$consistencyStmt->fetchColumn(), 2);
+
+            $topDoctorsStmt = $pdo->prepare("SELECT d.name, d.title, COUNT(*) leaves_count FROM sick_leaves sl LEFT JOIN doctors d ON d.id = sl.doctor_id WHERE sl.deleted_at IS NULL AND DATE(sl.created_at) BETWEEN ? AND ? GROUP BY sl.doctor_id ORDER BY leaves_count DESC LIMIT 5");
+            $topDoctorsStmt->execute([$fromDate, $toDate]);
+            $summary['top_doctors'] = $topDoctorsStmt->fetchAll();
+
+            $topPatientsStmt = $pdo->prepare("SELECT p.name, p.identity_number, COUNT(*) leaves_count, SUM(CASE WHEN sl.is_paid = 1 THEN sl.payment_amount ELSE 0 END) paid_amount, SUM(CASE WHEN sl.is_paid = 0 THEN sl.payment_amount ELSE 0 END) unpaid_amount FROM sick_leaves sl LEFT JOIN patients p ON p.id = sl.patient_id WHERE sl.deleted_at IS NULL AND DATE(sl.created_at) BETWEEN ? AND ? GROUP BY sl.patient_id ORDER BY leaves_count DESC LIMIT 5");
+            $topPatientsStmt->execute([$fromDate, $toDate]);
+            $summary['top_patients'] = $topPatientsStmt->fetchAll();
+
+            $dailyStmt = $pdo->prepare("SELECT DATE(created_at) day_date, COUNT(*) total_count, SUM(CASE WHEN is_paid = 1 THEN 1 ELSE 0 END) paid_count, SUM(CASE WHEN is_paid = 0 THEN 1 ELSE 0 END) unpaid_count FROM sick_leaves WHERE deleted_at IS NULL AND DATE(created_at) BETWEEN ? AND ? GROUP BY DATE(created_at) ORDER BY day_date DESC");
+            $dailyStmt->execute([$fromDate, $toDate]);
+            $summary['daily'] = $dailyStmt->fetchAll();
+
+            if (!$canViewFinancial) {
+                $summary['totals']['paid_amount'] = null;
+                $summary['totals']['unpaid_amount'] = null;
+                foreach ($summary['top_patients'] as &$tp) {
+                    $tp['paid_amount'] = null;
+                    $tp['unpaid_amount'] = null;
+                }
+                unset($tp);
+            }
+
+            echo json_encode(['success' => true, 'data' => $summary]);
+            break;
+
         case 'fetch_notifications':
             ensureDelayedUnpaidNotifications($pdo);
             $notifications = $pdo->query(" 
-                SELECT n.*, sl.payment_amount, sl.service_code, sl.patient_id, p.name AS patient_name
+                SELECT n.*, sl.payment_amount, sl.service_code, sl.patient_id, p.name AS patient_name, p.phone AS patient_phone
                 FROM notifications n
                 LEFT JOIN sick_leaves sl ON n.leave_id = sl.id
                 LEFT JOIN patients p ON sl.patient_id = p.id
@@ -910,6 +1098,150 @@ if (isset($_POST['action']) && $_POST['action'] !== 'login' && $_POST['action'] 
         case 'fetch_patients':
             $patients = $pdo->query("SELECT * FROM patients ORDER BY name")->fetchAll();
             echo json_encode(['success' => true, 'patients' => $patients, 'stats' => getStats($pdo)]);
+            break;
+
+
+        case 'fetch_unread_messages_count':
+            echo json_encode(['success' => true, 'count' => getUnreadMessagesCount($pdo, intval($_SESSION['admin_user_id'] ?? 0))]);
+            break;
+
+        case 'fetch_chat_users':
+            $currentUserId = intval($_SESSION['admin_user_id'] ?? 0);
+            if ($_SESSION['admin_role'] === 'admin') {
+                $stmt = $pdo->prepare("SELECT id, username, display_name, role FROM admin_users WHERE is_active = 1 AND id <> ? ORDER BY display_name");
+                $stmt->execute([$currentUserId]);
+            } else {
+                $stmt = $pdo->prepare("SELECT id, username, display_name, role FROM admin_users WHERE is_active = 1 AND role = 'admin' ORDER BY display_name");
+                $stmt->execute();
+            }
+            echo json_encode(['success' => true, 'users' => $stmt->fetchAll(), 'chat_retention_hours' => intval(getSetting($pdo, 'chat_retention_hours', '0')), 'unread_messages_count' => getUnreadMessagesCount($pdo, intval($_SESSION['admin_user_id'] ?? 0))]);
+            break;
+
+        case 'fetch_messages':
+            $peerId = intval($_POST['peer_id'] ?? 0);
+            $me = intval($_SESSION['admin_user_id'] ?? 0);
+            if ($peerId <= 0 || $me <= 0) {
+                echo json_encode(['success' => false, 'message' => 'مستخدم غير صالح.']);
+                break;
+            }
+            $stmt = $pdo->prepare("
+                SELECT um.*,
+                       s.display_name AS sender_name,
+                       r.display_name AS receiver_name,
+                       rp.message_text AS reply_message_text,
+                       rp.file_name AS reply_file_name
+                FROM user_messages um
+                LEFT JOIN admin_users s ON um.sender_id = s.id
+                LEFT JOIN admin_users r ON um.receiver_id = r.id
+                LEFT JOIN user_messages rp ON um.reply_to_id = rp.id
+                WHERE um.deleted_at IS NULL AND ((um.sender_id = ? AND um.receiver_id = ?)
+                   OR (um.sender_id = ? AND um.receiver_id = ?))
+                ORDER BY um.created_at ASC, um.id ASC
+                LIMIT 500
+            ");
+            $stmt->execute([$me, $peerId, $peerId, $me]);
+            $messages = $stmt->fetchAll();
+            $pdo->prepare("UPDATE user_messages SET is_read = 1 WHERE receiver_id = ? AND sender_id = ? AND is_read = 0")
+                ->execute([$me, $peerId]);
+            echo json_encode(['success' => true, 'messages' => $messages]);
+            break;
+
+        case 'send_message':
+            $peerId = intval($_POST['peer_id'] ?? 0);
+            $messageText = trim($_POST['message_text'] ?? '');
+            $me = intval($_SESSION['admin_user_id'] ?? 0);
+            if ($peerId <= 0 || $me <= 0) {
+                echo json_encode(['success' => false, 'message' => 'بيانات الرسالة غير مكتملة.']);
+                break;
+            }
+            $check = $pdo->prepare("SELECT id FROM admin_users WHERE id = ? AND is_active = 1");
+            $check->execute([$peerId]);
+            if (!$check->fetch()) {
+                echo json_encode(['success' => false, 'message' => 'المستخدم غير موجود أو غير مفعل.']);
+                break;
+            }
+
+            $replyToId = intval($_POST['reply_to_id'] ?? 0);
+            $messageType = 'text';
+            $fileName = null; $filePath = null; $mimeType = null; $fileSize = null;
+            if (!empty($_FILES['chat_file']) && intval($_FILES['chat_file']['error']) === UPLOAD_ERR_OK) {
+                $upload = $_FILES['chat_file'];
+                $ext = strtolower(pathinfo($upload['name'], PATHINFO_EXTENSION));
+                $allowed = ['jpg','jpeg','png','gif','webp','pdf','doc','docx','xls','xlsx','txt','mp3','wav','ogg','m4a','aac','mp4'];
+                if (!in_array($ext, $allowed)) {
+                    echo json_encode(['success' => false, 'message' => 'نوع الملف غير مسموح.']);
+                    break;
+                }
+                $mimeType = mime_content_type($upload['tmp_name']) ?: 'application/octet-stream';
+                $fileSize = intval($upload['size'] ?? 0);
+                if ($fileSize > 15 * 1024 * 1024) {
+                    echo json_encode(['success' => false, 'message' => 'حجم الملف كبير (الحد 15MB).']);
+                    break;
+                }
+                $dir = __DIR__ . '/uploads/chat';
+                if (!is_dir($dir)) { @mkdir($dir, 0775, true); }
+                $safe = bin2hex(random_bytes(8)) . '_' . time() . '.' . $ext;
+                $target = $dir . '/' . $safe;
+                if (!move_uploaded_file($upload['tmp_name'], $target)) {
+                    echo json_encode(['success' => false, 'message' => 'تعذر رفع الملف.']);
+                    break;
+                }
+                $fileName = $upload['name'];
+                $filePath = 'uploads/chat/' . $safe;
+                $messageType = (str_starts_with($mimeType, 'image/')) ? 'image' : ((str_starts_with($mimeType, 'audio/')) ? 'voice' : 'file');
+            }
+
+            if ($messageText === '' && !$filePath) {
+                echo json_encode(['success' => false, 'message' => 'أدخل نصاً أو أرفق ملفاً.']);
+                break;
+            }
+
+            $ins = $pdo->prepare("INSERT INTO user_messages (sender_id, receiver_id, message_text, message_type, file_name, file_path, mime_type, file_size, reply_to_id, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)");
+            $ins->execute([$me, $peerId, $messageText, $messageType, $fileName, $filePath, $mimeType, $fileSize, $replyToId > 0 ? $replyToId : null, nowSaudi()]);
+            echo json_encode(['success' => true, 'message' => 'تم إرسال الرسالة.']);
+            break;
+
+        case 'delete_message':
+            $messageId = intval($_POST['message_id'] ?? 0);
+            $me = intval($_SESSION['admin_user_id'] ?? 0);
+            $role = $_SESSION['admin_role'] ?? 'user';
+            $stmt = $pdo->prepare("SELECT sender_id, file_path, deleted_at FROM user_messages WHERE id = ? LIMIT 1");
+            $stmt->execute([$messageId]);
+            $msg = $stmt->fetch();
+            if (!$msg || !empty($msg['deleted_at'])) {
+                echo json_encode(['success' => false, 'message' => 'الرسالة غير موجودة.']);
+                break;
+            }
+            if ($role !== 'admin' && intval($msg['sender_id']) !== $me) {
+                echo json_encode(['success' => false, 'message' => 'لا تملك صلاحية حذف هذه الرسالة.']);
+                break;
+            }
+            if (!empty($msg['file_path'])) {
+                $full = __DIR__ . '/' . ltrim($msg['file_path'], '/');
+                if (is_file($full)) @unlink($full);
+            }
+            $pdo->prepare("UPDATE user_messages SET deleted_at = ? WHERE id = ?")->execute([nowSaudi(), $messageId]);
+            echo json_encode(['success' => true, 'message' => 'تم حذف الرسالة.']);
+            break;
+
+        case 'set_chat_retention':
+            if (($_SESSION['admin_role'] ?? 'user') !== 'admin') {
+                echo json_encode(['success' => false, 'message' => 'ليس لديك صلاحية.']);
+                break;
+            }
+            $hours = max(0, intval($_POST['hours'] ?? 0));
+            setSetting($pdo, 'chat_retention_hours', (string)$hours);
+            purgeExpiredMessages($pdo);
+            echo json_encode(['success' => true, 'message' => 'تم حفظ مدة الحذف التلقائي.', 'hours' => $hours]);
+            break;
+
+        case 'run_chat_cleanup':
+            if (($_SESSION['admin_role'] ?? 'user') !== 'admin') {
+                echo json_encode(['success' => false, 'message' => 'ليس لديك صلاحية.']);
+                break;
+            }
+            purgeExpiredMessages($pdo);
+            echo json_encode(['success' => true, 'message' => 'تم تنظيف المحادثات حسب المدة.']);
             break;
 
         // ======================== إدارة المستخدمين ========================
@@ -1035,6 +1367,34 @@ if (isset($_POST['action']) && $_POST['action'] !== 'login' && $_POST['action'] 
             echo json_encode(['success' => true, 'message' => 'تم حذف جميع جلسات المستخدم.']);
             break;
 
+        case 'mark_all_leaves_paid':
+            if ($_SESSION['admin_role'] !== 'admin') {
+                echo json_encode(['success' => false, 'message' => 'ليس لديك صلاحية.']);
+                exit;
+            }
+            $pdo->exec("UPDATE sick_leaves SET is_paid = 1 WHERE deleted_at IS NULL");
+            $pdo->exec("DELETE FROM notifications WHERE type = 'payment'");
+            $data = fetchAllData($pdo);
+            $data['stats'] = getStats($pdo);
+            $data['success'] = true;
+            $data['message'] = 'تم تحويل جميع الإجازات النشطة إلى مدفوعة.';
+            echo json_encode($data);
+            break;
+
+        case 'reset_all_payments':
+            if ($_SESSION['admin_role'] !== 'admin') {
+                echo json_encode(['success' => false, 'message' => 'ليس لديك صلاحية.']);
+                exit;
+            }
+            $pdo->exec("UPDATE sick_leaves SET payment_amount = 0 WHERE deleted_at IS NULL");
+            $pdo->exec("DELETE FROM notifications WHERE type = 'payment'");
+            $data = fetchAllData($pdo);
+            $data['stats'] = getStats($pdo);
+            $data['success'] = true;
+            $data['message'] = 'تم تصفير المدفوعات والمستحقات.';
+            echo json_encode($data);
+            break;
+
         default:
             echo json_encode(['success' => false, 'message' => 'إجراء غير معروف: ' . $action]);
             break;
@@ -1058,11 +1418,16 @@ if ($loggedIn) {
     $stats = getStats($pdo);
     
     $users = [];
+    $chat_users_stmt = ($_SESSION['admin_role'] === 'admin')
+        ? $pdo->prepare("SELECT id, username, display_name, role FROM admin_users WHERE is_active = 1 AND id <> ? ORDER BY display_name")
+        : $pdo->prepare("SELECT id, username, display_name, role FROM admin_users WHERE is_active = 1 AND role = 'admin' ORDER BY display_name");
+    if ($_SESSION['admin_role'] === 'admin') { $chat_users_stmt->execute([intval($_SESSION['admin_user_id'])]); } else { $chat_users_stmt->execute(); }
+    $chat_users = $chat_users_stmt->fetchAll();
     if ($_SESSION['admin_role'] === 'admin') {
         $users = $pdo->query("SELECT id, username, display_name, role, is_active, created_at FROM admin_users ORDER BY created_at DESC")->fetchAll();
     }
 } else {
-    $doctors = $patients = $leaves = $archived = $queries = $notifications_payment = $payments = $users = [];
+    $doctors = $patients = $leaves = $archived = $queries = $notifications_payment = $payments = $users = $chat_users = [];
     $stats = ['total' => 0, 'active' => 0, 'archived' => 0, 'patients' => 0, 'doctors' => 0, 'paid' => 0, 'unpaid' => 0, 'paid_amount' => 0, 'unpaid_amount' => 0];
 }
 ?>
@@ -1080,136 +1445,320 @@ if ($loggedIn) {
     <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf-autotable/3.5.25/jspdf.plugin.autotable.min.js"></script>
 
     <style>
+        /* ╔══════════════════════════════════════════════════════════════════╗
+           ║     Ultimate Dashboard Design v4.0 - تصميم خورافي نهائي       ║
+           ╚══════════════════════════════════════════════════════════════════╝ */
+
+        /* ═══════════════ المتغيرات - لايت مود ═══════════════ */
         :root {
-            --primary-color: #1a73e8;
-            --primary-light: #4a9af5;
-            --primary-dark: #0d47a1;
-            --secondary-color: #2c3e50;
-            --success-color: #00c853;
-            --success-dark: #009624;
-            --danger-color: #ff1744;
-            --danger-dark: #d50000;
-            --warning-color: #ff9100;
-            --warning-dark: #e65100;
-            --info-color: #00b0ff;
-            --bg-color: #f0f2f5;
-            --card-bg: #ffffff;
-            --text-color: #1a1a2e;
-            --text-muted: #6c757d;
-            --border-color: #e0e0e0;
-            --border-radius: 12px;
-            --shadow: 0 2px 12px rgba(0,0,0,0.08);
-            --shadow-hover: 0 8px 25px rgba(0,0,0,0.15);
-            --transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
-            --gradient-primary: linear-gradient(135deg, #1a73e8, #4a9af5);
-            --gradient-success: linear-gradient(135deg, #00c853, #69f0ae);
-            --gradient-danger: linear-gradient(135deg, #ff1744, #ff616f);
-            --gradient-warning: linear-gradient(135deg, #ff9100, #ffc246);
-            --gradient-dark: linear-gradient(135deg, #2c3e50, #34495e);
+            --primary: #6366f1;
+            --primary-light: #818cf8;
+            --primary-dark: #4f46e5;
+            --primary-glow: rgba(99,102,241,0.4);
+            --accent: #8b5cf6;
+            --accent-light: #a78bfa;
+            --secondary: #1e293b;
+            --success: #10b981;
+            --success-light: #34d399;
+            --success-glow: rgba(16,185,129,0.35);
+            --danger: #ef4444;
+            --danger-light: #f87171;
+            --danger-glow: rgba(239,68,68,0.35);
+            --warning: #f59e0b;
+            --warning-light: #fbbf24;
+            --warning-glow: rgba(245,158,11,0.35);
+            --info: #06b6d4;
+            --info-light: #22d3ee;
+            --info-glow: rgba(6,182,212,0.35);
+
+            --bg: #f0f4ff;
+            --bg-alt: #e8edf8;
+            --card: #ffffff;
+            --card-hover: #fafaff;
+            --text: #0f172a;
+            --text-secondary: #334155;
+            --text-muted: #64748b;
+            --border: #e2e8f0;
+            --border-light: #f1f5f9;
+
+            --radius: 16px;
+            --radius-sm: 10px;
+            --radius-lg: 24px;
+            --radius-xl: 32px;
+
+            --shadow-xs: 0 1px 2px rgba(15,23,42,0.04);
+            --shadow: 0 4px 20px rgba(15,23,42,0.07);
+            --shadow-md: 0 8px 32px rgba(15,23,42,0.1);
+            --shadow-lg: 0 20px 50px rgba(15,23,42,0.14);
+            --shadow-xl: 0 30px 80px rgba(15,23,42,0.18);
+
+            --ease: cubic-bezier(0.4, 0, 0.2, 1);
+            --ease-bounce: cubic-bezier(0.34, 1.56, 0.64, 1);
+            --ease-out: cubic-bezier(0, 0, 0.2, 1);
+            --t-fast: 0.2s;
+            --t-normal: 0.35s;
+            --t-slow: 0.5s;
+
+            --grad-primary: linear-gradient(135deg, #6366f1, #8b5cf6);
+            --grad-success: linear-gradient(135deg, #10b981, #34d399);
+            --grad-danger: linear-gradient(135deg, #ef4444, #f87171);
+            --grad-warning: linear-gradient(135deg, #f59e0b, #fbbf24);
+            --grad-dark: linear-gradient(135deg, #1e293b, #334155, #475569);
+            --grad-glass: linear-gradient(135deg, rgba(255,255,255,0.9), rgba(255,255,255,0.7));
         }
 
+        /* ═══════════════ المتغيرات - دارك مود (نصوص واضحة جداً) ═══════════════ */
         .dark-mode {
-            --bg-color: #0f1923;
-            --card-bg: #1a2332;
-            --text-color: #e0e0e0;
-            --text-muted: #9e9e9e;
-            --border-color: #2d3748;
-            --shadow: 0 2px 12px rgba(0,0,0,0.3);
-            --shadow-hover: 0 8px 25px rgba(0,0,0,0.4);
+            --bg: #080d1a;
+            --bg-alt: #0e1525;
+            --card: #131c2e;
+            --card-hover: #182236;
+            --text: #f8fafc;
+            --text-secondary: #e2e8f0;
+            --text-muted: #a1b0c8;
+            --border: rgba(148,163,184,0.18);
+            --border-light: rgba(148,163,184,0.08);
+            --shadow-xs: 0 1px 2px rgba(0,0,0,0.3);
+            --shadow: 0 4px 20px rgba(0,0,0,0.35);
+            --shadow-md: 0 8px 32px rgba(0,0,0,0.4);
+            --shadow-lg: 0 20px 50px rgba(0,0,0,0.45);
+            --shadow-xl: 0 30px 80px rgba(0,0,0,0.5);
+            --grad-glass: linear-gradient(135deg, rgba(19,28,46,0.95), rgba(19,28,46,0.85));
         }
 
+        /* ═══════════════ الأساسيات ═══════════════ */
         * { box-sizing: border-box; margin: 0; padding: 0; }
 
         body {
             font-family: 'Cairo', sans-serif;
-            background: var(--bg-color);
-            color: var(--text-color);
+            background: var(--bg);
+            color: var(--text);
             direction: rtl;
             min-height: 100vh;
-            transition: var(--transition);
+            transition: background var(--t-slow) var(--ease), color var(--t-normal) var(--ease);
             font-size: 14px;
-            line-height: 1.6;
+            line-height: 1.7;
+            -webkit-font-smoothing: antialiased;
+            -moz-osx-font-smoothing: grayscale;
+            position: relative;
         }
 
-        /* ======================== صفحة تسجيل الدخول ======================== */
+        /* خلفية mesh ثابتة */
+        body::before {
+            content: '';
+            position: fixed;
+            inset: 0;
+            background:
+                radial-gradient(ellipse at 15% 80%, rgba(99,102,241,0.07) 0%, transparent 50%),
+                radial-gradient(ellipse at 85% 20%, rgba(139,92,246,0.06) 0%, transparent 50%),
+                radial-gradient(ellipse at 50% 50%, rgba(6,182,212,0.04) 0%, transparent 60%);
+            pointer-events: none;
+            z-index: 0;
+        }
+
+        .dark-mode body::before,
+        body.dark-mode::before {
+            background:
+                radial-gradient(ellipse at 15% 80%, rgba(99,102,241,0.12) 0%, transparent 50%),
+                radial-gradient(ellipse at 85% 20%, rgba(139,92,246,0.08) 0%, transparent 50%),
+                radial-gradient(ellipse at 50% 50%, rgba(6,182,212,0.06) 0%, transparent 60%);
+        }
+
+        body > * { position: relative; z-index: 1; }
+
+        /* ═══════════════ أنيميشنات خورافية ═══════════════ */
+        @keyframes slideUp {
+            from { opacity: 0; transform: translateY(35px) scale(0.97); }
+            to { opacity: 1; transform: translateY(0) scale(1); }
+        }
+        @keyframes slideDown {
+            from { opacity: 0; transform: translateY(-25px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+        @keyframes fadeIn {
+            from { opacity: 0; }
+            to { opacity: 1; }
+        }
+        @keyframes fadeInUp {
+            from { opacity: 0; transform: translateY(18px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+        @keyframes scaleIn {
+            from { opacity: 0; transform: scale(0.92); }
+            to { opacity: 1; transform: scale(1); }
+        }
+        @keyframes float {
+            0%, 100% { transform: translateY(0); }
+            50% { transform: translateY(-10px); }
+        }
+        @keyframes gradientShift {
+            0% { background-position: 0% 50%; }
+            50% { background-position: 100% 50%; }
+            100% { background-position: 0% 50%; }
+        }
+        @keyframes spin { to { transform: rotate(360deg); } }
+        @keyframes pulse {
+            0% { box-shadow: 0 0 0 0 rgba(239,68,68,0.5); }
+            70% { box-shadow: 0 0 0 12px rgba(239,68,68,0); }
+            100% { box-shadow: 0 0 0 0 rgba(239,68,68,0); }
+        }
+        @keyframes iconBounce {
+            0%, 100% { transform: translateY(0) rotate(0deg); }
+            25% { transform: translateY(-4px) rotate(3deg); }
+            75% { transform: translateY(2px) rotate(-2deg); }
+        }
+        @keyframes shimmer {
+            0% { background-position: -200% 0; }
+            100% { background-position: 200% 0; }
+        }
+        @keyframes glowPulse {
+            0%, 100% { opacity: 0.5; }
+            50% { opacity: 1; }
+        }
+        @keyframes cardAppear {
+            from { opacity: 0; transform: translateY(20px) scale(0.96); }
+            to { opacity: 1; transform: translateY(0) scale(1); }
+        }
+
+        .fade-in { animation: fadeIn 0.5s var(--ease); }
+
+        /* ═══════════════ صفحة تسجيل الدخول - خورافية ═══════════════ */
         .login-wrapper {
             min-height: 100vh;
             display: flex;
             align-items: center;
             justify-content: center;
-            background: linear-gradient(135deg, #0d1b2a 0%, #1b2838 50%, #1a73e8 100%);
+            background: linear-gradient(-45deg, #0f172a, #1e1b4b, #312e81, #1e293b, #0c4a6e);
+            background-size: 500% 500%;
+            animation: gradientShift 20s ease infinite;
             padding: 20px;
+            position: relative;
+            overflow: hidden;
+        }
+
+        /* أشكال زخرفية متحركة */
+        .login-wrapper::before {
+            content: '';
+            position: absolute;
+            width: 500px;
+            height: 500px;
+            background: radial-gradient(circle, rgba(99,102,241,0.2) 0%, transparent 70%);
+            top: -150px;
+            right: -150px;
+            border-radius: 50%;
+            animation: float 7s ease-in-out infinite;
+        }
+
+        .login-wrapper::after {
+            content: '';
+            position: absolute;
+            width: 350px;
+            height: 350px;
+            background: radial-gradient(circle, rgba(139,92,246,0.15) 0%, transparent 70%);
+            bottom: -80px;
+            left: -80px;
+            border-radius: 50%;
+            animation: float 5s ease-in-out infinite reverse;
         }
 
         .login-card {
-            background: rgba(255,255,255,0.95);
-            backdrop-filter: blur(20px);
-            border-radius: 20px;
-            padding: 40px;
+            background: rgba(255,255,255,0.92);
+            backdrop-filter: blur(30px) saturate(200%);
+            -webkit-backdrop-filter: blur(30px) saturate(200%);
+            border-radius: var(--radius-xl);
+            padding: 48px 40px;
             width: 100%;
-            max-width: 420px;
-            box-shadow: 0 20px 60px rgba(0,0,0,0.3);
-            animation: slideUp 0.6s ease;
+            max-width: 440px;
+            box-shadow: 0 40px 100px rgba(0,0,0,0.3), 0 0 0 1px rgba(255,255,255,0.15) inset;
+            animation: slideUp 0.8s var(--ease-bounce);
+            position: relative;
+            z-index: 2;
+            border: 1px solid rgba(255,255,255,0.25);
         }
 
         .dark-mode .login-card {
-            background: rgba(26,35,50,0.95);
+            background: rgba(19,28,46,0.92);
+            border-color: rgba(99,102,241,0.25);
+            box-shadow: 0 40px 100px rgba(0,0,0,0.6), 0 0 80px rgba(99,102,241,0.08);
         }
 
         .login-card h2 {
             text-align: center;
             margin-bottom: 8px;
-            font-weight: 700;
-            color: var(--primary-color);
-            font-size: 24px;
+            font-weight: 800;
+            font-size: 28px;
+            background: var(--grad-primary);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            background-clip: text;
         }
 
         .login-card .subtitle {
             text-align: center;
             color: var(--text-muted);
-            margin-bottom: 30px;
+            margin-bottom: 32px;
             font-size: 14px;
+            font-weight: 500;
+        }
+
+        .dark-mode .login-card .subtitle {
+            color: #a1b0c8;
         }
 
         .login-card .login-icon {
             text-align: center;
-            font-size: 48px;
-            color: var(--primary-color);
-            margin-bottom: 16px;
+            font-size: 60px;
+            margin-bottom: 20px;
+            background: var(--grad-primary);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            background-clip: text;
+            filter: drop-shadow(0 6px 16px var(--primary-glow));
+            animation: float 4s ease-in-out infinite;
         }
 
-        @keyframes slideUp {
-            from { opacity: 0; transform: translateY(30px); }
-            to { opacity: 1; transform: translateY(0); }
-        }
-
-        /* ======================== شريط التنقل ======================== */
+        /* ═══════════════ شريط التنقل ═══════════════ */
         .top-navbar {
-            background: var(--gradient-dark);
-            padding: 12px 24px;
+            background: linear-gradient(135deg, rgba(15,23,42,0.97), rgba(30,41,59,0.95));
+            backdrop-filter: blur(24px) saturate(180%);
+            -webkit-backdrop-filter: blur(24px) saturate(180%);
+            padding: 14px 28px;
             display: flex;
             align-items: center;
             justify-content: space-between;
             flex-wrap: wrap;
             gap: 12px;
-            box-shadow: 0 4px 20px rgba(0,0,0,0.15);
+            box-shadow: 0 4px 30px rgba(0,0,0,0.25), inset 0 1px 0 rgba(255,255,255,0.05);
             position: sticky;
             top: 0;
             z-index: 1040;
+            border-bottom: 1px solid rgba(255,255,255,0.06);
+            animation: slideDown 0.5s var(--ease);
+        }
+
+        .dark-mode .top-navbar {
+            background: linear-gradient(135deg, rgba(8,13,26,0.98), rgba(14,21,37,0.96));
+            border-bottom-color: rgba(99,102,241,0.12);
         }
 
         .top-navbar .brand {
             display: flex;
             align-items: center;
-            gap: 10px;
+            gap: 12px;
             color: #fff;
-            font-weight: 700;
+            font-weight: 800;
             font-size: 18px;
+            letter-spacing: -0.3px;
         }
 
         .top-navbar .brand i {
-            font-size: 24px;
-            color: var(--primary-light);
+            font-size: 26px;
+            background: var(--grad-primary);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            background-clip: text;
+            filter: drop-shadow(0 2px 8px var(--primary-glow));
+            animation: iconBounce 5s ease-in-out infinite;
         }
 
         .top-navbar .nav-actions {
@@ -1220,267 +1769,594 @@ if ($loggedIn) {
         }
 
         .top-navbar .user-info {
-            color: rgba(255,255,255,0.8);
+            color: rgba(255,255,255,0.9);
             font-size: 13px;
             display: flex;
             align-items: center;
-            gap: 6px;
+            gap: 8px;
+            background: rgba(255,255,255,0.07);
+            padding: 6px 16px;
+            border-radius: 50px;
+            border: 1px solid rgba(255,255,255,0.1);
+            transition: all var(--t-fast) var(--ease);
         }
 
-        .top-navbar .user-info i { color: var(--primary-light); }
+        .top-navbar .user-info:hover {
+            background: rgba(255,255,255,0.12);
+            border-color: rgba(255,255,255,0.15);
+        }
 
-        /* ======================== الأزرار ======================== */
+        .top-navbar .user-info i {
+            color: var(--primary-light);
+            font-size: 16px;
+        }
+
+        /* ═══════════════ الأزرار ═══════════════ */
         .btn {
-            border-radius: 8px;
-            font-weight: 500;
+            border-radius: var(--radius-sm);
+            font-weight: 600;
             font-size: 13px;
-            padding: 6px 14px;
-            transition: var(--transition);
+            padding: 7px 16px;
+            transition: all var(--t-normal) var(--ease);
             border: none;
             display: inline-flex;
             align-items: center;
-            gap: 5px;
+            gap: 6px;
+            position: relative;
+            overflow: hidden;
+            cursor: pointer;
         }
 
-        .btn:hover { transform: translateY(-1px); box-shadow: var(--shadow); }
-        .btn:active { transform: translateY(0); }
+        .btn::after {
+            content: '';
+            position: absolute;
+            inset: 0;
+            background: rgba(255,255,255,0);
+            transition: background var(--t-fast) var(--ease);
+        }
+
+        .btn:hover::after { background: rgba(255,255,255,0.1); }
+        .btn:active::after { background: rgba(0,0,0,0.05); }
+
+        .btn:hover { transform: translateY(-2px); }
+        .btn:active { transform: translateY(0) scale(0.98); }
 
         .btn-gradient {
-            background: var(--gradient-primary);
+            background: var(--grad-primary);
             color: #fff;
-            border: none;
+            box-shadow: 0 4px 16px var(--primary-glow);
         }
-        .btn-gradient:hover { background: var(--primary-dark); color: #fff; box-shadow: 0 4px 15px rgba(26,115,232,0.4); }
+        .btn-gradient:hover {
+            color: #fff;
+            box-shadow: 0 8px 28px var(--primary-glow);
+        }
 
         .btn-success-custom {
-            background: var(--gradient-success);
+            background: var(--grad-success);
             color: #fff;
-            border: none;
+            box-shadow: 0 4px 16px var(--success-glow);
         }
-        .btn-success-custom:hover { background: var(--success-dark); color: #fff; }
+        .btn-success-custom:hover { color: #fff; box-shadow: 0 8px 28px var(--success-glow); }
 
         .btn-danger-custom {
-            background: var(--gradient-danger);
+            background: var(--grad-danger);
             color: #fff;
-            border: none;
+            box-shadow: 0 4px 16px var(--danger-glow);
         }
-        .btn-danger-custom:hover { background: var(--danger-dark); color: #fff; }
+        .btn-danger-custom:hover { color: #fff; box-shadow: 0 8px 28px var(--danger-glow); }
 
         .btn-warning-custom {
-            background: var(--gradient-warning);
+            background: var(--grad-warning);
             color: #fff;
-            border: none;
+            box-shadow: 0 4px 16px var(--warning-glow);
         }
-        .btn-warning-custom:hover { background: var(--warning-dark); color: #fff; }
+        .btn-warning-custom:hover { color: #fff; box-shadow: 0 8px 28px var(--warning-glow); }
 
-        .btn-outline-light { border: 1px solid rgba(255,255,255,0.3); color: #fff; }
-        .btn-outline-light:hover { background: rgba(255,255,255,0.1); color: #fff; }
+        .btn-outline-light {
+            border: 1px solid rgba(255,255,255,0.2);
+            color: #fff;
+        }
+        .btn-outline-light:hover {
+            background: rgba(255,255,255,0.1);
+            color: #fff;
+            border-color: rgba(255,255,255,0.3);
+        }
 
+        .btn-outline-primary { border: 1.5px solid var(--primary); color: var(--primary); background: transparent; }
+        .btn-outline-primary:hover { background: var(--primary); color: #fff; box-shadow: 0 4px 16px var(--primary-glow); }
+
+        .btn-outline-success { border: 1.5px solid var(--success); color: var(--success); background: transparent; }
+        .btn-outline-success:hover { background: var(--success); color: #fff; box-shadow: 0 4px 16px var(--success-glow); }
+
+        .btn-outline-danger { border: 1.5px solid var(--danger); color: var(--danger); background: transparent; }
+        .btn-outline-danger:hover { background: var(--danger); color: #fff; box-shadow: 0 4px 16px var(--danger-glow); }
+
+        .btn-outline-info { border: 1.5px solid var(--info); color: var(--info); background: transparent; }
+        .btn-outline-info:hover { background: var(--info); color: #fff; box-shadow: 0 4px 16px var(--info-glow); }
+
+        .btn-outline-secondary { border: 1.5px solid var(--border); color: var(--text-muted); background: transparent; }
+        .btn-outline-secondary:hover { background: var(--secondary); color: #fff; border-color: var(--secondary); }
+
+        /* دارك مود - أزرار outline واضحة */
+        .dark-mode .btn-outline-primary { color: #a5b4fc; border-color: rgba(165,180,252,0.45); }
+        .dark-mode .btn-outline-primary:hover { background: var(--primary); color: #fff; }
+        .dark-mode .btn-outline-success { color: #6ee7b7; border-color: rgba(110,231,183,0.45); }
+        .dark-mode .btn-outline-success:hover { background: var(--success); color: #fff; }
+        .dark-mode .btn-outline-danger { color: #fca5a5; border-color: rgba(252,165,165,0.45); }
+        .dark-mode .btn-outline-danger:hover { background: var(--danger); color: #fff; }
+        .dark-mode .btn-outline-info { color: #67e8f9; border-color: rgba(103,232,249,0.45); }
+        .dark-mode .btn-outline-info:hover { background: var(--info); color: #fff; }
+        .dark-mode .btn-outline-secondary { color: #cbd5e1; border-color: rgba(203,213,225,0.3); }
+        .dark-mode .btn-outline-secondary:hover { background: #475569; color: #fff; }
+
+        /* ═══════════════ زر الوضع الداكن ═══════════════ */
         #darkModeToggle {
             position: fixed;
-            bottom: 20px;
-            left: 20px;
+            bottom: 24px;
+            left: 24px;
             z-index: 1050;
-            background: var(--gradient-dark);
+            background: var(--grad-dark);
             color: #fff;
             border-radius: 50px;
-            padding: 10px 18px;
-            box-shadow: 0 4px 15px rgba(0,0,0,0.3);
+            padding: 12px 22px;
+            box-shadow: 0 8px 30px rgba(0,0,0,0.35);
             font-size: 13px;
-        }
-        .dark-mode #darkModeToggle {
-            background: var(--gradient-primary);
+            font-weight: 600;
+            transition: all var(--t-normal) var(--ease-bounce);
+            border: 1px solid rgba(255,255,255,0.08);
         }
 
-        /* ======================== البطاقات الإحصائية ======================== */
+        #darkModeToggle:hover {
+            transform: translateY(-4px) scale(1.05);
+            box-shadow: 0 14px 40px rgba(0,0,0,0.45);
+        }
+
+        .dark-mode #darkModeToggle {
+            background: var(--grad-primary);
+            box-shadow: 0 8px 30px var(--primary-glow);
+        }
+
+        .dark-mode #darkModeToggle:hover {
+            box-shadow: 0 14px 40px var(--primary-glow);
+        }
+
+        /* ═══════════════ البطاقات الإحصائية ═══════════════ */
         .stats-grid {
             display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
-            gap: 12px;
-            margin-bottom: 20px;
+            grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
+            gap: 16px;
+            margin-bottom: 28px;
         }
 
         .stat-card {
-            background: var(--card-bg);
-            border-radius: var(--border-radius);
-            padding: 16px;
+            background: var(--card);
+            border-radius: var(--radius);
+            padding: 22px 16px 18px;
             text-align: center;
             box-shadow: var(--shadow);
-            transition: var(--transition);
-            border: 1px solid var(--border-color);
+            transition: all var(--t-normal) var(--ease-bounce);
+            border: 1px solid var(--border);
             position: relative;
             overflow: hidden;
+            animation: cardAppear 0.6s var(--ease) backwards;
         }
+
+        .stat-card:nth-child(1) { animation-delay: 0.05s; }
+        .stat-card:nth-child(2) { animation-delay: 0.1s; }
+        .stat-card:nth-child(3) { animation-delay: 0.15s; }
+        .stat-card:nth-child(4) { animation-delay: 0.2s; }
+        .stat-card:nth-child(5) { animation-delay: 0.25s; }
+        .stat-card:nth-child(6) { animation-delay: 0.3s; }
+        .stat-card:nth-child(7) { animation-delay: 0.35s; }
+        .stat-card:nth-child(8) { animation-delay: 0.4s; }
+        .stat-card:nth-child(9) { animation-delay: 0.45s; }
 
         .stat-card::before {
             content: '';
             position: absolute;
-            top: 0;
-            right: 0;
-            left: 0;
+            top: 0; right: 0; left: 0;
             height: 4px;
+            border-radius: 4px 4px 0 0;
         }
 
-        .stat-card:nth-child(1)::before { background: var(--gradient-primary); }
-        .stat-card:nth-child(2)::before { background: var(--gradient-success); }
-        .stat-card:nth-child(3)::before { background: var(--gradient-danger); }
-        .stat-card:nth-child(4)::before { background: var(--gradient-warning); }
-        .stat-card:nth-child(5)::before { background: var(--info-color); }
-        .stat-card:nth-child(6)::before { background: var(--gradient-success); }
-        .stat-card:nth-child(7)::before { background: var(--gradient-danger); }
-        .stat-card:nth-child(8)::before { background: var(--gradient-success); }
-        .stat-card:nth-child(9)::before { background: var(--gradient-danger); }
+        .stat-card::after {
+            content: '';
+            position: absolute;
+            top: -20px;
+            right: -20px;
+            width: 90px;
+            height: 90px;
+            border-radius: 50%;
+            opacity: 0.06;
+            transition: all var(--t-normal) var(--ease);
+        }
+
+        .stat-card:nth-child(1)::before { background: var(--grad-primary); }
+        .stat-card:nth-child(2)::before { background: var(--grad-success); }
+        .stat-card:nth-child(3)::before { background: var(--grad-danger); }
+        .stat-card:nth-child(4)::before { background: var(--grad-warning); }
+        .stat-card:nth-child(5)::before { background: linear-gradient(135deg, #06b6d4, #22d3ee); }
+        .stat-card:nth-child(6)::before { background: linear-gradient(135deg, #8b5cf6, #a78bfa); }
+        .stat-card:nth-child(7)::before { background: linear-gradient(135deg, #ec4899, #f472b6); }
+        .stat-card:nth-child(8)::before { background: var(--grad-success); }
+        .stat-card:nth-child(9)::before { background: var(--grad-danger); }
+
+        .stat-card:nth-child(1)::after { background: #6366f1; }
+        .stat-card:nth-child(2)::after { background: #10b981; }
+        .stat-card:nth-child(3)::after { background: #ef4444; }
+        .stat-card:nth-child(4)::after { background: #f59e0b; }
+        .stat-card:nth-child(5)::after { background: #06b6d4; }
+        .stat-card:nth-child(6)::after { background: #8b5cf6; }
+        .stat-card:nth-child(7)::after { background: #ec4899; }
+        .stat-card:nth-child(8)::after { background: #10b981; }
+        .stat-card:nth-child(9)::after { background: #ef4444; }
 
         .stat-card:hover {
-            transform: translateY(-3px);
-            box-shadow: var(--shadow-hover);
+            transform: translateY(-7px) scale(1.03);
+            box-shadow: var(--shadow-lg);
+        }
+
+        .stat-card:hover::after {
+            opacity: 0.1;
+            transform: scale(1.6);
         }
 
         .stat-card .stat-icon {
-            font-size: 28px;
-            margin-bottom: 6px;
-            opacity: 0.7;
+            font-size: 34px;
+            margin-bottom: 8px;
+            transition: all var(--t-normal) var(--ease);
+        }
+
+        .stat-card:nth-child(1) .stat-icon { color: #6366f1; }
+        .stat-card:nth-child(2) .stat-icon { color: #10b981; }
+        .stat-card:nth-child(3) .stat-icon { color: #ef4444; }
+        .stat-card:nth-child(4) .stat-icon { color: #f59e0b; }
+        .stat-card:nth-child(5) .stat-icon { color: #06b6d4; }
+        .stat-card:nth-child(6) .stat-icon { color: #8b5cf6; }
+        .stat-card:nth-child(7) .stat-icon { color: #ec4899; }
+        .stat-card:nth-child(8) .stat-icon { color: #10b981; }
+        .stat-card:nth-child(9) .stat-icon { color: #ef4444; }
+
+        .stat-card:hover .stat-icon {
+            transform: scale(1.25) rotate(-5deg);
         }
 
         .stat-card .stat-value {
-            font-size: 22px;
-            font-weight: 700;
-            color: var(--text-color);
+            font-size: 26px;
+            font-weight: 800;
+            color: var(--text);
             line-height: 1.2;
+            letter-spacing: -0.5px;
         }
 
         .stat-card .stat-label {
             font-size: 12px;
             color: var(--text-muted);
-            font-weight: 500;
+            font-weight: 600;
+            margin-top: 4px;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
         }
 
-        /* ======================== البطاقات ======================== */
+        /* ═══════════════ الإحصائيات المتقدمة ═══════════════ */
+        .stats-lux-card {
+            border: 1px solid rgba(99,102,241,0.15);
+            background: linear-gradient(180deg, rgba(99,102,241,0.03), rgba(6,182,212,0.02));
+            border-radius: var(--radius);
+        }
+
+        .dark-mode .stats-lux-card {
+            border-color: rgba(99,102,241,0.25);
+            background: linear-gradient(180deg, rgba(99,102,241,0.08), rgba(6,182,212,0.04));
+        }
+
+        .lux-chart-wrap {
+            border: 1px solid rgba(0,0,0,0.06);
+            border-radius: var(--radius);
+            padding: 20px;
+            background: linear-gradient(135deg, rgba(255,255,255,0.95), rgba(248,250,255,0.95));
+            box-shadow: inset 0 1px 0 rgba(255,255,255,0.7), var(--shadow-xs);
+            transition: all var(--t-normal) var(--ease);
+        }
+
+        .dark-mode .lux-chart-wrap {
+            background: linear-gradient(135deg, rgba(19,28,46,0.85), rgba(14,21,37,0.9));
+            border-color: rgba(148,163,184,0.18);
+            box-shadow: inset 0 1px 0 rgba(255,255,255,0.03);
+        }
+
+        /* بطاقات الإحصائيات داخل صفحة الإحصائيات المتقدمة */
+        #adminStatsCards .col-md-3 .card,
+        #adminStatsCards .col-md-4 .card,
+        #adminStatsCards .col-6 .card,
+        #adminStatsCards > div {
+            transition: all var(--t-normal) var(--ease);
+        }
+
+        /* ═══════════════ البطاقات ═══════════════ */
         .card-custom {
-            background: var(--card-bg);
-            border-radius: var(--border-radius);
+            background: var(--card);
+            border-radius: var(--radius);
             box-shadow: var(--shadow);
-            border: 1px solid var(--border-color);
+            border: 1px solid var(--border);
             overflow: hidden;
-            transition: var(--transition);
-            margin-bottom: 20px;
+            transition: all var(--t-normal) var(--ease);
+            margin-bottom: 24px;
+            animation: cardAppear 0.5s var(--ease) backwards;
         }
 
-        .card-custom:hover { box-shadow: var(--shadow-hover); }
+        .card-custom:hover {
+            box-shadow: var(--shadow-md);
+        }
 
         .card-custom .card-header {
-            padding: 14px 20px;
-            font-weight: 600;
+            padding: 16px 24px;
+            font-weight: 700;
             font-size: 15px;
-            border-bottom: 1px solid var(--border-color);
+            border-bottom: 1px solid var(--border);
+            background: linear-gradient(135deg, rgba(99,102,241,0.04), transparent);
+            color: var(--text);
         }
 
-        .card-custom .card-body { padding: 20px; }
+        .dark-mode .card-custom .card-header {
+            background: linear-gradient(135deg, rgba(99,102,241,0.08), transparent);
+            color: #f8fafc;
+        }
 
-        /* ======================== الجداول ======================== */
+        .card-custom .card-body {
+            padding: 24px;
+            color: var(--text);
+        }
+
+        /* ═══════════════ التبويبات ═══════════════ */
+        .nav-tabs {
+            border-bottom: 2px solid var(--border);
+            gap: 4px;
+            padding: 0 4px;
+            flex-wrap: wrap;
+        }
+
+        .nav-tabs .nav-link {
+            border: none;
+            border-radius: 14px 14px 0 0;
+            padding: 10px 22px;
+            font-weight: 600;
+            font-size: 13px;
+            color: var(--text-muted);
+            transition: all var(--t-normal) var(--ease);
+            position: relative;
+            background: transparent;
+        }
+
+        .nav-tabs .nav-link:hover {
+            color: var(--primary);
+            background: rgba(99,102,241,0.06);
+        }
+
+        .nav-tabs .nav-link.active {
+            color: #fff !important;
+            background: var(--grad-primary) !important;
+            box-shadow: 0 4px 18px var(--primary-glow);
+            border: none;
+        }
+
+        .dark-mode .nav-tabs {
+            border-bottom-color: rgba(148,163,184,0.15);
+        }
+
+        .dark-mode .nav-tabs .nav-link {
+            color: #a1b0c8;
+        }
+
+        .dark-mode .nav-tabs .nav-link:hover {
+            color: var(--primary-light);
+            background: rgba(99,102,241,0.1);
+        }
+
+        .tab-content { animation: fadeIn 0.4s var(--ease); }
+        .tab-pane { animation: fadeInUp 0.4s var(--ease); }
+
+        /* ═══════════════ الجداول ═══════════════ */
         .table {
             font-size: 13px;
             margin-bottom: 0;
+            color: var(--text);
         }
 
         .table thead th {
-            background: var(--secondary-color);
-            color: #fff;
-            font-weight: 600;
+            background: linear-gradient(135deg, #1e293b, #334155);
+            color: #f1f5f9;
+            font-weight: 700;
             font-size: 12px;
-            padding: 10px 8px;
+            padding: 13px 10px;
             white-space: nowrap;
             border: none;
             position: sticky;
             top: 0;
             z-index: 10;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+
+        .dark-mode .table thead th {
+            background: linear-gradient(135deg, #0e1525, #1e293b);
+            color: #e2e8f0;
         }
 
         .table tbody td {
-            padding: 8px;
+            padding: 10px 8px;
             vertical-align: middle;
-            border-color: var(--border-color);
-            color: var(--text-color);
+            border-color: var(--border);
+            color: var(--text);
+        }
+
+        .dark-mode .table tbody td {
+            color: #e2e8f0;
+            border-color: rgba(148,163,184,0.12);
+        }
+
+        .table-hover tbody tr {
+            transition: all var(--t-fast) var(--ease);
         }
 
         .table-hover tbody tr:hover {
-            background-color: rgba(26, 115, 232, 0.06);
-        }
-
-        .table-striped tbody tr:nth-of-type(odd) {
-            background-color: rgba(0,0,0,0.02);
-        }
-
-        .dark-mode .table-striped tbody tr:nth-of-type(odd) {
-            background-color: rgba(255,255,255,0.03);
+            background-color: rgba(99,102,241,0.06) !important;
         }
 
         .dark-mode .table-hover tbody tr:hover {
-            background-color: rgba(26, 115, 232, 0.1);
+            background-color: rgba(99,102,241,0.12) !important;
         }
 
-        /* ======================== النماذج ======================== */
+        .table-striped tbody tr:nth-of-type(odd) {
+            background-color: rgba(99,102,241,0.02);
+        }
+
+        .dark-mode .table-striped tbody tr:nth-of-type(odd) {
+            background-color: rgba(255,255,255,0.025);
+        }
+
+        .table-responsive {
+            border-radius: var(--radius-sm);
+            overflow: auto;
+            border: 1px solid var(--border);
+        }
+
+        .no-results td {
+            color: var(--text-muted);
+            font-style: italic;
+            padding: 30px !important;
+        }
+
+        /* ═══════════════ النماذج ═══════════════ */
         .form-control, .form-select {
-            border-radius: 8px;
-            border: 1.5px solid var(--border-color);
-            padding: 8px 12px;
+            border-radius: var(--radius-sm);
+            border: 1.5px solid var(--border);
+            padding: 9px 14px;
             font-size: 13px;
-            transition: var(--transition);
-            background: var(--card-bg);
-            color: var(--text-color);
+            font-weight: 500;
+            transition: all var(--t-normal) var(--ease);
+            background: var(--card);
+            color: var(--text);
         }
 
         .form-control:focus, .form-select:focus {
-            border-color: var(--primary-color);
-            box-shadow: 0 0 0 3px rgba(26,115,232,0.15);
+            border-color: var(--primary);
+            box-shadow: 0 0 0 4px var(--primary-glow);
+            outline: none;
+        }
+
+        .dark-mode .form-control, .dark-mode .form-select {
+            background: rgba(19,28,46,0.8);
+            border-color: rgba(148,163,184,0.25);
+            color: #f1f5f9;
+        }
+
+        .dark-mode .form-control:focus, .dark-mode .form-select:focus {
+            border-color: var(--primary-light);
+            box-shadow: 0 0 0 4px rgba(99,102,241,0.25);
+        }
+
+        .dark-mode .form-control::placeholder,
+        .dark-mode .form-select::placeholder {
+            color: #94a3b8 !important;
+            opacity: 1;
         }
 
         label {
-            font-weight: 500;
+            font-weight: 600;
             font-size: 13px;
-            margin-bottom: 4px;
-            color: var(--text-color);
+            margin-bottom: 6px;
+            color: var(--text);
+        }
+
+        .dark-mode label,
+        .dark-mode .form-label {
+            color: #e2e8f0 !important;
         }
 
         .hidden-field { display: none !important; }
+        .form-check-label { font-size: 13px; color: var(--text); }
+        .dark-mode .form-check-label { color: #e2e8f0; }
 
-        /* ======================== المودال ======================== */
+        .input-group .btn { border-radius: 0 var(--radius-sm) var(--radius-sm) 0; }
+        .input-group .form-control { border-radius: var(--radius-sm) 0 0 var(--radius-sm); }
+
+        .input-group-text {
+            background: var(--bg-alt);
+            border-color: var(--border);
+            color: var(--text-muted);
+        }
+
+        .dark-mode .input-group-text {
+            background: rgba(19,28,46,0.6);
+            border-color: rgba(148,163,184,0.25);
+            color: #a1b0c8;
+        }
+
+        .form-text { font-size: 11px; color: var(--text-muted); }
+
+        /* ═══════════════ المودالات (تفتح من فوق) ═══════════════ */
         .modal-content {
-            border-radius: 16px;
-            border: none;
-            box-shadow: 0 20px 60px rgba(0,0,0,0.2);
-            background: var(--card-bg);
-            color: var(--text-color);
+            border-radius: 22px;
+            border: 1px solid var(--border);
+            box-shadow: var(--shadow-xl);
+            background: var(--card);
+            color: var(--text);
+            animation: slideDown 0.4s var(--ease-bounce);
+        }
+
+        .dark-mode .modal-content {
+            background: #131c2e;
+            border-color: rgba(99,102,241,0.15);
+            box-shadow: 0 30px 80px rgba(0,0,0,0.6), 0 0 0 1px rgba(99,102,241,0.08);
+            color: #f1f5f9;
         }
 
         .modal-header {
-            border-bottom: 1px solid var(--border-color);
-            padding: 16px 20px;
+            border-bottom: 1px solid var(--border);
+            padding: 18px 24px;
+            background: linear-gradient(135deg, rgba(99,102,241,0.04), transparent);
+        }
+
+        .dark-mode .modal-header {
+            border-bottom-color: rgba(148,163,184,0.15);
+            background: linear-gradient(135deg, rgba(99,102,241,0.1), transparent);
         }
 
         .modal-title {
-            font-weight: 700;
-            font-size: 16px;
+            font-weight: 800;
+            font-size: 17px;
+            color: var(--text);
         }
 
-        .modal-body { padding: 20px; }
-        .modal-footer { border-top: 1px solid var(--border-color); padding: 12px 20px; }
+        .dark-mode .modal-title { color: #f8fafc; }
 
-        .modal.modal-stack-active {
-            z-index: var(--stack-z, 1060);
+        .modal-body {
+            padding: 24px;
+            color: var(--text);
         }
 
-        .modal-backdrop.modal-stack-active {
-            z-index: var(--stack-backdrop-z, 1055);
+        .dark-mode .modal-body { color: #e2e8f0; }
+
+        .modal-footer {
+            border-top: 1px solid var(--border);
+            padding: 14px 24px;
         }
 
-        .notif-patient-name {
-            font-size: 12px;
-            color: var(--primary-color);
-            font-weight: 600;
+        .dark-mode .modal-footer { border-top-color: rgba(148,163,184,0.15); }
+
+        .modal.modal-stack-active { z-index: var(--stack-z, 1060); }
+        .modal-backdrop.modal-stack-active { z-index: var(--stack-backdrop-z, 1055); }
+
+        .dark-mode .btn-close {
+            filter: invert(1) grayscale(100%) brightness(200%);
         }
 
-        /* ======================== التنبيهات ======================== */
+        .modal-backdrop {
+            backdrop-filter: blur(6px);
+        }
+
+        /* ═══════════════ التنبيهات ═══════════════ */
         #alert-container {
             position: fixed;
             top: 80px;
@@ -1492,39 +2368,36 @@ if ($loggedIn) {
         }
 
         .custom-alert {
-            padding: 12px 20px;
-            border-radius: 10px;
-            margin-bottom: 8px;
-            font-weight: 500;
+            padding: 14px 22px;
+            border-radius: 14px;
+            margin-bottom: 10px;
+            font-weight: 600;
             font-size: 14px;
             display: flex;
             align-items: center;
-            gap: 10px;
-            animation: slideDown 0.3s ease;
-            box-shadow: 0 4px 15px rgba(0,0,0,0.15);
+            gap: 12px;
+            animation: slideDown 0.4s var(--ease-bounce);
+            box-shadow: var(--shadow-md);
+            backdrop-filter: blur(12px);
+            border: 1px solid transparent;
         }
 
-        .custom-alert.alert-success { background: #d4edda; color: #155724; border-right: 4px solid var(--success-color); }
-        .custom-alert.alert-danger { background: #f8d7da; color: #721c24; border-right: 4px solid var(--danger-color); }
-        .custom-alert.alert-warning { background: #fff3cd; color: #856404; border-right: 4px solid var(--warning-color); }
-        .custom-alert.alert-info { background: #d1ecf1; color: #0c5460; border-right: 4px solid var(--info-color); }
+        .custom-alert.alert-success { background: rgba(16,185,129,0.12); color: #065f46; border-right: 4px solid var(--success); border-color: rgba(16,185,129,0.2); }
+        .custom-alert.alert-danger { background: rgba(239,68,68,0.12); color: #991b1b; border-right: 4px solid var(--danger); border-color: rgba(239,68,68,0.2); }
+        .custom-alert.alert-warning { background: rgba(245,158,11,0.12); color: #92400e; border-right: 4px solid var(--warning); border-color: rgba(245,158,11,0.2); }
+        .custom-alert.alert-info { background: rgba(6,182,212,0.12); color: #155e75; border-right: 4px solid var(--info); border-color: rgba(6,182,212,0.2); }
 
-        .dark-mode .custom-alert.alert-success { background: rgba(0,200,83,0.15); color: #69f0ae; }
-        .dark-mode .custom-alert.alert-danger { background: rgba(255,23,68,0.15); color: #ff616f; }
-        .dark-mode .custom-alert.alert-warning { background: rgba(255,145,0,0.15); color: #ffc246; }
-        .dark-mode .custom-alert.alert-info { background: rgba(0,176,255,0.15); color: #40c4ff; }
+        .dark-mode .custom-alert.alert-success { background: rgba(16,185,129,0.18); color: #6ee7b7; border-color: rgba(16,185,129,0.3); }
+        .dark-mode .custom-alert.alert-danger { background: rgba(239,68,68,0.18); color: #fca5a5; border-color: rgba(239,68,68,0.3); }
+        .dark-mode .custom-alert.alert-warning { background: rgba(245,158,11,0.18); color: #fcd34d; border-color: rgba(245,158,11,0.3); }
+        .dark-mode .custom-alert.alert-info { background: rgba(6,182,212,0.18); color: #67e8f9; border-color: rgba(6,182,212,0.3); }
 
-        @keyframes slideDown {
-            from { opacity: 0; transform: translateY(-20px); }
-            to { opacity: 1; transform: translateY(0); }
-        }
-
-        /* ======================== التحميل ======================== */
+        /* ═══════════════ التحميل ═══════════════ */
         .loading-overlay {
             position: fixed;
             top: 0; left: 0; right: 0; bottom: 0;
-            background: rgba(0,0,0,0.5);
-            backdrop-filter: blur(4px);
+            background: rgba(0,0,0,0.55);
+            backdrop-filter: blur(8px);
             display: none;
             align-items: center;
             justify-content: center;
@@ -1536,155 +2409,366 @@ if ($loggedIn) {
         .spinner-custom {
             width: 50px;
             height: 50px;
-            border: 4px solid rgba(255,255,255,0.3);
+            border: 4px solid rgba(255,255,255,0.2);
             border-top: 4px solid #fff;
             border-radius: 50%;
             animation: spin 0.8s linear infinite;
+            box-shadow: 0 0 30px rgba(99,102,241,0.4);
         }
 
-        @keyframes spin { to { transform: rotate(360deg); } }
-
-        /* ======================== الشارات ======================== */
+        /* ═══════════════ الشارات ═══════════════ */
         .badge {
             font-size: 11px;
-            padding: 4px 8px;
-            border-radius: 6px;
+            padding: 5px 10px;
+            border-radius: 8px;
             font-weight: 600;
+            letter-spacing: 0.3px;
         }
 
-        /* ======================== أزرار الإجراءات ======================== */
+        .badge.bg-success { background: var(--grad-success) !important; box-shadow: 0 2px 8px var(--success-glow); }
+        .badge.bg-danger { background: var(--grad-danger) !important; box-shadow: 0 2px 8px var(--danger-glow); }
+        .badge.bg-warning { background: var(--grad-warning) !important; color: #fff !important; }
+        .badge.bg-info { background: linear-gradient(135deg, #06b6d4, #22d3ee) !important; box-shadow: 0 2px 8px var(--info-glow); }
+        .badge.bg-primary { background: var(--grad-primary) !important; box-shadow: 0 2px 8px var(--primary-glow); }
+        .badge.bg-secondary { background: linear-gradient(135deg, #64748b, #94a3b8) !important; }
+
+        /* ═══════════════ أزرار الإجراءات ═══════════════ */
         .action-btn {
             font-size: 11px;
-            padding: 4px 8px;
-            border-radius: 6px;
+            padding: 5px 10px;
+            border-radius: 8px;
             margin: 1px;
             white-space: nowrap;
+            transition: all var(--t-fast) var(--ease);
         }
 
-        /* ======================== شريط الأدوات ======================== */
+        .action-btn:hover {
+            transform: translateY(-2px) scale(1.08);
+        }
+
+        /* ═══════════════ شريط الأدوات ═══════════════ */
         .toolbar {
             display: flex;
-            gap: 8px;
+            gap: 10px;
             flex-wrap: wrap;
             align-items: center;
-            margin-bottom: 16px;
+            margin-bottom: 18px;
         }
 
-        /* ======================== قسم الإضافة ======================== */
+        /* ═══════════════ قسم الإضافة ═══════════════ */
         .add-section {
-            background: var(--card-bg);
-            border-radius: var(--border-radius);
-            padding: 20px;
+            background: var(--card);
+            border-radius: var(--radius);
+            padding: 24px;
             box-shadow: var(--shadow);
-            border: 1px solid var(--border-color);
-            margin-bottom: 20px;
+            border: 1px solid var(--border);
+            margin-bottom: 24px;
+            animation: cardAppear 0.5s var(--ease);
         }
 
         .add-section h5 {
-            font-weight: 700;
-            color: var(--primary-color);
-            margin-bottom: 16px;
+            font-weight: 800;
+            color: var(--primary);
+            margin-bottom: 20px;
             display: flex;
             align-items: center;
-            gap: 8px;
+            gap: 10px;
+            font-size: 16px;
         }
 
-        .add-section h5 i { font-size: 20px; }
+        .dark-mode .add-section h5 { color: var(--primary-light); }
+        .add-section h5 i { font-size: 22px; }
 
-        /* ======================== الاستجابة ======================== */
-        @media (max-width: 768px) {
-            .stats-grid { grid-template-columns: repeat(2, 1fr); }
-            .top-navbar { padding: 10px 16px; }
-            .top-navbar .brand { font-size: 15px; }
-            .toolbar { justify-content: center; }
-            .table { font-size: 11px; }
-            .action-btn { font-size: 10px; padding: 3px 6px; }
-            #darkModeToggle { bottom: 10px; left: 10px; padding: 8px 14px; font-size: 12px; }
-        }
-
-        @media (max-width: 480px) {
-            .stats-grid { grid-template-columns: repeat(2, 1fr); gap: 8px; }
-            .stat-card { padding: 12px 8px; }
-            .stat-card .stat-value { font-size: 18px; }
-        }
-
-        /* ======================== تمرير سلس ======================== */
-        ::-webkit-scrollbar { width: 8px; height: 8px; }
-        ::-webkit-scrollbar-track { background: var(--bg-color); }
-        ::-webkit-scrollbar-thumb { background: var(--text-muted); border-radius: 4px; }
-        ::-webkit-scrollbar-thumb:hover { background: var(--primary-color); }
-
-        /* ======================== رسوم متحركة ======================== */
-        .fade-in { animation: fadeIn 0.4s ease; }
-        @keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
-
-        .no-results td { color: var(--text-muted); font-style: italic; }
-
-        /* ======================== قسم إدارة المستخدمين ======================== */
+        /* ═══════════════ إدارة المستخدمين ═══════════════ */
         .users-section .user-card {
-            background: var(--card-bg);
-            border: 1px solid var(--border-color);
-            border-radius: 10px;
-            padding: 12px;
-            margin-bottom: 8px;
+            background: var(--card);
+            border: 1px solid var(--border);
+            border-radius: 14px;
+            padding: 14px 16px;
+            margin-bottom: 10px;
             display: flex;
             align-items: center;
             justify-content: space-between;
-            transition: var(--transition);
+            transition: all var(--t-normal) var(--ease);
         }
 
         .users-section .user-card:hover {
-            box-shadow: var(--shadow);
+            box-shadow: var(--shadow-md);
+            transform: translateY(-2px);
+            border-color: var(--primary);
         }
 
         .users-section .user-avatar {
-            width: 40px;
-            height: 40px;
-            border-radius: 50%;
-            background: var(--gradient-primary);
+            width: 44px;
+            height: 44px;
+            border-radius: 14px;
+            background: var(--grad-primary);
             color: #fff;
             display: flex;
             align-items: center;
             justify-content: center;
-            font-weight: 700;
+            font-weight: 800;
             font-size: 16px;
+            box-shadow: 0 4px 14px var(--primary-glow);
         }
 
-        /* ======================== تحسينات إضافية ======================== */
+        /* ═══════════════ إشعارات ═══════════════ */
+        .notif-patient-name {
+            font-size: 12px;
+            color: var(--primary);
+            font-weight: 700;
+        }
+
+        .dark-mode .notif-patient-name { color: #a5b4fc; }
+
+        .pulse-badge { animation: pulse 2s infinite; }
+
+        /* ═══════════════ تحسينات إضافية ═══════════════ */
         .section-title {
             font-weight: 700;
             font-size: 16px;
-            color: var(--text-color);
-            margin-bottom: 12px;
+            color: var(--text);
+            margin-bottom: 14px;
             display: flex;
             align-items: center;
             gap: 8px;
         }
 
-        .section-title i { color: var(--primary-color); }
+        .section-title i { color: var(--primary); }
+        .dark-mode .section-title { color: #f1f5f9; }
+        .dark-mode .section-title i { color: var(--primary-light); }
 
-        .form-text { font-size: 11px; color: var(--text-muted); }
-
-        .input-group .btn { border-radius: 0 8px 8px 0; }
-        .input-group .form-control { border-radius: 8px 0 0 8px; }
-
-        .form-check-label { font-size: 13px; }
-
-        /* تحسين عرض الجداول في الشاشات الصغيرة */
-        .table-responsive {
-            border-radius: 8px;
-            overflow: auto;
+        /* ═══════════════ list-group ═══════════════ */
+        .list-group-item {
+            border-color: var(--border);
+            background: var(--card);
+            color: var(--text);
+            transition: all var(--t-fast) var(--ease);
+            padding: 10px 16px;
         }
 
-        /* تأثير النبض للإشعارات */
-        .pulse-badge {
-            animation: pulse 2s infinite;
+        .list-group-item:hover { background: var(--card-hover); }
+
+        .dark-mode .list-group-item {
+            background: rgba(19,28,46,0.6);
+            border-color: rgba(148,163,184,0.15);
+            color: #e2e8f0;
         }
 
-        @keyframes pulse {
-            0% { box-shadow: 0 0 0 0 rgba(255,23,68,0.4); }
-            70% { box-shadow: 0 0 0 10px rgba(255,23,68,0); }
-            100% { box-shadow: 0 0 0 0 rgba(255,23,68,0); }
+        .dark-mode .list-group-item:hover {
+            background: rgba(19,28,46,0.8);
+        }
+
+        /* ═══════════════ تمرير مخصص ═══════════════ */
+        ::-webkit-scrollbar { width: 8px; height: 8px; }
+        ::-webkit-scrollbar-track { background: var(--bg); border-radius: 4px; }
+        ::-webkit-scrollbar-thumb { background: #94a3b8; border-radius: 4px; }
+        ::-webkit-scrollbar-thumb:hover { background: var(--primary); }
+
+        .dark-mode ::-webkit-scrollbar-track { background: #080d1a; }
+        .dark-mode ::-webkit-scrollbar-thumb { background: #475569; }
+        .dark-mode ::-webkit-scrollbar-thumb:hover { background: var(--primary-light); }
+
+        /* ═══════════════ Selection & Placeholder ═══════════════ */
+        ::selection { background: rgba(99,102,241,0.2); color: var(--text); }
+        .dark-mode ::selection { background: rgba(99,102,241,0.35); color: #fff; }
+
+        ::placeholder { color: var(--text-muted) !important; opacity: 0.7; }
+
+        /* ═══════════════ الروابط ═══════════════ */
+        a { color: var(--primary); transition: all var(--t-fast) var(--ease); }
+        a:hover { color: var(--primary-dark); }
+        .dark-mode a { color: #a5b4fc; }
+        .dark-mode a:hover { color: #c7d2fe; }
+
+        /* ═══════════════ الحاوية ═══════════════ */
+        .container-fluid.p-3 {
+            padding: 24px 28px !important;
+            animation: fadeIn 0.5s var(--ease);
+        }
+
+        /* ═══════════════════════════════════════════════════════════
+           ███  إصلاح شامل للدارك مود - كل النصوص واضحة 100%  ███
+           ═══════════════════════════════════════════════════════════ */
+
+        /* النصوص الأساسية */
+        .dark-mode,
+        .dark-mode body {
+            color: #f1f5f9;
+        }
+
+        .dark-mode p,
+        .dark-mode span:not(.badge):not(.pulse-badge),
+        .dark-mode div:not(.stat-icon):not(.login-icon),
+        .dark-mode li,
+        .dark-mode td,
+        .dark-mode th {
+            color: inherit;
+        }
+
+        /* العناوين */
+        .dark-mode h1, .dark-mode h2, .dark-mode h3,
+        .dark-mode h4, .dark-mode h5, .dark-mode h6 {
+            color: #f8fafc !important;
+        }
+
+        /* النصوص القوية */
+        .dark-mode strong, .dark-mode b {
+            color: #f8fafc;
+        }
+
+        /* النصوص الصغيرة */
+        .dark-mode small, .dark-mode .small {
+            color: #a1b0c8;
+        }
+
+        /* text-muted */
+        .dark-mode .text-muted {
+            color: #a1b0c8 !important;
+        }
+
+        /* ألوان Bootstrap النصية */
+        .dark-mode .text-primary { color: #a5b4fc !important; }
+        .dark-mode .text-success { color: #6ee7b7 !important; }
+        .dark-mode .text-danger { color: #fca5a5 !important; }
+        .dark-mode .text-warning { color: #fcd34d !important; }
+        .dark-mode .text-info { color: #67e8f9 !important; }
+        .dark-mode .text-dark { color: #e2e8f0 !important; }
+        .dark-mode .text-body { color: #f1f5f9 !important; }
+        .dark-mode .text-black { color: #e2e8f0 !important; }
+        .dark-mode .text-secondary { color: #cbd5e1 !important; }
+
+        /* الخلفيات */
+        .dark-mode .bg-light { background: rgba(19,28,46,0.6) !important; }
+        .dark-mode .bg-white { background: #131c2e !important; }
+        .dark-mode .bg-body { background: #080d1a !important; }
+
+        /* الحدود */
+        .dark-mode .border { border-color: rgba(148,163,184,0.18) !important; }
+        .dark-mode .border-bottom { border-color: rgba(148,163,184,0.15) !important; }
+        .dark-mode .border-top { border-color: rgba(148,163,184,0.15) !important; }
+
+        /* alert داخل المودالات */
+        .dark-mode .alert {
+            color: #e2e8f0;
+            border-color: rgba(148,163,184,0.2);
+        }
+
+        .dark-mode .alert-info {
+            background: rgba(6,182,212,0.15);
+            color: #67e8f9;
+            border-color: rgba(6,182,212,0.25);
+        }
+
+        .dark-mode .alert-warning {
+            background: rgba(245,158,11,0.15);
+            color: #fcd34d;
+            border-color: rgba(245,158,11,0.25);
+        }
+
+        .dark-mode .alert-success {
+            background: rgba(16,185,129,0.15);
+            color: #6ee7b7;
+            border-color: rgba(16,185,129,0.25);
+        }
+
+        .dark-mode .alert-danger {
+            background: rgba(239,68,68,0.15);
+            color: #fca5a5;
+            border-color: rgba(239,68,68,0.25);
+        }
+
+        /* readonly inputs */
+        .dark-mode .form-control[readonly],
+        .dark-mode input[readonly] {
+            background: rgba(19,28,46,0.5) !important;
+            color: #a1b0c8 !important;
+            border-color: rgba(148,163,184,0.15);
+        }
+
+        /* select options */
+        .dark-mode option {
+            background: #131c2e;
+            color: #f1f5f9;
+        }
+
+        /* card داخل card */
+        .dark-mode .card {
+            background: #131c2e;
+            border-color: rgba(148,163,184,0.15);
+            color: #f1f5f9;
+        }
+
+        .dark-mode .card-body {
+            color: #e2e8f0;
+        }
+
+        .dark-mode .card-header {
+            color: #f8fafc;
+            border-color: rgba(148,163,184,0.15);
+        }
+
+        /* table inside dark mode */
+        .dark-mode .table {
+            color: #e2e8f0;
+        }
+
+        .dark-mode .table > :not(caption) > * > * {
+            color: #e2e8f0;
+            border-bottom-color: rgba(148,163,184,0.1);
+        }
+
+        /* btn-group in dark mode */
+        .dark-mode .btn-group .btn {
+            border-color: rgba(148,163,184,0.2);
+        }
+
+        /* stat-card in dark mode */
+        .dark-mode .stat-card {
+            background: #131c2e;
+            border-color: rgba(148,163,184,0.12);
+        }
+
+        .dark-mode .stat-card .stat-value { color: #f8fafc; }
+        .dark-mode .stat-card .stat-label { color: #a1b0c8; }
+
+        /* add-section in dark mode */
+        .dark-mode .add-section {
+            background: #131c2e;
+            border-color: rgba(148,163,184,0.15);
+        }
+
+        /* ═══════════════ الاستجابة ═══════════════ */
+        @media (max-width: 768px) {
+            .stats-grid { grid-template-columns: repeat(2, 1fr); gap: 10px; }
+            .top-navbar { padding: 10px 16px; }
+            .top-navbar .brand { font-size: 15px; }
+            .top-navbar .brand i { font-size: 20px; }
+            .toolbar { justify-content: center; }
+            .table { font-size: 11px; }
+            .action-btn { font-size: 10px; padding: 3px 7px; }
+            #darkModeToggle { bottom: 14px; left: 14px; padding: 10px 16px; font-size: 12px; }
+            .container-fluid.p-3 { padding: 14px !important; }
+            .card-custom .card-body { padding: 16px; }
+            .modal-content { border-radius: 18px; margin: 8px; }
+            .nav-tabs .nav-link { padding: 8px 14px; font-size: 12px; }
+        }
+
+        @media (max-width: 480px) {
+            .stats-grid { grid-template-columns: repeat(2, 1fr); gap: 8px; }
+            .stat-card { padding: 14px 10px; }
+            .stat-card .stat-value { font-size: 20px; }
+            .stat-card .stat-icon { font-size: 26px; }
+            .login-card { padding: 32px 24px; }
+        }
+
+        /* ═══════════════ الطباعة ═══════════════ */
+        @media print {
+            .top-navbar, #darkModeToggle, .toolbar, .nav-tabs,
+            .action-btn, .btn, .loading-overlay { display: none !important; }
+            body { background: #fff !important; color: #000 !important; }
+            body::before { display: none !important; }
+            .card-custom { box-shadow: none !important; border: 1px solid #ddd !important; }
         }
     </style>
 </head>
@@ -1705,7 +2789,7 @@ if ($loggedIn) {
         <div class="login-icon"><i class="bi bi-shield-lock-fill"></i></div>
         <h2>لوحة التحكم</h2>
         <p class="subtitle">الإجازات المرضية - تسجيل الدخول</p>
-        <form id="loginForm">
+        <form id="loginForm" method="post" action="" autocomplete="off">
             <div class="mb-3">
                 <label for="loginUsername" class="form-label"><i class="bi bi-person"></i> اسم المستخدم</label>
                 <input type="text" class="form-control" id="loginUsername" name="username" required autocomplete="username">
@@ -1755,6 +2839,10 @@ if ($loggedIn) {
         <button class="btn btn-outline-light btn-sm" id="refreshAll" title="تحديث البيانات">
             <i class="bi bi-arrow-clockwise"></i>
         </button>
+        <?php if ($_SESSION['admin_role'] === 'admin'): ?>
+        <button class="btn btn-success btn-sm" id="markAllPaidBtn" title="جعل كل الإجازات مدفوعة"><i class="bi bi-check2-all"></i></button>
+        <button class="btn btn-warning btn-sm" id="resetAllPaymentsBtn" title="تصفير المدفوعات والمستحقات"><i class="bi bi-eraser"></i></button>
+        <?php endif; ?>
         <button class="btn btn-danger-custom btn-sm" id="logoutBtn" title="تسجيل الخروج">
             <i class="bi bi-box-arrow-right"></i> خروج
         </button>
@@ -1794,6 +2882,7 @@ if ($loggedIn) {
             <div class="stat-value" id="stat-doctors"><?php echo $stats['doctors']; ?></div>
             <div class="stat-label">الأطباء</div>
         </div>
+        <?php if ($_SESSION['admin_role'] === 'admin'): ?>
         <div class="stat-card">
             <div class="stat-icon"><i class="bi bi-cash-stack"></i></div>
             <div class="stat-value" id="stat-paid-amount"><?php echo number_format($stats['paid_amount'], 2); ?></div>
@@ -1804,6 +2893,7 @@ if ($loggedIn) {
             <div class="stat-value" id="stat-unpaid-amount"><?php echo number_format($stats['unpaid_amount'], 2); ?></div>
             <div class="stat-label">المبالغ المستحقة</div>
         </div>
+        <?php endif; ?>
     </div>
 
     <!-- ======================== التبويبات ======================== -->
@@ -1834,13 +2924,18 @@ if ($loggedIn) {
             </button>
         </li>
         <li class="nav-item" role="presentation">
+            <button class="nav-link" id="tab-chat" data-bs-toggle="tab" data-bs-target="#pane-chat" type="button" role="tab">
+                <i class="bi bi-chat-dots"></i> المراسلات <span class="badge bg-danger ms-1" id="chatUnreadBadge" style="display:none;">0</span>
+            </button>
+        </li>
+        <li class="nav-item" role="presentation">
             <button class="nav-link" id="tab-queries" data-bs-toggle="tab" data-bs-target="#pane-queries" type="button" role="tab">
                 <i class="bi bi-search"></i> سجل الاستعلامات
             </button>
         </li>
         <li class="nav-item" role="presentation">
-            <button class="nav-link" id="tab-payments" data-bs-toggle="tab" data-bs-target="#pane-payments" type="button" role="tab">
-                <i class="bi bi-wallet2"></i> المدفوعات
+            <button class="nav-link" id="tab-admin-stats" data-bs-toggle="tab" data-bs-target="#pane-admin-stats" type="button" role="tab">
+                <i class="bi bi-bar-chart-line"></i> الإحصائيات
             </button>
         </li>
     </ul>
@@ -1892,6 +2987,7 @@ if ($loggedIn) {
                                     <th>رمز الخدمة</th>
                                     <th>المريض</th>
                                     <th>الهوية</th>
+                                    <th>مجلد المريض</th>
                                     <th>الطبيب</th>
                                     <th>الإصدار</th>
                                     <th>من</th>
@@ -1948,6 +3044,7 @@ if ($loggedIn) {
                                 <div class="col-12"><label class="form-label">اسم المريض</label><input type="text" class="form-control" name="patient_manual_name" id="patient_manual_name"></div>
                                 <div class="col-6"><label class="form-label">رقم الهوية</label><input type="text" class="form-control" name="patient_manual_id" id="patient_manual_id"></div>
                                 <div class="col-6"><label class="form-label">الهاتف</label><input type="text" class="form-control" name="patient_manual_phone" id="patient_manual_phone"></div>
+                                <div class="col-12"><label class="form-label">رابط مجلد المريض</label><input type="url" class="form-control" name="patient_manual_folder_link" id="patient_manual_folder_link" placeholder="https://..."></div>
                             </div>
                         </div>
 
@@ -1958,7 +3055,7 @@ if ($loggedIn) {
                             <select class="form-select" name="doctor_select" id="doctor_select">
                                 <option value="">-- اختر طبيباً --</option>
                                 <?php foreach ($doctors as $d): ?>
-                                <option value="<?php echo $d['id']; ?>"><?php echo htmlspecialchars($d['name']); ?> (<?php echo htmlspecialchars($d['title']); ?>)</option>
+                                <option value="<?php echo $d['id']; ?>"><?php echo htmlspecialchars($d['name']); ?> (<?php echo htmlspecialchars($d['title']); ?>) - <?php echo htmlspecialchars($d['note'] ?? ''); ?></option>
                                 <?php endforeach; ?>
                                 <option value="manual">+ إدخال يدوي</option>
                             </select>
@@ -2062,6 +3159,7 @@ if ($loggedIn) {
                                     <th>رمز الخدمة</th>
                                     <th>المريض</th>
                                     <th>الهوية</th>
+                                    <th>مجلد المريض</th>
                                     <th>الطبيب</th>
                                     <th>من</th>
                                     <th>إلى</th>
@@ -2088,8 +3186,8 @@ if ($loggedIn) {
                     <div class="toolbar mb-3">
                         <div class="input-group" style="max-width:280px;">
                             <input type="text" class="form-control" id="searchDoctors" placeholder="بحث في الأطباء...">
-                            <button class="btn btn-gradient"><i class="bi bi-search"></i></button>
-                        </div>
+                            <button class="btn btn-gradient" id="btn-search-doctors"><i class="bi bi-search"></i></button>
+                                                    </div>
                     </div>
                     <form id="addDoctorForm" class="row g-2 mb-3">
                         <div class="col-md-3"><input type="text" class="form-control" name="doctor_name" placeholder="اسم الطبيب" required></div>
@@ -2115,20 +3213,67 @@ if ($loggedIn) {
                     <div class="toolbar mb-3">
                         <div class="input-group" style="max-width:280px;">
                             <input type="text" class="form-control" id="searchPatients" placeholder="بحث في المرضى...">
-                            <button class="btn btn-success-custom"><i class="bi bi-search"></i></button>
+                            <button class="btn btn-gradient" id="btn-search-patients"><i class="bi bi-search"></i></button>
+                        </div>
+                        <div class="btn-group btn-group-sm">
+                            <button class="btn btn-outline-success" id="patientSortMostPaid">الأكثر دفعاً</button>
+                            <button class="btn btn-outline-danger" id="patientSortMostUnpaid">الأكثر استحقاقاً</button>
+                            <button class="btn btn-outline-primary" id="patientSortMostLeaves">الأكثر إجازات</button>
+                            <button class="btn btn-outline-primary" id="patientSortLeastLeaves">الأقل عدد إجازات</button>
+                            <button class="btn btn-outline-secondary" id="patientSortReset"><i class="bi bi-arrow-counterclockwise"></i></button>
                         </div>
                     </div>
                     <form id="addPatientForm" class="row g-2 mb-3">
                         <div class="col-md-3"><input type="text" class="form-control" name="patient_name" placeholder="اسم المريض" required></div>
                         <div class="col-md-3"><input type="text" class="form-control" name="identity_number" placeholder="رقم الهوية" required></div>
                         <div class="col-md-3"><input type="text" class="form-control" name="phone" placeholder="الهاتف"></div>
-                        <div class="col-md-3"><button type="submit" class="btn btn-success-custom w-100"><i class="bi bi-plus"></i> إضافة مريض</button></div>
+                        <div class="col-md-3"><input type="url" class="form-control" name="folder_link" placeholder="رابط مجلد المريض"></div>
+                        <div class="col-md-12"><button type="submit" class="btn btn-success-custom w-100"><i class="bi bi-plus"></i> إضافة مريض</button></div>
                     </form>
                     <div class="table-responsive">
                         <table class="table table-bordered table-hover table-striped text-center" id="patientsTable">
-                            <thead><tr><th>#</th><th>الاسم</th><th>رقم الهوية</th><th>الهاتف</th><th>التحكم</th></tr></thead>
+                            <thead><tr><th>#</th><th>الاسم</th><th>رقم الهوية</th><th>الهاتف</th><th>المجلد</th><th>عدد الإجازات</th><th>مبلغ مدفوع</th><th>مبلغ مستحق</th><th>إجازات المريض</th><th>التحكم</th></tr></thead>
                             <tbody></tbody>
                         </table>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <div class="tab-pane fade" id="pane-chat" role="tabpanel">
+            <div class="card-custom">
+                <div class="card-header"><i class="bi bi-chat-dots text-primary"></i> مراسلة المستخدمين</div>
+                <div class="card-body">
+                    <div class="row g-3">
+                        <div class="col-lg-4">
+                            <input type="text" class="form-control mb-2" id="chatUsersSearch" placeholder="بحث مستخدم...">
+                            <select class="form-select mb-2" id="chatPeerSelect"></select>
+                            <button class="btn btn-sm btn-outline-secondary mb-2" id="refreshChatUsersBtn"><i class="bi bi-arrow-repeat"></i> تحديث المستخدمين</button>
+                            <?php if ($_SESSION['admin_role'] === 'admin'): ?>
+                            <div class="input-group input-group-sm mb-2">
+                                <span class="input-group-text">حذف تلقائي بعد (س)</span>
+                                <input type="number" min="0" class="form-control" id="chatRetentionHours" placeholder="0 = تعطيل">
+                            </div>
+                            <div class="d-flex gap-2">
+                                <button class="btn btn-sm btn-warning" id="saveChatRetentionBtn">حفظ المدة</button>
+                                <button class="btn btn-sm btn-outline-danger" id="runChatCleanupBtn">تنظيف الآن</button>
+                            </div>
+                            <?php endif; ?>
+                        </div>
+                        <div class="col-lg-8">
+                            <div id="chatMessagesBox" class="border rounded p-2 mb-2" style="height:320px; overflow:auto; background:#f8f9fa;"></div>
+                            <div id="chatReplyPreview" class="small text-muted mb-2 d-none"></div>
+                            <div class="input-group mb-2">
+                                <input type="text" class="form-control" id="chatMessageInput" placeholder="اكتب رسالتك...">
+                                <button class="btn btn-gradient" id="sendChatMessageBtn"><i class="bi bi-send"></i> إرسال</button>
+                                <button class="btn btn-outline-danger" id="recordVoiceBtn" type="button"><i class="bi bi-mic"></i> فويس</button>
+                                <button class="btn btn-outline-secondary d-none" id="stopVoiceBtn" type="button"><i class="bi bi-stop-fill"></i> إيقاف</button>
+                            </div>
+                            <div class="input-group input-group-sm">
+                                <input type="file" class="form-control" id="chatFileInput" accept="image/*,audio/*,.pdf,.doc,.docx,.xls,.xlsx,.txt,.mp4">
+                                <button class="btn btn-outline-secondary" id="clearChatFileBtn" type="button">إلغاء المرفق</button>
+                            </div>
+                        </div>
                     </div>
                 </div>
             </div>
@@ -2156,6 +3301,7 @@ if ($loggedIn) {
                         <input type="date" class="form-control" id="filterQueriesTo" style="max-width:150px;">
                         <button class="btn btn-sm btn-gradient" id="filterQueriesBtn"><i class="bi bi-funnel"></i></button>
                         <button class="btn btn-sm btn-outline-secondary" id="resetQueriesFilterBtn"><i class="bi bi-x-lg"></i></button>
+                        <button class="btn btn-sm btn-danger-custom" id="deleteAllQueriesBtn"><i class="bi bi-trash3"></i> حذف نهائي</button>
                         <div class="btn-group btn-group-sm">
                             <button class="btn btn-outline-primary" id="sortQueriesNewest"><i class="bi bi-sort-down"></i></button>
                             <button class="btn btn-outline-primary" id="sortQueriesOldest"><i class="bi bi-sort-up"></i></button>
@@ -2172,8 +3318,59 @@ if ($loggedIn) {
             </div>
         </div>
 
+
+        <div class="tab-pane fade" id="pane-admin-stats" role="tabpanel">
+            <div class="card-custom stats-lux-card">
+                <div class="card-header d-flex justify-content-between align-items-center flex-wrap gap-2">
+                    <span><i class="bi bi-bar-chart-line text-primary"></i> الإحصائيات المتقدمة</span>
+                    <div class="d-flex gap-2 flex-wrap align-items-center">
+                        <select id="adminStatsRangePreset" class="form-select form-select-sm" style="min-width:130px;">
+                            <option value="30">آخر 30 يوم</option>
+                            <option value="90">آخر 90 يوم</option>
+                            <option value="100">آخر 100 يوم</option>
+                            <option value="7">آخر 7 أيام</option>
+                            <option value="custom">تاريخ مخصص</option>
+                        </select>
+                        <input type="date" id="adminStatsFromDate" class="form-control form-control-sm" style="max-width:150px;">
+                        <input type="date" id="adminStatsToDate" class="form-control form-control-sm" style="max-width:150px;">
+                        <button class="btn btn-sm btn-gradient" id="applyAdminStatsRange"><i class="bi bi-funnel"></i> تطبيق</button>
+                        <button class="btn btn-sm btn-outline-secondary" id="refreshAdminStats"><i class="bi bi-arrow-repeat"></i> تحديث</button>
+                    </div>
+                </div>
+                <div class="card-body">
+                    <div class="row g-2 mb-3" id="adminStatsCards"></div>
+
+                    <div class="lux-chart-wrap mb-3">
+                        <div class="d-flex justify-content-between align-items-center mb-2">
+                            <h6 class="mb-0">اتجاه الإجازات اليومي</h6>
+                            <small class="text-muted">إجمالي/مدفوع/غير مدفوع</small>
+                        </div>
+                        <canvas id="adminStatsChart" height="120"></canvas>
+                    </div>
+
+                    <h6 class="mt-2">إحصائيات يومية</h6>
+                    <div class="table-responsive mb-3">
+                        <table class="table table-bordered table-sm text-center" id="adminDailyStatsTable">
+                            <thead><tr><th>اليوم</th><th>عدد الإجازات</th><th>مدفوعة</th><th>غير مدفوعة</th></tr></thead>
+                            <tbody></tbody>
+                        </table>
+                    </div>
+                    <div class="row g-3">
+                        <div class="col-md-6">
+                            <h6>أعلى الأطباء (عدد إجازات)</h6>
+                            <ul class="list-group" id="adminTopDoctors"></ul>
+                        </div>
+                        <div class="col-md-6">
+                            <h6>أعلى المرضى</h6>
+                            <ul class="list-group" id="adminTopPatients"></ul>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
         <!-- ======================== تبويب المدفوعات ======================== -->
-        <div class="tab-pane fade" id="pane-payments" role="tabpanel">
+        <div class="tab-pane fade d-none" id="pane-payments" role="tabpanel">
             <div class="card-custom">
                 <div class="card-header d-flex justify-content-between align-items-center flex-wrap gap-2">
                     <span><i class="bi bi-wallet2 text-success"></i> المدفوعات لكل مريض</span>
@@ -2231,7 +3428,7 @@ if ($loggedIn) {
                             <select class="form-select" name="doctor_id_edit" id="doctor_id_edit">
                                 <option value="">-- لا تغيير --</option>
                                 <?php foreach ($doctors as $d): ?>
-                                <option value="<?php echo $d['id']; ?>"><?php echo htmlspecialchars($d['name']); ?> (<?php echo htmlspecialchars($d['title']); ?>)</option>
+                                <option value="<?php echo $d['id']; ?>"><?php echo htmlspecialchars($d['name']); ?> (<?php echo htmlspecialchars($d['title']); ?>) - <?php echo htmlspecialchars($d['note'] ?? ''); ?></option>
                                 <?php endforeach; ?>
                                 <option value="manual">+ إدخال يدوي</option>
                             </select>
@@ -2320,7 +3517,7 @@ if ($loggedIn) {
                             <select class="form-select" name="dup_doctor_select" id="dup_doctor_select">
                                 <option value="">-- اختر طبيباً --</option>
                                 <?php foreach ($doctors as $d): ?>
-                                <option value="<?php echo $d['id']; ?>"><?php echo htmlspecialchars($d['name']); ?> (<?php echo htmlspecialchars($d['title']); ?>)</option>
+                                <option value="<?php echo $d['id']; ?>"><?php echo htmlspecialchars($d['name']); ?> (<?php echo htmlspecialchars($d['title']); ?>) - <?php echo htmlspecialchars($d['note'] ?? ''); ?></option>
                                 <?php endforeach; ?>
                                 <option value="manual">+ إدخال يدوي</option>
                             </select>
@@ -2521,6 +3718,7 @@ if ($loggedIn) {
                     <div class="mb-3"><label class="form-label">الاسم</label><input type="text" class="form-control" name="patient_name" id="edit_patient_name" required></div>
                     <div class="mb-3"><label class="form-label">رقم الهوية</label><input type="text" class="form-control" name="identity_number" id="edit_patient_identity" required></div>
                     <div class="mb-3"><label class="form-label">الهاتف</label><input type="text" class="form-control" name="phone" id="edit_patient_phone"></div>
+                    <div class="mb-3"><label class="form-label">رابط المجلد</label><input type="url" class="form-control" name="folder_link" id="edit_patient_folder_link"></div>
                 </form>
             </div>
             <div class="modal-footer">
@@ -2636,6 +3834,7 @@ if ($loggedIn) {
 const CSRF_TOKEN = '<?php echo csrf_token(); ?>';
 const IS_ADMIN = <?php echo ($loggedIn && $_SESSION['admin_role'] === 'admin') ? 'true' : 'false'; ?>;
 const IS_LOGGED_IN = <?php echo $loggedIn ? 'true' : 'false'; ?>;
+const REQUEST_URL = window.location.pathname;
 
 <?php if ($loggedIn): ?>
 const initialLeaves = <?php echo json_encode($leaves); ?>;
@@ -2646,8 +3845,9 @@ const initialPatients = <?php echo json_encode($patients); ?>;
 const initialPayments = <?php echo json_encode($payments); ?>;
 const initialNotifications = <?php echo json_encode($notifications_payment); ?>;
 const initialUsers = <?php echo json_encode($users); ?>;
+const initialChatUsers = <?php echo json_encode($chat_users ?? []); ?>;
 <?php else: ?>
-const initialLeaves = [], initialArchived = [], initialQueries = [], initialDoctors = [], initialPatients = [], initialPayments = [], initialNotifications = [], initialUsers = [];
+const initialLeaves = [], initialArchived = [], initialQueries = [], initialDoctors = [], initialPatients = [], initialPayments = [], initialNotifications = [], initialUsers = [], initialChatUsers = [];
 <?php endif; ?>
 
 // ======================== دوال مساعدة ========================
@@ -2704,7 +3904,7 @@ async function sendAjaxRequest(action, data = {}) {
                 formData.append(key, data[key]);
             }
         }
-        const response = await fetch(window.location.href, {
+        const response = await fetch(REQUEST_URL, {
             method: 'POST',
             body: formData,
             headers: { 'X-Requested-With': 'XMLHttpRequest' }
@@ -2750,8 +3950,28 @@ function normalizeSearchText(value) {
         .replace(/[ئ]/g, 'ي')
         .replace(/[ة]/g, 'ه')
         .replace(/[٠-٩]/g, d => String('٠١٢٣٤٥٦٧٨٩'.indexOf(d)))
+        .replace(/[^a-z0-9\u0600-\u06FF\s]/g, ' ')
         .replace(/\s+/g, ' ')
         .trim();
+}
+
+function extractSearchText(value, bag = []) {
+    if (value === null || value === undefined) return bag;
+    if (typeof value === 'object') {
+        Object.values(value).forEach(v => extractSearchText(v, bag));
+        return bag;
+    }
+    bag.push(String(value));
+    return bag;
+}
+
+function matchesSearch(item, query) {
+    const normalizedQuery = normalizeSearchText(query);
+    if (!normalizedQuery) return true;
+    const tokens = normalizedQuery.split(' ').filter(Boolean);
+    const haystack = normalizeSearchText(extractSearchText(item).join(' '));
+    const compactHaystack = haystack.replace(/\s+/g, '');
+    return tokens.every(t => haystack.includes(t) || compactHaystack.includes(t.replace(/\s+/g, '')));
 }
 
 function filterAndSortTable(tableEl, data, rowGenerator, filters = {}, sortCol = '', sortOrder = 'desc') {
@@ -2761,8 +3981,7 @@ function filterAndSortTable(tableEl, data, rowGenerator, filters = {}, sortCol =
     if (filters.search) {
         const q = normalizeSearchText(filters.search);
         filtered = filtered.filter(item => {
-            const searchText = normalizeSearchText(JSON.stringify(item || {}));
-            return searchText.includes(q);
+            return matchesSearch(item || {}, q);
         });
     }
 
@@ -2886,7 +4105,15 @@ function exportTableToExcel(tableEl, filename) {
 
 function printTableContent(tableEl, title) {
     const win = window.open('', '_blank');
-    win.document.write(`<html dir="rtl"><head><title>${title}</title><style>body{font-family:Cairo,sans-serif;direction:rtl}table{width:100%;border-collapse:collapse}th,td{border:1px solid #ddd;padding:6px;text-align:center;font-size:12px}th{background:#2c3e50;color:#fff}h2{text-align:center}</style></head><body><h2>${title}</h2>${tableEl.outerHTML}</body></html>`);
+    win.document.write(`<html dir="rtl"><head><title>${title}</title><style>
+        body{font-family:Cairo,sans-serif;direction:rtl;padding:20px;color:#1e293b}
+        table{width:100%;border-collapse:collapse;border-radius:8px;overflow:hidden}
+        th,td{border:1px solid #e2e8f0;padding:8px;text-align:center;font-size:12px}
+        th{background:linear-gradient(135deg,#6366f1,#8b5cf6);color:#fff;font-weight:700}
+        h2{text-align:center;color:#1e293b;margin-bottom:20px;font-weight:800}
+        tr:nth-child(even){background:#f8fafc}
+        tr:hover{background:#eef2ff}
+    </style></head><body><h2>${title}</h2>${tableEl.outerHTML}</body></html>`);
     win.document.close();
     win.print();
 }
@@ -2901,6 +4128,7 @@ function generateLeaveRow(lv) {
             <td><strong>${htmlspecialchars(lv.service_code)}</strong></td>
             <td>${htmlspecialchars(lv.patient_name)}</td>
             <td>${htmlspecialchars(lv.identity_number)}</td>
+            <td>${lv.patient_folder_link ? `<a href="${htmlspecialchars(lv.patient_folder_link)}" target="_blank" class="btn btn-sm btn-outline-primary"><i class="bi bi-folder-symlink"></i></a>` : ""}</td>
             <td>${htmlspecialchars(lv.doctor_name)}</td>
             <td>${htmlspecialchars(lv.issue_date)}</td>
             <td>${htmlspecialchars(lv.start_date)}</td>
@@ -2918,6 +4146,7 @@ function generateLeaveRow(lv) {
                     <button class="btn btn-sm btn-warning-custom action-btn btn-duplicate-leave" data-id="${lv.id}" title="تكرار"><i class="bi bi-files btn-duplicate-leave" data-id="${lv.id}"></i></button>
                     <button class="btn btn-sm btn-outline-primary action-btn btn-add-query" data-leave-id="${lv.id}" title="تسجيل استعلام"><i class="bi bi-plus-circle btn-add-query" data-leave-id="${lv.id}"></i></button>
                     <button class="btn btn-sm btn-danger-custom action-btn btn-delete-leave" data-id="${lv.id}" title="أرشفة"><i class="bi bi-archive btn-delete-leave" data-id="${lv.id}"></i></button>
+                    <button class="btn btn-sm btn-outline-danger action-btn btn-force-delete-active" data-id="${lv.id}" title="حذف نهائي"><i class="bi bi-trash3 btn-force-delete-active" data-id="${lv.id}"></i></button>
                 </div>
             </td>
         </tr>`;
@@ -2931,6 +4160,7 @@ function generateArchivedLeaveRow(lv) {
             <td><strong>${htmlspecialchars(lv.service_code)}</strong></td>
             <td>${htmlspecialchars(lv.patient_name)}</td>
             <td>${htmlspecialchars(lv.identity_number)}</td>
+            <td>${lv.patient_folder_link ? `<a href="${htmlspecialchars(lv.patient_folder_link)}" target="_blank" class="btn btn-sm btn-outline-primary"><i class="bi bi-folder-symlink"></i></a>` : ""}</td>
             <td>${htmlspecialchars(lv.doctor_name)}</td>
             <td>${htmlspecialchars(lv.start_date)}</td>
             <td>${htmlspecialchars(lv.end_date)}</td>
@@ -2963,14 +4193,22 @@ function generateDoctorRow(doc) {
 }
 
 function generatePatientRow(p) {
+    const total = parseInt(p.total || 0, 10);
+    const paidAmount = parseFloat(p.paid_amount || 0).toFixed(2);
+    const unpaidAmount = parseFloat(p.unpaid_amount || 0).toFixed(2);
     return `
         <tr data-id="${p.id}">
             <td class="row-num"></td>
             <td>${htmlspecialchars(p.name)}</td>
             <td>${htmlspecialchars(p.identity_number)}</td>
             <td>${p.phone ? `<a href="${formatWhatsAppLink(p.phone)}" target="_blank" class="text-decoration-none"><i class="bi bi-whatsapp text-success"></i> ${htmlspecialchars(p.phone)}</a>` : ''}</td>
+            <td>${p.folder_link ? `<a href="${htmlspecialchars(p.folder_link)}" target="_blank" class="btn btn-sm btn-outline-primary"><i class="bi bi-folder-symlink"></i> فتح</a>` : ''}</td>
+            <td><span class="badge bg-primary">${total}</span></td>
+            <td><span class="text-success fw-bold">${paidAmount}</span></td>
+            <td><span class="text-danger fw-bold">${unpaidAmount}</span></td>
+            <td><button class="btn btn-info btn-sm action-btn btn-view-patient-leaves" data-patient-id="${p.id}"><i class="bi bi-eye-fill"></i> عرض</button></td>
             <td>
-                <button class="btn btn-sm btn-gradient action-btn btn-edit-patient" data-id="${p.id}" data-name="${htmlspecialchars(p.name)}" data-identity="${htmlspecialchars(p.identity_number)}" data-phone="${htmlspecialchars(p.phone || '')}"><i class="bi bi-pencil"></i></button>
+                <button class="btn btn-sm btn-gradient action-btn btn-edit-patient" data-id="${p.id}" data-name="${htmlspecialchars(p.name)}" data-identity="${htmlspecialchars(p.identity_number)}" data-phone="${htmlspecialchars(p.phone || '')}" data-folder="${htmlspecialchars(p.folder_link || '')}"><i class="bi bi-pencil"></i></button>
                 <button class="btn btn-sm btn-danger-custom action-btn btn-delete-patient" data-id="${p.id}"><i class="bi bi-trash3"></i></button>
             </td>
         </tr>`;
@@ -3015,7 +4253,7 @@ function generateUserRow(u) {
             <td>${htmlspecialchars(u.display_name)}</td>
             <td>${roleBadge}</td>
             <td>${statusBadge}</td>
-            <td>${htmlspecialchars(u.created_at)}</td>
+            <td>${formatSaudiDateTime(u.created_at)}</td>
             <td>
                 <button class="btn btn-sm btn-gradient action-btn btn-edit-user" data-id="${u.id}" data-name="${htmlspecialchars(u.display_name)}" data-role="${u.role}" data-active="${u.is_active}"><i class="bi bi-pencil"></i></button>
                 <button class="btn btn-sm btn-info action-btn btn-view-sessions" data-id="${u.id}" title="سجل الجلسات"><i class="bi bi-clock-history"></i></button>
@@ -3057,8 +4295,8 @@ function updatePaymentNotifications(notifications) {
                 <i class="bi bi-bell-fill text-warning"></i>
                 <span class="badge bg-light text-dark ms-1">${htmlspecialchars(n.service_code || '-')}</span>
                 <span>${htmlspecialchars(n.message)}</span>
-                <br><span class="notif-patient-name"><i class="bi bi-person"></i> ${htmlspecialchars(n.patient_name || 'غير معروف')}</span>
-                <br><small class="text-muted">${htmlspecialchars(n.created_at)}</small>
+                <br><span class="notif-patient-name"><i class="bi bi-person"></i> ${htmlspecialchars(n.patient_name || 'غير معروف')} ${n.patient_phone ? `<a href="${formatWhatsAppLink(n.patient_phone)}" target="_blank" class="ms-1" title="واتساب"><i class="bi bi-whatsapp text-success"></i></a>` : ''}</span>
+                <br><small class="text-muted">${formatSaudiDateTime(n.created_at)}</small>
             </div>
             <div class="d-flex gap-1">
                 <button class="btn btn-sm btn-gradient btn-view-leave" title="عرض"><i class="bi bi-eye"></i></button>
@@ -3069,16 +4307,171 @@ function updatePaymentNotifications(notifications) {
     `).join('');
 }
 
+function updateChatUnreadBadge(count) {
+    const badge = document.getElementById('chatUnreadBadge');
+    if (!badge) return;
+    const c = parseInt(count || 0, 10);
+    badge.textContent = c;
+    badge.style.display = c > 0 ? 'inline-block' : 'none';
+}
+
+
+function drawAdminStatsChart(dailyRows) {
+    const canvas = document.getElementById('adminStatsChart');
+    if (!canvas) return;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return;
+
+    const rows = [...(dailyRows || [])].reverse();
+    const w = canvas.width = canvas.clientWidth || 900;
+    const h = canvas.height = 220;
+    ctx.clearRect(0, 0, w, h);
+
+    if (!rows.length) {
+        ctx.fillStyle = '#6b7280';
+        ctx.font = '14px sans-serif';
+        ctx.fillText('لا توجد بيانات للرسم البياني', 20, 40);
+        return;
+    }
+
+    const pad = { l: 40, r: 12, t: 14, b: 30 };
+    const maxY = Math.max(...rows.map(r => parseInt(r.total_count || 0, 10)), 1);
+    const stepX = (w - pad.l - pad.r) / Math.max(rows.length - 1, 1);
+    const y = val => h - pad.b - ((val / maxY) * (h - pad.t - pad.b));
+
+    ctx.strokeStyle = 'rgba(148,163,184,.35)';
+    ctx.lineWidth = 1;
+    for (let i = 0; i <= 4; i++) {
+        const yy = pad.t + ((h - pad.t - pad.b) * i / 4);
+        ctx.beginPath();
+        ctx.moveTo(pad.l, yy);
+        ctx.lineTo(w - pad.r, yy);
+        ctx.stroke();
+    }
+
+    function drawLine(field, color) {
+        ctx.beginPath();
+        rows.forEach((r, i) => {
+            const x = pad.l + i * stepX;
+            const yy = y(parseInt(r[field] || 0, 10));
+            if (i === 0) ctx.moveTo(x, yy); else ctx.lineTo(x, yy);
+        });
+        ctx.strokeStyle = color;
+        ctx.lineWidth = 2.5;
+        ctx.stroke();
+    }
+
+    drawLine('total_count', '#2563eb');
+    drawLine('paid_count', '#059669');
+    drawLine('unpaid_count', '#dc2626');
+
+    const legends = [
+        ['إجمالي', '#2563eb'],
+        ['مدفوع', '#059669'],
+        ['غير مدفوع', '#dc2626']
+    ];
+    legends.forEach((l, i) => {
+        const lx = 20 + i * 110;
+        const ly = h - 10;
+        ctx.fillStyle = l[1];
+        ctx.fillRect(lx, ly - 8, 12, 3);
+        ctx.fillStyle = '#334155';
+        ctx.font = '12px sans-serif';
+        ctx.fillText(l[0], lx + 18, ly);
+    });
+}
+
+function renderAdminStats(data) {
+    const cards = document.getElementById('adminStatsCards');
+    const dailyTbody = document.querySelector('#adminDailyStatsTable tbody');
+    const topDoctors = document.getElementById('adminTopDoctors');
+    const topPatients = document.getElementById('adminTopPatients');
+    if (!cards || !dailyTbody || !topDoctors || !topPatients || !data) return;
+
+    const t = data.totals || {};
+    const canViewFinancial = !!data.can_view_financial;
+    const cardItems = [
+        ['إجمالي الإجازات النشطة', t.total || 0, 'primary'],
+        ['المدفوعة', t.paid || 0, 'success'],
+        ['غير المدفوعة', t.unpaid || 0, 'danger'],
+        ['إجازات اليوم', data.today_total || 0, 'info'],
+        ['مدفوعة اليوم', data.today_paid || 0, 'success'],
+        ['غير مدفوعة اليوم', data.today_unpaid || 0, 'warning'],
+        ['متوسط يومي', parseFloat(data.avg_daily || 0).toFixed(2), 'secondary'],
+        ['ثبات النشاط %', parseFloat(data.consistency_rate || 0).toFixed(1) + '%', 'dark']
+    ];
+    if (canViewFinancial) {
+        cardItems.splice(3, 0,
+            ['إجمالي المدفوعات', parseFloat(t.paid_amount || 0).toFixed(2), 'success'],
+            ['إجمالي المستحقات', parseFloat(t.unpaid_amount || 0).toFixed(2), 'danger']
+        );
+    }
+
+    cards.innerHTML = cardItems.map(([label,val,color]) => `
+        <div class="col-md-4 col-lg-3">
+            <div class="card border-${color} h-100 shadow-sm">
+                <div class="card-body py-2">
+                    <div class="small text-muted">${label}</div>
+                    <div class="h5 mb-0">${val}</div>
+                </div>
+            </div>
+        </div>`).join('');
+
+    dailyTbody.innerHTML = (data.daily || []).map(r => `
+        <tr><td>${htmlspecialchars(r.day_date || '')}</td><td>${r.total_count || 0}</td><td>${r.paid_count || 0}</td><td>${r.unpaid_count || 0}</td></tr>
+    `).join('') || '<tr><td colspan="4" class="text-muted">لا توجد بيانات</td></tr>';
+
+    topDoctors.innerHTML = (data.top_doctors || []).map(d => `
+        <li class="list-group-item d-flex justify-content-between"><span>${htmlspecialchars(d.name || 'غير محدد')} <small class="text-muted">${htmlspecialchars(d.title || '')}</small></span><strong>${d.leaves_count || 0}</strong></li>
+    `).join('') || '<li class="list-group-item text-muted">لا توجد بيانات</li>';
+
+    topPatients.innerHTML = (data.top_patients || []).map(p => `
+        <li class="list-group-item"><div class="d-flex justify-content-between"><span>${htmlspecialchars(p.name || 'غير محدد')} (${htmlspecialchars(p.identity_number || '-')})</span><strong>${p.leaves_count || 0}</strong></div>${canViewFinancial ? `<small class="text-success">مدفوع: ${parseFloat(p.paid_amount || 0).toFixed(2)}</small> - <small class="text-danger">مستحق: ${parseFloat(p.unpaid_amount || 0).toFixed(2)}</small>` : '<small class="text-muted">البيانات المالية للمشرف فقط</small>'}</li>
+    `).join('') || '<li class="list-group-item text-muted">لا توجد بيانات</li>';
+
+    drawAdminStatsChart(data.daily || []);
+}
+
+async function fetchAdminStats() {
+    const preset = document.getElementById('adminStatsRangePreset')?.value || '30';
+    let rangeDays = 30;
+    const payload = {};
+
+    if (preset === 'custom') {
+        payload.from_date = document.getElementById('adminStatsFromDate')?.value || '';
+        payload.to_date = document.getElementById('adminStatsToDate')?.value || '';
+    } else {
+        rangeDays = parseInt(preset, 10) || 30;
+        payload.range_days = rangeDays;
+        const to = new Date();
+        const from = new Date();
+        from.setDate(to.getDate() - (rangeDays - 1));
+        const toVal = to.toISOString().slice(0,10);
+        const fromVal = from.toISOString().slice(0,10);
+        const fromEl = document.getElementById('adminStatsFromDate');
+        const toEl = document.getElementById('adminStatsToDate');
+        if (fromEl) fromEl.value = fromVal;
+        if (toEl) toEl.value = toVal;
+    }
+
+    const result = await sendAjaxRequest('fetch_admin_statistics', payload);
+    if (result.success) renderAdminStats(result.data);
+}
+
 function updateStats(stats) {
     if (!stats) return;
-    document.getElementById('stat-total').textContent = stats.total || 0;
-    document.getElementById('stat-paid').textContent = stats.paid || 0;
-    document.getElementById('stat-unpaid').textContent = stats.unpaid || 0;
-    document.getElementById('stat-archived').textContent = stats.archived || 0;
-    document.getElementById('stat-patients').textContent = stats.patients || 0;
-    document.getElementById('stat-doctors').textContent = stats.doctors || 0;
-    document.getElementById('stat-paid-amount').textContent = parseFloat(stats.paid_amount || 0).toFixed(2);
-    document.getElementById('stat-unpaid-amount').textContent = parseFloat(stats.unpaid_amount || 0).toFixed(2);
+    const setText = (id, val) => {
+        const el = document.getElementById(id);
+        if (el) el.textContent = val;
+    };
+    setText('stat-total', stats.total || 0);
+    setText('stat-paid', stats.paid || 0);
+    setText('stat-unpaid', stats.unpaid || 0);
+    setText('stat-archived', stats.archived || 0);
+    setText('stat-patients', stats.patients || 0);
+    setText('stat-doctors', stats.doctors || 0);
+    setText('stat-paid-amount', parseFloat(stats.paid_amount || 0).toFixed(2));
+    setText('stat-unpaid-amount', parseFloat(stats.unpaid_amount || 0).toFixed(2));
 }
 
 function updateDoctorSelects(doctors) {
@@ -3095,7 +4488,7 @@ function updateDoctorSelects(doctors) {
         doctors.forEach(d => {
             const opt = document.createElement('option');
             opt.value = d.id;
-            opt.textContent = `${d.name} (${d.title})`;
+            opt.textContent = `${d.name} (${d.title}) - ${d.note || ''}`;
             sel.appendChild(opt);
         });
         if (manualOpt) sel.appendChild(manualOpt);
@@ -3138,7 +4531,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 formData.append('username', document.getElementById('loginUsername').value);
                 formData.append('password', document.getElementById('loginPassword').value);
                 try {
-                    const res = await fetch(window.location.href, { method: 'POST', body: formData });
+                    const res = await fetch(REQUEST_URL, { method: 'POST', body: formData });
                     const result = await res.json();
                     hideLoading();
                     if (result.success) {
@@ -3226,11 +4619,13 @@ document.addEventListener('DOMContentLoaded', () => {
         patients: initialPatients,
         payments: initialPayments,
         notifications_payment: initialNotifications,
-        users: initialUsers
+        users: initialUsers,
+        chat_users: initialChatUsers,
+        chat_messages: []
     };
 
     function syncTableDataFromResult(result) {
-        const keys = ['leaves', 'archived', 'queries', 'doctors', 'patients', 'payments', 'notifications_payment', 'users'];
+        const keys = ['leaves', 'archived', 'queries', 'doctors', 'patients', 'payments', 'notifications_payment', 'users', 'chat_users', 'chat_messages'];
         keys.forEach((k) => {
             if (Object.prototype.hasOwnProperty.call(result, k) && Array.isArray(result[k])) {
                 currentTableData[k] = result[k];
@@ -3256,6 +4651,7 @@ document.addEventListener('DOMContentLoaded', () => {
                     updateDoctorSelects(currentTableData.doctors);
                 }
                 if (result.stats) updateStats(result.stats);
+                if (result.unread_messages_count !== undefined) updateChatUnreadBadge(result.unread_messages_count);
         }
     }
 
@@ -3265,7 +4661,7 @@ document.addEventListener('DOMContentLoaded', () => {
         const formData = new FormData();
         formData.append('action', 'logout');
         try {
-            const res = await fetch(window.location.href, { method: 'POST', body: formData });
+            const res = await fetch(REQUEST_URL, { method: 'POST', body: formData });
             const result = await res.json();
             hideLoading();
             if (result.success) {
@@ -3366,7 +4762,7 @@ document.addEventListener('DOMContentLoaded', () => {
         formData.append('action', 'add_leave');
         formData.append('csrf_token', CSRF_TOKEN);
         try {
-            const res = await fetch(window.location.href, { method: 'POST', body: formData, headers: { 'X-Requested-With': 'XMLHttpRequest' } });
+            const res = await fetch(REQUEST_URL, { method: 'POST', body: formData, headers: { 'X-Requested-With': 'XMLHttpRequest' } });
             const result = await res.json();
             hideLoading();
             if (result.success) {
@@ -3383,6 +4779,8 @@ document.addEventListener('DOMContentLoaded', () => {
                 document.getElementById('filterType').value = '';
                 applyLeavesFilters();
                 applyAllCurrentFilters();
+                if (result.doctors) updateDoctorSelects(result.doctors);
+                if (result.patients) updatePatientSelects(result.patients);
                 if (result.stats) updateStats(result.stats);
                 // التبديل لتبويب الإجازات
                 document.getElementById('tab-leaves').click();
@@ -3456,7 +4854,7 @@ document.addEventListener('DOMContentLoaded', () => {
         formData.append('action', 'edit_leave');
         formData.append('csrf_token', CSRF_TOKEN);
         try {
-            const res = await fetch(window.location.href, { method: 'POST', body: formData, headers: { 'X-Requested-With': 'XMLHttpRequest' } });
+            const res = await fetch(REQUEST_URL, { method: 'POST', body: formData, headers: { 'X-Requested-With': 'XMLHttpRequest' } });
             const result = await res.json();
             hideLoading();
             if (result.success) {
@@ -3469,6 +4867,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 document.getElementById('filterToDate').value = '';
                 document.getElementById('filterType').value = '';
                 applyAllCurrentFilters();
+                if (result.patients) { currentTableData.patients = result.patients; applyPatientsFilters(); updatePatientSelects(currentTableData.patients); }
                 if (result.doctors) {
                     currentTableData.doctors = result.doctors;
                     applyDoctorsFilters();
@@ -3546,7 +4945,7 @@ document.addEventListener('DOMContentLoaded', () => {
         formData.append('action', 'duplicate_leave');
         formData.append('csrf_token', CSRF_TOKEN);
         try {
-            const res = await fetch(window.location.href, { method: 'POST', body: formData, headers: { 'X-Requested-With': 'XMLHttpRequest' } });
+            const res = await fetch(REQUEST_URL, { method: 'POST', body: formData, headers: { 'X-Requested-With': 'XMLHttpRequest' } });
             const result = await res.json();
             hideLoading();
             if (result.success) {
@@ -3560,6 +4959,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 document.getElementById('filterType').value = '';
                 applyLeavesFilters();
                 applyAllCurrentFilters();
+                if (result.patients) { currentTableData.patients = result.patients; applyPatientsFilters(); updatePatientSelects(currentTableData.patients); }
                 if (result.doctors) {
                     currentTableData.doctors = result.doctors;
                     applyDoctorsFilters();
@@ -3581,6 +4981,31 @@ document.addEventListener('DOMContentLoaded', () => {
         currentConfirmAction = async () => {
             showLoading();
             const result = await sendAjaxRequest('delete_leave', { leave_id: leaveId });
+            hideLoading();
+            if (result.success) {
+                showToast(result.message, 'success');
+                if (Array.isArray(result.leaves)) currentTableData.leaves = result.leaves;
+                if (Array.isArray(result.archived)) currentTableData.archived = result.archived;
+                if (Array.isArray(result.payments)) currentTableData.payments = result.payments;
+                applyLeavesFilters();
+                applyArchivedFilters();
+                applyPaymentsFilters();
+                if (result.stats) updateStats(result.stats);
+            }
+        };
+        confirmModal.show();
+    });
+
+    leavesTable.addEventListener('click', (e) => {
+        const target = e.target.closest('.btn-force-delete-active') || (e.target.classList.contains('btn-force-delete-active') ? e.target : null);
+        if (!target) return;
+        const row = target.closest('tr');
+        const leaveId = row.dataset.id;
+        confirmMessage.textContent = 'تحذير! سيتم حذف هذه الإجازة نهائياً مباشرة. لا يمكن التراجع!';
+        confirmYesBtn.textContent = 'نعم، حذف نهائي';
+        currentConfirmAction = async () => {
+            showLoading();
+            const result = await sendAjaxRequest('force_delete_leave', { leave_id: leaveId });
             hideLoading();
             if (result.success) {
                 showToast(result.message, 'success');
@@ -3810,7 +5235,7 @@ document.addEventListener('DOMContentLoaded', () => {
                     <p><strong>النوع:</strong> ${lv.is_companion == 1 ? 'مرافق: ' + htmlspecialchars(lv.companion_name) + ' (' + htmlspecialchars(lv.companion_relation) + ')' : 'أساسي'}</p>
                     <p><strong>مدفوعة:</strong> ${lv.is_paid == 1 ? 'نعم' : 'لا'}</p>
                     <p><strong>المبلغ:</strong> ${parseFloat(lv.payment_amount).toFixed(2)}</p>
-                    <p><strong>تاريخ الإضافة:</strong> ${htmlspecialchars(lv.created_at)}</p>
+                    <p><strong>تاريخ الإضافة:</strong> ${formatSaudiDateTime(lv.created_at)}</p>
                     <p><strong>تاريخ التعديل:</strong> ${htmlspecialchars(lv.updated_at || 'غير متوفر')}</p>
                     <p><strong>عدد الاستعلامات:</strong> ${lv.queries_count}</p>`;
                 leaveDetailsModal.show();
@@ -3870,7 +5295,7 @@ document.addEventListener('DOMContentLoaded', () => {
         const formData = new FormData(e.target);
         formData.append('action', 'add_doctor');
         formData.append('csrf_token', CSRF_TOKEN);
-        const res = await fetch(window.location.href, { method: 'POST', body: formData, headers: { 'X-Requested-With': 'XMLHttpRequest' } });
+        const res = await fetch(REQUEST_URL, { method: 'POST', body: formData, headers: { 'X-Requested-With': 'XMLHttpRequest' } });
         const result = await res.json();
         hideLoading();
         if (result.success) {
@@ -3918,7 +5343,7 @@ document.addEventListener('DOMContentLoaded', () => {
         const formData = new FormData(document.getElementById('editDoctorForm'));
         formData.append('action', 'edit_doctor');
         formData.append('csrf_token', CSRF_TOKEN);
-        const res = await fetch(window.location.href, { method: 'POST', body: formData, headers: { 'X-Requested-With': 'XMLHttpRequest' } });
+        const res = await fetch(REQUEST_URL, { method: 'POST', body: formData, headers: { 'X-Requested-With': 'XMLHttpRequest' } });
         const result = await res.json();
         hideLoading();
         if (result.success) {
@@ -3938,7 +5363,7 @@ document.addEventListener('DOMContentLoaded', () => {
         const formData = new FormData(e.target);
         formData.append('action', 'add_patient');
         formData.append('csrf_token', CSRF_TOKEN);
-        const res = await fetch(window.location.href, { method: 'POST', body: formData, headers: { 'X-Requested-With': 'XMLHttpRequest' } });
+        const res = await fetch(REQUEST_URL, { method: 'POST', body: formData, headers: { 'X-Requested-With': 'XMLHttpRequest' } });
         const result = await res.json();
         hideLoading();
         if (result.success) {
@@ -3955,11 +5380,17 @@ document.addEventListener('DOMContentLoaded', () => {
     patientsTable.addEventListener('click', (e) => {
         const editBtn = e.target.closest('.btn-edit-patient');
         const delBtn = e.target.closest('.btn-delete-patient');
+        const viewBtn = e.target.closest('.btn-view-patient-leaves');
+        if (viewBtn) {
+            openPatientLeaves(viewBtn.dataset.patientId);
+            return;
+        }
         if (editBtn) {
             document.getElementById('edit_patient_id').value = editBtn.dataset.id;
             document.getElementById('edit_patient_name').value = editBtn.dataset.name;
             document.getElementById('edit_patient_identity').value = editBtn.dataset.identity;
             document.getElementById('edit_patient_phone').value = editBtn.dataset.phone;
+            document.getElementById('edit_patient_folder_link').value = editBtn.dataset.folder || '';
             editPatientModal.show();
         }
         if (delBtn) {
@@ -3986,7 +5417,7 @@ document.addEventListener('DOMContentLoaded', () => {
         const formData = new FormData(document.getElementById('editPatientForm'));
         formData.append('action', 'edit_patient');
         formData.append('csrf_token', CSRF_TOKEN);
-        const res = await fetch(window.location.href, { method: 'POST', body: formData, headers: { 'X-Requested-With': 'XMLHttpRequest' } });
+        const res = await fetch(REQUEST_URL, { method: 'POST', body: formData, headers: { 'X-Requested-With': 'XMLHttpRequest' } });
         const result = await res.json();
         hideLoading();
         if (result.success) {
@@ -4015,7 +5446,7 @@ document.addEventListener('DOMContentLoaded', () => {
             const formData = new FormData(document.getElementById('addUserForm'));
             formData.append('action', 'add_user');
             formData.append('csrf_token', CSRF_TOKEN);
-            const res = await fetch(window.location.href, { method: 'POST', body: formData, headers: { 'X-Requested-With': 'XMLHttpRequest' } });
+            const res = await fetch(REQUEST_URL, { method: 'POST', body: formData, headers: { 'X-Requested-With': 'XMLHttpRequest' } });
             const result = await res.json();
             hideLoading();
             if (result.success) {
@@ -4116,7 +5547,7 @@ document.addEventListener('DOMContentLoaded', () => {
             const formData = new FormData(document.getElementById('editUserForm'));
             formData.append('action', 'edit_user');
             formData.append('csrf_token', CSRF_TOKEN);
-            const res = await fetch(window.location.href, { method: 'POST', body: formData, headers: { 'X-Requested-With': 'XMLHttpRequest' } });
+            const res = await fetch(REQUEST_URL, { method: 'POST', body: formData, headers: { 'X-Requested-With': 'XMLHttpRequest' } });
             const result = await res.json();
             hideLoading();
             if (result.success) {
@@ -4128,13 +5559,73 @@ document.addEventListener('DOMContentLoaded', () => {
         });
     }
 
+    // ====== المراسلات ======
+    let activeChatPeerId = null;
+    let currentReplyMessage = null;
+    let mediaRecorder = null;
+    let voiceChunks = [];
+
+    function renderChatUsers(list) {
+        const sel = document.getElementById('chatPeerSelect');
+        if (!sel) return;
+        const users = Array.isArray(list) ? list : [];
+        if (users.length === 0) {
+            sel.innerHTML = '<option value="">لا يوجد مستخدمون</option>';
+            activeChatPeerId = null;
+            return;
+        }
+        const prev = activeChatPeerId || sel.value;
+        sel.innerHTML = '<option value="">اختر المستخدم</option>' + users.map(u => `<option value="${u.id}">${htmlspecialchars(u.display_name)} (${htmlspecialchars(u.username)})</option>`).join('');
+        if (prev && users.some(u => String(u.id) === String(prev))) {
+            sel.value = prev;
+            activeChatPeerId = String(prev);
+        }
+    }
+
+    function renderChatMessages(list) {
+        const box = document.getElementById('chatMessagesBox');
+        if (!box) return;
+        const me = String(<?php echo intval($_SESSION['admin_user_id'] ?? 0); ?>);
+        const rows = (list || []).map(m => {
+            const mine = String(m.sender_id) === me;
+            const fileHtml = m.file_path ? (m.message_type === 'image' ? `<div><img src="${htmlspecialchars(m.file_path)}" style="max-width:220px;border-radius:8px;"></div>` : (m.message_type === 'voice' ? `<audio controls src="${htmlspecialchars(m.file_path)}" style="max-width:240px;"></audio>` : `<a href="${htmlspecialchars(m.file_path)}" target="_blank" class="btn btn-sm btn-outline-primary mt-1"><i class="bi bi-paperclip"></i> ${htmlspecialchars(m.file_name || 'ملف')}</a>`)) : '';
+            const replyHtml = m.reply_to_id ? `<div class="small text-muted border-end pe-2 mb-1"><i class="bi bi-reply"></i> ${htmlspecialchars(m.reply_message_text || m.reply_file_name || 'رسالة')}</div>` : '';
+            const delBtn = mine || IS_ADMIN ? `<button class="btn btn-sm btn-outline-danger mt-1 btn-delete-chat-message" data-id="${m.id}"><i class="bi bi-trash3"></i></button>` : '';
+            const replyBtn = `<button class="btn btn-sm btn-outline-secondary mt-1 btn-reply-chat-message" data-id="${m.id}" data-text="${htmlspecialchars(m.message_text || m.file_name || 'رسالة')}"><i class="bi bi-reply"></i></button>`;
+            return `<div class="mb-2 d-flex ${mine ? 'justify-content-start' : 'justify-content-end'}"><div class="msg-bubble ${mine ? 'msg-mine' : 'msg-other'}" style="max-width:78%;"><div class="small fw-bold">${htmlspecialchars(m.sender_name || '')}</div>${replyHtml}<div>${htmlspecialchars(m.message_text || '')}</div>${fileHtml}<div class="small text-muted">${formatSaudiDateTime(m.created_at)}</div>${replyBtn} ${delBtn}</div></div>`;
+        }).join('');
+        box.innerHTML = rows || '<div class="text-muted text-center mt-4">لا توجد رسائل بعد.</div>';
+        box.scrollTop = box.scrollHeight;
+    }
+
+    async function refreshChatUsers() {
+        const result = await sendAjaxRequest('fetch_chat_users', {});
+        if (result.success) {
+            currentTableData.chat_users = result.users || [];
+            renderChatUsers(currentTableData.chat_users);
+            const rh = document.getElementById('chatRetentionHours'); if (rh && result.chat_retention_hours !== undefined) rh.value = result.chat_retention_hours;
+            if (result.unread_messages_count !== undefined) updateChatUnreadBadge(result.unread_messages_count);
+        }
+    }
+
+    async function loadChatMessages() {
+        if (!activeChatPeerId) return;
+        const result = await sendAjaxRequest('fetch_messages', { peer_id: activeChatPeerId });
+        if (result.success) {
+            currentTableData.chat_messages = result.messages || [];
+            renderChatMessages(currentTableData.chat_messages);
+            const unreadRes = await sendAjaxRequest('fetch_unread_messages_count', {});
+            if (unreadRes.success) updateChatUnreadBadge(unreadRes.count);
+        }
+    }
+
     // ====== البحث والفلترة ======
     const filtersState = {
         leaves: { search: '', fromDate: '', toDate: '', typeFilter: '', sortCol: 'created_at', sortOrder: 'desc' },
         archived: { search: '' },
-        queries: { search: '', fromDate: '', toDate: '' },
+        queries: { search: '', fromDate: '', toDate: '', sortMode: 'newest' },
         doctors: { search: '' },
-        patients: { search: '' },
+        patients: { search: '', sortCol: 'total', sortOrder: 'desc' },
         payments: { search: '', sortCol: '', sortOrder: 'desc' },
         notifications: { search: '', sortMode: 'newest' }
     };
@@ -4159,11 +5650,26 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     function applyQueriesFilters() {
-        filterAndSortTable(queriesTable, currentTableData.queries, generateQueryRow, {
-            search: filtersState.queries.search,
-            fromDate: filtersState.queries.fromDate,
-            toDate: filtersState.queries.toDate
-        });
+        let queries = [...(currentTableData.queries || [])];
+        const search = normalizeSearchText(filtersState.queries.search || '');
+        if (search) {
+            queries = queries.filter(q => matchesSearch(q || {}, search));
+        }
+        if (filtersState.queries.fromDate && filtersState.queries.toDate) {
+            const from = new Date(filtersState.queries.fromDate);
+            const to = new Date(filtersState.queries.toDate);
+            to.setHours(23, 59, 59, 999);
+            queries = queries.filter(q => {
+                const d = new Date(String(q.queried_at || '').replace(' ', 'T'));
+                return !isNaN(d) && d >= from && d <= to;
+            });
+        }
+        if (filtersState.queries.sortMode === 'oldest') {
+            queries.sort((a, b) => new Date(String(a.queried_at || '').replace(' ', 'T')) - new Date(String(b.queried_at || '').replace(' ', 'T')));
+        } else {
+            queries.sort((a, b) => new Date(String(b.queried_at || '').replace(' ', 'T')) - new Date(String(a.queried_at || '').replace(' ', 'T')));
+        }
+        updateTable(queriesTable, queries, generateQueryRow);
     }
 
     function applyDoctorsFilters() {
@@ -4171,7 +5677,12 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     function applyPatientsFilters() {
-        filterAndSortTable(patientsTable, currentTableData.patients, generatePatientRow, { search: filtersState.patients.search });
+        const metricsByPatient = new Map((currentTableData.payments || []).map(p => [String(p.id), p]));
+        const mergedPatients = (currentTableData.patients || []).map(p => ({
+            ...p,
+            ...(metricsByPatient.get(String(p.id)) || { total: 0, paid_amount: 0, unpaid_amount: 0, paid_count: 0, unpaid_count: 0 })
+        }));
+        filterAndSortTable(patientsTable, mergedPatients, generatePatientRow, { search: filtersState.patients.search }, filtersState.patients.sortCol, filtersState.patients.sortOrder);
     }
 
     function applyAllCurrentFilters() {
@@ -4188,7 +5699,7 @@ document.addEventListener('DOMContentLoaded', () => {
         let data = [...(currentTableData.notifications_payment || [])];
         const search = normalizeSearchText(filtersState.notifications.search || '');
         if (search) {
-            data = data.filter(n => normalizeSearchText(JSON.stringify(n || {})).includes(search));
+            data = data.filter(n => matchesSearch(n || {}, search));
         }
 
         if (filtersState.notifications.sortMode === 'oldest') {
@@ -4299,6 +5810,42 @@ document.addEventListener('DOMContentLoaded', () => {
         applyPaymentsFilters();
     });
 
+    document.getElementById('patientSortMostPaid').addEventListener('click', () => {
+        filtersState.patients.sortCol = 'paid_amount';
+        filtersState.patients.sortOrder = 'desc';
+        applyPatientsFilters();
+    });
+    document.getElementById('patientSortMostUnpaid').addEventListener('click', () => {
+        filtersState.patients.sortCol = 'unpaid_amount';
+        filtersState.patients.sortOrder = 'desc';
+        applyPatientsFilters();
+    });
+    document.getElementById('patientSortMostLeaves').addEventListener('click', () => {
+        filtersState.patients.sortCol = 'total';
+        filtersState.patients.sortOrder = 'desc';
+        applyPatientsFilters();
+    });
+    document.getElementById('patientSortLeastLeaves').addEventListener('click', () => {
+        filtersState.patients.sortCol = 'total';
+        filtersState.patients.sortOrder = 'asc';
+        applyPatientsFilters();
+    });
+    document.getElementById('patientSortReset').addEventListener('click', () => {
+        filtersState.patients.sortCol = 'total';
+        filtersState.patients.sortOrder = 'desc';
+        applyPatientsFilters();
+    });
+
+    document.getElementById('sortQueriesNewest').addEventListener('click', () => { filtersState.queries.sortMode = 'newest'; applyQueriesFilters(); });
+    document.getElementById('sortQueriesOldest').addEventListener('click', () => { filtersState.queries.sortMode = 'oldest'; applyQueriesFilters(); });
+    document.getElementById('sortQueriesReset').addEventListener('click', () => {
+        filtersState.queries = { search: '', fromDate: '', toDate: '', sortMode: 'newest' };
+        document.getElementById('searchQueries').value = '';
+        document.getElementById('filterQueriesFrom').value = '';
+        document.getElementById('filterQueriesTo').value = '';
+        applyQueriesFilters();
+    });
+
     // فلترة الاستعلامات بالتاريخ
     document.getElementById('filterQueriesBtn').addEventListener('click', () => {
         filtersState.queries.fromDate = document.getElementById('filterQueriesFrom').value;
@@ -4308,7 +5855,7 @@ document.addEventListener('DOMContentLoaded', () => {
     });
 
     document.getElementById('resetQueriesFilterBtn').addEventListener('click', () => {
-        filtersState.queries = { search: '', fromDate: '', toDate: '' };
+        filtersState.queries = { search: '', fromDate: '', toDate: '', sortMode: 'newest' };
         document.getElementById('filterQueriesFrom').value = '';
         document.getElementById('filterQueriesTo').value = '';
         document.getElementById('searchQueries').value = '';
@@ -4329,7 +5876,7 @@ document.addEventListener('DOMContentLoaded', () => {
     });
 
 
-    document.getElementById('btn-search-leaves').addEventListener('click', () => applyLeavesFilters());
+    document.getElementById('btn-search-leaves').addEventListener('click', () => { filtersState.leaves.search = document.getElementById('searchLeaves').value; applyLeavesFilters(); });
     document.getElementById('btn-search-archived').addEventListener('click', () => {
         filtersState.archived.search = document.getElementById('searchArchived').value;
         applyArchivedFilters();
@@ -4338,8 +5885,159 @@ document.addEventListener('DOMContentLoaded', () => {
         filtersState.queries.search = document.getElementById('searchQueries').value;
         applyQueriesFilters();
     });
-    document.getElementById('btn-search-payments').addEventListener('click', () => applyPaymentsFilters());
-    document.getElementById('btn-search-notifs').addEventListener('click', () => applyNotificationsFilters());
+    document.getElementById('btn-search-payments').addEventListener('click', () => { filtersState.payments.search = document.getElementById('searchPayments').value; applyPaymentsFilters(); });
+    document.getElementById('btn-search-notifs').addEventListener('click', () => { filtersState.notifications.search = document.getElementById('searchNotifs').value; applyNotificationsFilters(); });
+
+    document.getElementById('btn-search-doctors')?.addEventListener('click', () => { filtersState.doctors.search = document.getElementById('searchDoctors').value; applyDoctorsFilters(); });
+    document.getElementById('btn-search-patients')?.addEventListener('click', () => { filtersState.patients.search = document.getElementById('searchPatients').value; applyPatientsFilters(); });
+
+    const deleteAllQueriesBtn = document.getElementById('deleteAllQueriesBtn') || document.getElementById('deleteAllQueries');
+    if (deleteAllQueriesBtn) {
+        deleteAllQueriesBtn.addEventListener('click', () => {
+            confirmMessage.textContent = 'تحذير! سيتم حذف سجل الاستعلامات نهائياً.';
+            confirmYesBtn.textContent = 'نعم، احذف الكل';
+            currentConfirmAction = async () => {
+                const result = await sendAjaxRequest('delete_all_queries', {});
+                if (result.success) {
+                    showToast(result.message, 'success');
+                    syncTableDataFromResult(result);
+                    applyQueriesFilters();
+                    applyLeavesFilters();
+                    applyArchivedFilters();
+                }
+            };
+            confirmModal.show();
+        });
+    }
+
+    const markAllPaidBtn = document.getElementById('markAllPaidBtn');
+    if (markAllPaidBtn) {
+        markAllPaidBtn.addEventListener('click', () => {
+            confirmMessage.textContent = 'سيتم جعل كل الإجازات النشطة مدفوعة. متابعة؟';
+            confirmYesBtn.textContent = 'نعم، نفّذ';
+            currentConfirmAction = async () => {
+                const result = await sendAjaxRequest('mark_all_leaves_paid', {});
+                if (result.success) {
+                    showToast(result.message, 'success');
+                    syncTableDataFromResult(result);
+                    applyAllCurrentFilters();
+                    if (result.stats) updateStats(result.stats);
+                }
+            };
+            confirmModal.show();
+        });
+    }
+
+    const resetAllPaymentsBtn = document.getElementById('resetAllPaymentsBtn');
+    if (resetAllPaymentsBtn) {
+        resetAllPaymentsBtn.addEventListener('click', () => {
+            confirmMessage.textContent = 'سيتم تصفير كل المدفوعات والمستحقات. متابعة؟';
+            confirmYesBtn.textContent = 'نعم، صفّر';
+            currentConfirmAction = async () => {
+                const result = await sendAjaxRequest('reset_all_payments', {});
+                if (result.success) {
+                    showToast(result.message, 'success');
+                    syncTableDataFromResult(result);
+                    applyAllCurrentFilters();
+                    if (result.stats) updateStats(result.stats);
+                }
+            };
+            confirmModal.show();
+        });
+    }
+
+    renderChatUsers(currentTableData.chat_users || []);
+    refreshChatUsers();
+    sendAjaxRequest('fetch_unread_messages_count', {}).then(r => { if (r.success) updateChatUnreadBadge(r.count); });
+    setInterval(() => { sendAjaxRequest('fetch_unread_messages_count', {}).then(r => { if (r.success) updateChatUnreadBadge(r.count); }); }, 15000);
+    document.getElementById('chatUsersSearch')?.addEventListener('input', debounce(function() {
+        const q = this.value;
+        const filtered = (currentTableData.chat_users || []).filter(u => matchesSearch(u, q));
+        renderChatUsers(filtered);
+    }, 120));
+    document.getElementById('chatPeerSelect')?.addEventListener('change', async function() {
+        activeChatPeerId = this.value || null;
+        await loadChatMessages();
+    });
+    document.getElementById('refreshChatUsersBtn')?.addEventListener('click', async () => { await refreshChatUsers(); });
+    document.getElementById('sendChatMessageBtn')?.addEventListener('click', async () => {
+        const input = document.getElementById('chatMessageInput');
+        const text = (input?.value || '').trim();
+        const fileInput = document.getElementById('chatFileInput');
+        const file = fileInput?.files?.[0] || null;
+        if (!activeChatPeerId || (!text && !file)) return;
+        const payload = { peer_id: activeChatPeerId, message_text: text, reply_to_id: currentReplyMessage ? currentReplyMessage.id : '' };
+        if (file) payload.chat_file = file;
+        const result = await sendAjaxRequest('send_message', payload);
+        if (result.success) {
+            input.value = '';
+            if (fileInput) fileInput.value = '';
+            currentReplyMessage = null;
+            const rp = document.getElementById('chatReplyPreview'); if (rp) { rp.classList.add('d-none'); rp.textContent = ''; }
+            await loadChatMessages();
+        }
+    });
+    document.getElementById('chatMessageInput')?.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter') {
+            e.preventDefault();
+            document.getElementById('sendChatMessageBtn')?.click();
+        }
+    });
+    setInterval(() => { if (activeChatPeerId) loadChatMessages(); }, 7000);
+
+    
+    document.getElementById('recordVoiceBtn')?.addEventListener('click', async () => {
+        try {
+            const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+            mediaRecorder = new MediaRecorder(stream);
+            voiceChunks = [];
+            mediaRecorder.ondataavailable = e => { if (e.data.size > 0) voiceChunks.push(e.data); };
+            mediaRecorder.onstop = () => {
+                const blob = new Blob(voiceChunks, { type: 'audio/webm' });
+                const file = new File([blob], `voice_${Date.now()}.webm`, { type: 'audio/webm' });
+                const fileInput = document.getElementById('chatFileInput');
+                const dt = new DataTransfer(); dt.items.add(file); fileInput.files = dt.files;
+                document.getElementById('recordVoiceBtn')?.classList.remove('d-none');
+                document.getElementById('stopVoiceBtn')?.classList.add('d-none');
+            };
+            mediaRecorder.start();
+            document.getElementById('recordVoiceBtn')?.classList.add('d-none');
+            document.getElementById('stopVoiceBtn')?.classList.remove('d-none');
+        } catch (e) {
+            showToast('تعذر بدء تسجيل الفويس.', 'danger');
+        }
+    });
+    document.getElementById('stopVoiceBtn')?.addEventListener('click', () => {
+        if (mediaRecorder && mediaRecorder.state !== 'inactive') mediaRecorder.stop();
+    });
+
+    document.getElementById('clearChatFileBtn')?.addEventListener('click', () => {
+        const f = document.getElementById('chatFileInput');
+        if (f) f.value = '';
+    });
+    document.getElementById('chatMessagesBox')?.addEventListener('click', async (e) => {
+        const del = e.target.closest('.btn-delete-chat-message');
+        if (del) {
+            const result = await sendAjaxRequest('delete_message', { message_id: del.dataset.id });
+            if (result.success) await loadChatMessages();
+            return;
+        }
+        const rep = e.target.closest('.btn-reply-chat-message');
+        if (rep) {
+            currentReplyMessage = { id: rep.dataset.id, text: rep.dataset.text };
+            const rp = document.getElementById('chatReplyPreview');
+            if (rp) { rp.classList.remove('d-none'); rp.textContent = `رد على: ${rep.dataset.text}`; }
+        }
+    });
+    document.getElementById('saveChatRetentionBtn')?.addEventListener('click', async () => {
+        const h = document.getElementById('chatRetentionHours')?.value || '0';
+        await sendAjaxRequest('set_chat_retention', { hours: h });
+    });
+    document.getElementById('runChatCleanupBtn')?.addEventListener('click', async () => {
+        const result = await sendAjaxRequest('run_chat_cleanup', {});
+        if (result.success) await loadChatMessages();
+    });
+
 
     // ====== التصدير والطباعة ======
     document.getElementById('exportLeavesPdf').addEventListener('click', () => exportTableToPdf(leavesTable, 'leaves.pdf', 'الإجازات الطبية'));
@@ -4364,48 +6062,68 @@ document.addEventListener('DOMContentLoaded', () => {
         });
     });
 
-    // ====== عرض إجازات المريض من المدفوعات ======
-    paymentsTable.addEventListener('click', async (e) => {
-        const target = e.target.closest('.btn-view-patient-leaves') || (e.target.classList.contains('btn-view-patient-leaves') ? e.target : null);
-        if (!target) return;
-        const patientId = target.dataset.patientId;
+    // ====== عرض إجازات المريض ======
+    async function openPatientLeaves(patientId) {
         showLoading();
         const result = await sendAjaxRequest('fetch_leaves_by_patient', { patient_id: patientId });
         hideLoading();
-        if (result.success && result.leaves) {
-            let html = '<div class="table-responsive"><table class="table table-bordered table-sm"><thead><tr><th>رمز الخدمة</th><th>تاريخ البداية</th><th>تاريخ النهاية</th><th>الأيام</th><th>الحالة</th><th>المبلغ</th><th>إجراء</th></tr></thead><tbody>';
-            result.leaves.forEach(lv => {
-                html += `<tr>
-                    <td>${htmlspecialchars(lv.service_code)}</td>
-                    <td>${htmlspecialchars(lv.start_date)}</td>
-                    <td>${htmlspecialchars(lv.end_date)}</td>
-                    <td>${lv.days_count}</td>
-                    <td>${lv.is_paid == 1 ? '<span class="badge bg-success">مدفوعة</span>' : '<span class="badge bg-danger">غير مدفوعة</span>'}</td>
-                    <td>${parseFloat(lv.payment_amount).toFixed(2)}</td>
-                    <td>
-                        ${lv.is_paid == 0 ? `<button class="btn btn-sm btn-success-custom btn-mark-paid-inline" data-leave-id="${lv.id}" data-amount="${lv.payment_amount}"><i class="bi bi-cash-coin"></i> تأكيد الدفع</button>` : '<span class="text-success">✓</span>'}
-                    </td>
-                </tr>`;
-            });
-            html += '</tbody></table></div>';
-            leaveDetailsContainer.innerHTML = html;
-            leaveDetailsModal.show();
 
-            // أزرار الدفع المباشر
-            leaveDetailsContainer.querySelectorAll('.btn-mark-paid-inline').forEach(btn => {
-                btn.addEventListener('click', async () => {
-                    showLoading();
-                    const res = await sendAjaxRequest('mark_leave_paid', { leave_id: btn.dataset.leaveId, amount: btn.dataset.amount });
-                    hideLoading();
-                    if (res.success) {
-                        showToast(res.message, 'success');
-                        leaveDetailsModal.hide();
-                        await fetchAllLeaves();
-                    }
-                });
-            });
+        if (!(result.success && result.leaves)) {
+            leaveDetailsContainer.innerHTML = '<div class="alert alert-danger text-center mb-0">تعذر جلب إجازات المريض.</div>';
+            leaveDetailsModal.show();
+            return;
         }
-    });
+
+        let html = '<div class="table-responsive"><table class="table table-bordered table-sm align-middle text-center"><thead><tr><th>رمز الخدمة</th><th>الطبيب</th><th>تاريخ الإصدار</th><th>بداية</th><th>نهاية</th><th>الأيام</th><th>النوع</th><th>الحالة</th><th>المبلغ</th><th>تاريخ الإضافة</th><th>إجراء</th></tr></thead><tbody>';
+        result.leaves.forEach(lv => {
+            html += `<tr>
+                <td><strong>${htmlspecialchars(lv.service_code || '')}</strong></td>
+                <td>${htmlspecialchars(lv.doctor_name || 'غير محدد')}<br><small class="text-muted">${htmlspecialchars(lv.doctor_title || '')}</small></td>
+                <td>${htmlspecialchars(lv.issue_date || '')}</td>
+                <td>${htmlspecialchars(lv.start_date || '')}</td>
+                <td>${htmlspecialchars(lv.end_date || '')}</td>
+                <td>${parseInt(lv.days_count || 0, 10)}</td>
+                <td>${lv.is_companion == 1 ? 'مرافق' : 'أساسي'}</td>
+                <td>${lv.is_paid == 1 ? '<span class="badge bg-success">مدفوعة</span>' : '<span class="badge bg-danger">غير مدفوعة</span>'}</td>
+                <td>${parseFloat(lv.payment_amount || 0).toFixed(2)}</td>
+                <td>${formatSaudiDateTime(lv.created_at)}</td>
+                <td>
+                    ${lv.is_paid == 0 ? `<button class="btn btn-sm btn-success-custom btn-mark-paid-inline" data-leave-id="${lv.id}" data-amount="${lv.payment_amount}"><i class="bi bi-cash-coin"></i> دفع</button>` : '<span class="text-success">✓</span>'}
+                </td>
+            </tr>`;
+        });
+        html += '</tbody></table></div>';
+
+        leaveDetailsContainer.innerHTML = html;
+        leaveDetailsModal.show();
+
+        leaveDetailsContainer.querySelectorAll('.btn-mark-paid-inline').forEach(btn => {
+            btn.addEventListener('click', () => {
+                document.getElementById('payConfirmMessage').textContent = 'تأكيد دفع هذه الإجازة؟ يمكنك تعديل السعر قبل التأكيد.';
+                document.getElementById('confirmPayAmount').value = btn.dataset.amount;
+                currentConfirmAction = async () => {
+                    const amount = document.getElementById('confirmPayAmount').value;
+                    showLoading();
+                    const payRes = await sendAjaxRequest('mark_leave_paid', { leave_id: btn.dataset.leaveId, amount: amount });
+                    hideLoading();
+                    if (payRes.success) {
+                        showToast(payRes.message, 'success');
+                        await fetchAllLeaves();
+                        await openPatientLeaves(patientId);
+                    }
+                };
+                payConfirmModal.show();
+            });
+        });
+    }
+
+    if (paymentsTable) {
+        paymentsTable.addEventListener('click', async (e) => {
+            const target = e.target.closest('.btn-view-patient-leaves') || (e.target.classList.contains('btn-view-patient-leaves') ? e.target : null);
+            if (!target) return;
+            await openPatientLeaves(target.dataset.patientId);
+        });
+    }
 
     // ====== عرض إجازة من الاستعلامات ======
     queriesTable.addEventListener('click', async (e) => {
@@ -4432,6 +6150,33 @@ document.addEventListener('DOMContentLoaded', () => {
         }
     });
 
+
+    document.getElementById('tab-admin-stats')?.addEventListener('click', () => {
+        fetchAdminStats();
+    });
+    document.getElementById('refreshAdminStats')?.addEventListener('click', () => {
+        fetchAdminStats();
+    });
+    document.getElementById('applyAdminStatsRange')?.addEventListener('click', () => {
+        fetchAdminStats();
+    });
+    document.getElementById('adminStatsRangePreset')?.addEventListener('change', (e) => {
+        const custom = e.target.value === 'custom';
+        document.getElementById('adminStatsFromDate')?.toggleAttribute('disabled', !custom);
+        document.getElementById('adminStatsToDate')?.toggleAttribute('disabled', !custom);
+        if (!custom) fetchAdminStats();
+    });
+
+    const toDateDefault = new Date();
+    const fromDateDefault = new Date();
+    fromDateDefault.setDate(toDateDefault.getDate() - 29);
+    const fromInput = document.getElementById('adminStatsFromDate');
+    const toInput = document.getElementById('adminStatsToDate');
+    if (fromInput) fromInput.value = fromDateDefault.toISOString().slice(0, 10);
+    if (toInput) toInput.value = toDateDefault.toISOString().slice(0, 10);
+    if (fromInput) fromInput.setAttribute('disabled', 'disabled');
+    if (toInput) toInput.setAttribute('disabled', 'disabled');
+
     // ====== التحميل الأولي ======
     applyAllCurrentFilters();
     updateDoctorSelects(currentTableData.doctors);
@@ -4455,3 +6200,4 @@ document.addEventListener('DOMContentLoaded', () => {
 </script>
 </body>
 </html>
+
