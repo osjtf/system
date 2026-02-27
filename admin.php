@@ -1355,8 +1355,52 @@ if (isset($_POST['action']) && $_POST['action'] !== 'login' && $_POST['action'] 
                 echo json_encode(['success' => false, 'message' => 'ليس لديك صلاحية.']);
                 break;
             }
-            purgeExpiredMessages($pdo);
-            echo json_encode(['success' => true, 'message' => 'تم تنظيف المحادثات حسب المدة.']);
+            $peerRaw = trim((string)($_POST['peer_id'] ?? ''));
+            $me = intval($_SESSION['admin_user_id'] ?? 0);
+            if ($me <= 0 || $peerRaw === '') {
+                echo json_encode(['success' => false, 'message' => 'حدد المحادثة أولاً.']);
+                break;
+            }
+            if ($peerRaw === '__monitor__') {
+                echo json_encode(['success' => false, 'message' => 'لا يمكن تنظيف وضع المراقبة. اختر محادثة فعلية.']);
+                break;
+            }
+
+            if ($peerRaw === '__all__') {
+                $sel = $pdo->prepare("SELECT id, file_path FROM user_messages WHERE deleted_at IS NULL AND chat_scope = 'global' AND receiver_id = ?");
+                $sel->execute([$me]);
+            } else {
+                $peerId = intval($peerRaw);
+                if ($peerId <= 0) {
+                    echo json_encode(['success' => false, 'message' => 'محادثة غير صالحة.']);
+                    break;
+                }
+                $sel = $pdo->prepare("SELECT id, file_path FROM user_messages WHERE deleted_at IS NULL AND chat_scope = 'private' AND ((sender_id = ? AND receiver_id = ?) OR (sender_id = ? AND receiver_id = ?))");
+                $sel->execute([$me, $peerId, $peerId, $me]);
+            }
+
+            $rows = $sel->fetchAll();
+            if (!$rows) {
+                echo json_encode(['success' => true, 'message' => 'لا توجد رسائل للحذف في هذه المحادثة.', 'deleted_count' => 0]);
+                break;
+            }
+            $ids = array_map(fn($r) => intval($r['id']), $rows);
+            $files = array_values(array_unique(array_filter(array_map(fn($r) => (string)($r['file_path'] ?? ''), $rows))));
+
+            $in = implode(',', array_fill(0, count($ids), '?'));
+            $params = array_merge([nowSaudi()], $ids);
+            $pdo->prepare("UPDATE user_messages SET deleted_at = ? WHERE id IN ($in)")->execute($params);
+
+            foreach ($files as $fp) {
+                $check = $pdo->prepare("SELECT COUNT(*) FROM user_messages WHERE file_path = ? AND deleted_at IS NULL");
+                $check->execute([$fp]);
+                if (intval($check->fetchColumn()) === 0) {
+                    $full = __DIR__ . '/' . ltrim($fp, '/');
+                    if (is_file($full)) @unlink($full);
+                }
+            }
+
+            echo json_encode(['success' => true, 'message' => 'تم تنظيف المحادثة الحالية بنجاح.', 'deleted_count' => count($ids)]);
             break;
 
 
@@ -1367,7 +1411,8 @@ if (isset($_POST['action']) && $_POST['action'] !== 'login' && $_POST['action'] 
                     'dark_text_color' => getSetting($pdo, 'dark_text_color', '#d8c8ff'),
                     'dark_glow_enabled' => getSetting($pdo, 'dark_glow_enabled', '1'),
                     'dark_glow_color' => getSetting($pdo, 'dark_glow_color', '#8b5cf6'),
-                    'font_family' => getSetting($pdo, 'ui_font_family', 'Cairo')
+                    'font_family' => getSetting($pdo, 'ui_font_family', 'Cairo'),
+                    'data_view_mode' => getSetting($pdo, 'ui_data_view_mode', 'table')
                 ]
             ]);
             break;
@@ -1383,11 +1428,15 @@ if (isset($_POST['action']) && $_POST['action'] !== 'login' && $_POST['action'] 
             $darkTextColor = sanitizeHexColor((string)($_POST['dark_text_color'] ?? '#d8c8ff'), '#d8c8ff');
             $darkGlowColor = sanitizeHexColor((string)($_POST['dark_glow_color'] ?? '#8b5cf6'), '#8b5cf6');
             $darkGlowEnabled = (($_POST['dark_glow_enabled'] ?? '1') === '1') ? '1' : '0';
+            $allowedViewModes = ['table','compact','cards','zebra'];
+            $dataViewMode = trim((string)($_POST['data_view_mode'] ?? 'table'));
+            if (!in_array($dataViewMode, $allowedViewModes, true)) $dataViewMode = 'table';
 
             setSetting($pdo, 'ui_font_family', $fontFamily);
             setSetting($pdo, 'dark_text_color', $darkTextColor);
             setSetting($pdo, 'dark_glow_color', $darkGlowColor);
             setSetting($pdo, 'dark_glow_enabled', $darkGlowEnabled);
+            setSetting($pdo, 'ui_data_view_mode', $dataViewMode);
 
             echo json_encode([
                 'success' => true,
@@ -1396,7 +1445,8 @@ if (isset($_POST['action']) && $_POST['action'] !== 'login' && $_POST['action'] 
                     'dark_text_color' => $darkTextColor,
                     'dark_glow_enabled' => $darkGlowEnabled,
                     'dark_glow_color' => $darkGlowColor,
-                    'font_family' => $fontFamily
+                    'font_family' => $fontFamily,
+                    'data_view_mode' => $dataViewMode
                 ]
             ]);
             break;
@@ -1593,6 +1643,8 @@ if (!in_array($uiFontFamily, $allowedUiFonts, true)) $uiFontFamily = 'Cairo';
 $uiDarkTextColor = sanitizeHexColor(getSetting($pdo, 'dark_text_color', '#d8c8ff') ?? '#d8c8ff', '#d8c8ff');
 $uiDarkGlowColor = sanitizeHexColor(getSetting($pdo, 'dark_glow_color', '#8b5cf6') ?? '#8b5cf6', '#8b5cf6');
 $uiDarkGlowEnabled = getSetting($pdo, 'dark_glow_enabled', '1') === '1' ? '1' : '0';
+$uiDataViewMode = getSetting($pdo, 'ui_data_view_mode', 'table') ?: 'table';
+if (!in_array($uiDataViewMode, ['table','compact','cards','zebra'], true)) $uiDataViewMode = 'table';
 ?>
 <!DOCTYPE html>
 <html lang="ar" dir="rtl">
@@ -2419,7 +2471,6 @@ $uiDarkGlowEnabled = getSetting($pdo, 'dark_glow_enabled', '1') === '1' ? '1' : 
         /* تخصيص لون بيانات الدارك مود (من الإعدادات) */
         .dark-mode .stat-value,
         .dark-mode .list-group-item,
-        .dark-mode .chat-text,
         .dark-mode .card-header,
         .dark-mode .modal-title {
             color: var(--dark-data-color) !important;
@@ -2462,6 +2513,51 @@ $uiDarkGlowEnabled = getSetting($pdo, 'dark_glow_enabled', '1') === '1' ? '1' : 
             content: attr(data-label);
             display: none;
         }
+
+        body.data-view-compact .table thead th { padding: 9px 8px; font-size: 11px; }
+        body.data-view-compact .table tbody td { padding: 7px 6px; font-size: 12px; }
+
+        body.data-view-cards .table.mobile-readable thead { display: none; }
+        body.data-view-cards .table.mobile-readable,
+        body.data-view-cards .table.mobile-readable tbody,
+        body.data-view-cards .table.mobile-readable tr,
+        body.data-view-cards .table.mobile-readable td {
+            display: block;
+            width: 100%;
+            text-align: right !important;
+        }
+        body.data-view-cards .table.mobile-readable tr {
+            margin-bottom: 10px;
+            border: 1px solid var(--border);
+            border-radius: 12px;
+            background: var(--card);
+            box-shadow: 0 8px 20px rgba(15,23,42,0.06);
+            padding: 8px;
+        }
+        body.data-view-cards .table.mobile-readable td {
+            border: none !important;
+            border-bottom: 1px dashed rgba(148,163,184,0.25) !important;
+            padding: 8px 8px 8px 44% !important;
+            position: relative;
+            min-height: 36px;
+        }
+        body.data-view-cards .table.mobile-readable td:last-child { border-bottom: none !important; }
+        body.data-view-cards .table.mobile-readable td::before {
+            display: block;
+            position: absolute;
+            inset-inline-end: 8px;
+            top: 8px;
+            width: 40%;
+            font-weight: 700;
+            color: #334155;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+
+        body.data-view-zebra .table tbody tr:nth-child(odd) { background: rgba(15,23,42,0.04); }
+        .dark-mode body.data-view-zebra .table tbody tr:nth-child(odd),
+        body.dark-mode.data-view-zebra .table tbody tr:nth-child(odd) { background: rgba(255,255,255,0.12); }
 
         /* ═══════════════ المراسلات بأسلوب تيليجرام ═══════════════ */
         .chat-layout {
@@ -2525,6 +2621,12 @@ $uiDarkGlowEnabled = getSetting($pdo, 'dark_glow_enabled', '1') === '1' ? '1' : 
 
         .chat-author { font-size: 11px; font-weight: 700; margin-bottom: 4px; opacity: 0.88; }
         .chat-text { white-space: pre-wrap; word-break: break-word; }
+
+        .chat-text { color: inherit !important; text-shadow: none !important; }
+        .msg-mine .chat-text { color: #111827 !important; }
+        .msg-other .chat-text { color: #f8fafc !important; }
+        .dark-mode .msg-mine .chat-text { color: #e2e8f0 !important; }
+        .dark-mode .msg-other .chat-text { color: #f8fafc !important; }
         .chat-time { font-size: 11px; opacity: 0.75; margin-top: 6px; }
         .chat-actions { display: flex; gap: 6px; margin-top: 8px; }
 
@@ -3304,10 +3406,6 @@ $uiDarkGlowEnabled = getSetting($pdo, 'dark_glow_enabled', '1') === '1' ? '1' : 
         <button class="btn btn-outline-light btn-sm" id="refreshAll" title="تحديث البيانات">
             <i class="bi bi-arrow-clockwise"></i>
         </button>
-        <?php if ($_SESSION['admin_role'] === 'admin'): ?>
-        <button class="btn btn-success btn-sm" id="markAllPaidBtn" title="جعل كل الإجازات مدفوعة"><i class="bi bi-check2-all"></i></button>
-        <button class="btn btn-warning btn-sm" id="resetAllPaymentsBtn" title="تصفير المدفوعات والمستحقات"><i class="bi bi-eraser"></i></button>
-        <?php endif; ?>
         <button class="btn btn-danger-custom btn-sm" id="logoutBtn" title="تسجيل الخروج">
             <i class="bi bi-box-arrow-right"></i> خروج
         </button>
@@ -4281,6 +4379,15 @@ $uiDarkGlowEnabled = getSetting($pdo, 'dark_glow_enabled', '1') === '1' ? '1' : 
                             <label class="form-check-label" for="settingDarkGlowEnabled">تفعيل الإشعاع للنص</label>
                         </div>
                     </div>
+                    <div class="col-md-6">
+                        <label class="form-label">طريقة عرض البيانات في الجداول</label>
+                        <select class="form-select" id="settingDataViewMode">
+                            <option value="table">جدول كلاسيكي (افتراضي)</option>
+                            <option value="compact">جدول مضغوط</option>
+                            <option value="cards">بطاقات بيانات</option>
+                            <option value="zebra">جدول بخطوط متبادلة واضحة</option>
+                        </select>
+                    </div>
                     <div class="col-12 d-flex gap-2 justify-content-end">
                         <button type="button" class="btn btn-outline-secondary" id="resetAppearanceSettings"><i class="bi bi-arrow-counterclockwise"></i> افتراضي</button>
                         <button type="submit" class="btn btn-gradient"><i class="bi bi-save2"></i> حفظ الإعدادات</button>
@@ -4399,7 +4506,8 @@ const INITIAL_UI_PREFERENCES = {
     dark_text_color: <?php echo json_encode($uiDarkTextColor); ?>,
     dark_glow_enabled: <?php echo json_encode($uiDarkGlowEnabled); ?>,
     dark_glow_color: <?php echo json_encode($uiDarkGlowColor); ?>,
-    font_family: <?php echo json_encode($uiFontFamily); ?>
+    font_family: <?php echo json_encode($uiFontFamily); ?>,
+    data_view_mode: <?php echo json_encode($uiDataViewMode); ?>
 };
 const IS_LOGGED_IN = <?php echo $loggedIn ? 'true' : 'false'; ?>;
 const REQUEST_URL = window.location.pathname;
@@ -6158,17 +6266,17 @@ document.addEventListener('DOMContentLoaded', () => {
         });
 
         document.getElementById('resetAppearanceSettings')?.addEventListener('click', () => {
-            const defaults = { dark_text_color: '#d8c8ff', dark_glow_color: '#8b5cf6', dark_glow_enabled: '1', font_family: 'Cairo' };
+            const defaults = { dark_text_color: '#d8c8ff', dark_glow_color: '#8b5cf6', dark_glow_enabled: '1', font_family: 'Cairo', data_view_mode: 'table' };
             hydrateSettingsForm(defaults);
             applyAppearancePreferences(defaults);
         });
 
         const presetMap = {
-            classic_violet: { dark_text_color: '#d8c8ff', dark_glow_color: '#8b5cf6', dark_glow_enabled: '1', font_family: 'Cairo' },
-            deep_ocean: { dark_text_color: '#dbeafe', dark_glow_color: '#2563eb', dark_glow_enabled: '1', font_family: 'IBM Plex Sans Arabic' },
-            emerald_glow: { dark_text_color: '#dcfce7', dark_glow_color: '#10b981', dark_glow_enabled: '1', font_family: 'Tajawal' },
-            sunset_gold: { dark_text_color: '#fde68a', dark_glow_color: '#f59e0b', dark_glow_enabled: '1', font_family: 'Changa' },
-            mono_clear: { dark_text_color: '#111827', dark_glow_color: '#111827', dark_glow_enabled: '0', font_family: 'Noto Kufi Arabic' }
+            classic_violet: { dark_text_color: '#d8c8ff', dark_glow_color: '#8b5cf6', dark_glow_enabled: '1', font_family: 'Cairo', data_view_mode: 'table' },
+            deep_ocean: { dark_text_color: '#dbeafe', dark_glow_color: '#2563eb', dark_glow_enabled: '1', font_family: 'IBM Plex Sans Arabic', data_view_mode: 'compact' },
+            emerald_glow: { dark_text_color: '#dcfce7', dark_glow_color: '#10b981', dark_glow_enabled: '1', font_family: 'Tajawal', data_view_mode: 'cards' },
+            sunset_gold: { dark_text_color: '#fde68a', dark_glow_color: '#f59e0b', dark_glow_enabled: '1', font_family: 'Changa', data_view_mode: 'zebra' },
+            mono_clear: { dark_text_color: '#111827', dark_glow_color: '#111827', dark_glow_enabled: '0', font_family: 'Noto Kufi Arabic', data_view_mode: 'table' }
         };
 
         document.getElementById('settingThemePreset')?.addEventListener('change', function() {
@@ -6178,13 +6286,18 @@ document.addEventListener('DOMContentLoaded', () => {
             applyAppearancePreferences(presetMap[key]);
         });
 
+        document.getElementById('settingDataViewMode')?.addEventListener('change', function() {
+            applyDataViewMode(this.value || 'table');
+        });
+
         document.querySelectorAll('.btn-color-mix').forEach(btn => {
             btn.addEventListener('click', () => {
                 const pref = {
                     dark_text_color: btn.dataset.text || '#d8c8ff',
                     dark_glow_color: btn.dataset.glow || '#8b5cf6',
                     dark_glow_enabled: btn.dataset.glowEnabled || '1',
-                    font_family: document.getElementById('settingFontFamily')?.value || 'Cairo'
+                    font_family: document.getElementById('settingFontFamily')?.value || 'Cairo',
+                    data_view_mode: document.getElementById('settingDataViewMode')?.value || 'table'
                 };
                 hydrateSettingsForm(pref);
                 applyAppearancePreferences(pref);
@@ -6214,16 +6327,25 @@ document.addEventListener('DOMContentLoaded', () => {
     let voiceChunks = [];
     let chatMaxUploadMB = 50;
 
+    function applyDataViewMode(mode = 'table') {
+        const allowed = ['table','compact','cards','zebra'];
+        const m = allowed.includes(mode) ? mode : 'table';
+        document.body.classList.remove('data-view-table','data-view-compact','data-view-cards','data-view-zebra');
+        document.body.classList.add(`data-view-${m}`);
+    }
+
     function applyAppearancePreferences(pref = {}) {
         const root = document.documentElement;
         const textColor = pref.dark_text_color || '#d8c8ff';
         const glowColor = pref.dark_glow_color || '#8b5cf6';
         const glowEnabled = String(pref.dark_glow_enabled || '1') === '1';
         const fontFamily = pref.font_family || 'Cairo';
+        const dataViewMode = pref.data_view_mode || 'table';
         root.style.setProperty('--dark-data-color', textColor);
         root.style.setProperty('--dark-glow-color', glowColor);
         root.style.setProperty('--dark-glow-shadow', glowEnabled ? `0 0 10px ${glowColor}` : 'none');
         root.style.setProperty('--app-font-family', `'${fontFamily}', sans-serif`);
+        applyDataViewMode(dataViewMode);
     }
 
     function hydrateSettingsForm(pref = {}) {
@@ -6231,10 +6353,12 @@ document.addEventListener('DOMContentLoaded', () => {
         const glow = document.getElementById('settingDarkGlowColor');
         const enabled = document.getElementById('settingDarkGlowEnabled');
         const font = document.getElementById('settingFontFamily');
+        const dataView = document.getElementById('settingDataViewMode');
         if (text) text.value = pref.dark_text_color || '#d8c8ff';
         if (glow) glow.value = pref.dark_glow_color || '#8b5cf6';
         if (enabled) enabled.checked = String(pref.dark_glow_enabled || '1') === '1';
         if (font) font.value = pref.font_family || 'Cairo';
+        if (dataView) dataView.value = pref.data_view_mode || 'table';
     }
 
     applyAppearancePreferences(INITIAL_UI_PREFERENCES);
@@ -6639,8 +6763,6 @@ document.addEventListener('DOMContentLoaded', () => {
         confirmModal.show();
     }
 
-    document.getElementById('markAllPaidBtn')?.addEventListener('click', triggerMarkAllPaidFlow);
-    document.getElementById('resetAllPaymentsBtn')?.addEventListener('click', triggerResetAllPaymentsFlow);
     document.getElementById('settingsMarkAllPaidBtn')?.addEventListener('click', triggerMarkAllPaidFlow);
     document.getElementById('settingsResetAllPaymentsBtn')?.addEventListener('click', triggerResetAllPaymentsFlow);
 
@@ -6699,10 +6821,26 @@ document.addEventListener('DOMContentLoaded', () => {
     
     document.getElementById('recordVoiceBtn')?.addEventListener('click', async () => {
         try {
+            if (!window.isSecureContext) {
+                showToast('تسجيل الفويس يحتاج اتصال آمن HTTPS أو localhost.', 'warning');
+                return;
+            }
             if (!window.MediaRecorder || !navigator.mediaDevices?.getUserMedia) {
                 showToast('المتصفح لا يدعم تسجيل الفويس مباشرة. يمكنك رفع ملف صوتي يدويًا.', 'warning');
                 return;
             }
+
+            if (navigator.permissions?.query) {
+                try {
+                    const perm = await navigator.permissions.query({ name: 'microphone' });
+                    if (perm.state === 'denied') {
+                        showToast('صلاحية الميكروفون مرفوضة مسبقاً. فعّلها من إعدادات المتصفح ثم أعد المحاولة.', 'warning');
+                        return;
+                    }
+                } catch (_) {}
+            }
+
+            // هذا السطر يجبر المتصفح على طلب الإذن عند عدم وجوده
             const stream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true } });
             const mimeCandidates = ['audio/webm;codecs=opus', 'audio/webm', 'audio/ogg;codecs=opus', 'audio/mp4'];
             const selectedMime = mimeCandidates.find(m => MediaRecorder.isTypeSupported(m)) || '';
@@ -6730,7 +6868,7 @@ document.addEventListener('DOMContentLoaded', () => {
             document.getElementById('recordVoiceBtn')?.classList.add('d-none');
             document.getElementById('stopVoiceBtn')?.classList.remove('d-none');
         } catch (e) {
-            showToast('تعذر بدء تسجيل الفويس. تأكد من السماح بالمايكروفون.', 'danger');
+            showToast('تعذر بدء تسجيل الفويس. وافق على إذن الميكروفون ثم أعد المحاولة.', 'danger');
         }
     });
     document.getElementById('stopVoiceBtn')?.addEventListener('click', () => {
@@ -6771,7 +6909,8 @@ document.addEventListener('DOMContentLoaded', () => {
         await sendAjaxRequest('set_chat_retention', { hours: h });
     });
     document.getElementById('runChatCleanupBtn')?.addEventListener('click', async () => {
-        const result = await sendAjaxRequest('run_chat_cleanup', {});
+        if (!activeChatPeerId) { showToast('اختر محادثة أولاً.', 'warning'); return; }
+        const result = await sendAjaxRequest('run_chat_cleanup', { peer_id: activeChatPeerId });
         if (result.success) await loadChatMessages();
     });
 
