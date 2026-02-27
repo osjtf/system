@@ -2205,6 +2205,32 @@ if ($loggedIn) {
             color: #94a3b8 !important;
         }
 
+
+        .dark-mode .table,
+        .dark-mode .table tbody td,
+        .dark-mode .table tbody td *,
+        .dark-mode .table-responsive,
+        .dark-mode .table-responsive .form-control,
+        .dark-mode .table-responsive .form-select {
+            color: #e5edf9;
+        }
+
+        .dark-mode .table tbody td small,
+        .dark-mode .table tbody td .small,
+        .dark-mode .table tbody td .text-muted {
+            color: #c3d2e8 !important;
+        }
+
+        .dark-mode .table .btn-outline-secondary {
+            color: #dbe7fb;
+            border-color: rgba(203,213,225,0.45);
+        }
+
+        .dark-mode .table .btn-outline-secondary:hover {
+            background: #64748b;
+            color: #fff;
+        }
+
         .table-hover tbody tr {
             transition: all var(--t-fast) var(--ease);
         }
@@ -2340,6 +2366,20 @@ if ($loggedIn) {
             background: linear-gradient(135deg, #4f46e5, #4338ca);
             border-color: rgba(165,180,252,0.4);
             color: #fff;
+        }
+
+
+        .dark-mode .chat-time,
+        .dark-mode .chat-author,
+        .dark-mode .chat-reply-preview,
+        .dark-mode #chatReplyPreview {
+            color: #cbd5e1 !important;
+        }
+
+        .dark-mode .msg-other .chat-time,
+        .dark-mode .msg-other .chat-author,
+        .dark-mode .msg-other .chat-reply-preview {
+            color: #eef2ff !important;
         }
 
         .no-results td {
@@ -2724,7 +2764,7 @@ if ($loggedIn) {
         .dark-mode li,
         .dark-mode td,
         .dark-mode th {
-            color: inherit;
+            color: #e2e8f0;
         }
 
         /* العناوين */
@@ -2829,6 +2869,13 @@ if ($loggedIn) {
             border-color: rgba(148,163,184,0.15);
         }
 
+
+        .dark-mode .list-group-item {
+            background: #131c2e;
+            border-color: rgba(148,163,184,0.18);
+            color: #e2e8f0;
+        }
+
         /* table inside dark mode */
         .dark-mode .table {
             color: #e2e8f0;
@@ -2919,6 +2966,21 @@ if ($loggedIn) {
                 white-space: nowrap;
                 overflow: hidden;
                 text-overflow: ellipsis;
+            }
+
+
+            .dark-mode .table.mobile-readable tr {
+                background: linear-gradient(145deg, #182337, #111827);
+                border-color: rgba(148,163,184,0.35);
+            }
+
+            .dark-mode .table.mobile-readable td {
+                color: #edf4ff !important;
+                border-bottom-color: rgba(148,163,184,0.28) !important;
+            }
+
+            .dark-mode .table.mobile-readable td::before {
+                color: #93c5fd;
             }
 
             #chatMessagesBox { height: 320px; }
