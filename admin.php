@@ -1171,11 +1171,11 @@ if (isset($_POST['action']) && $_POST['action'] !== 'login' && $_POST['action'] 
                     LEFT JOIN user_messages rp ON um.reply_to_id = rp.id
                     WHERE um.deleted_at IS NULL
                       AND um.chat_scope = 'global'
-                      AND (um.sender_id = ? OR um.receiver_id = ?)
+                      AND um.receiver_id = ?
                     ORDER BY um.created_at ASC, um.id ASC
                     LIMIT 800
                 ");
-                $stmt->execute([$me, $me]);
+                $stmt->execute([$me]);
                 $messages = $stmt->fetchAll();
                 $pdo->prepare("UPDATE user_messages SET is_read = 1 WHERE receiver_id = ? AND chat_scope = 'global' AND is_read = 0")
                     ->execute([$me]);
@@ -2366,6 +2366,85 @@ if ($loggedIn) {
             display: none;
         }
 
+
+        .table-view-switch .btn.active {
+            background: var(--primary);
+            border-color: var(--primary);
+            color: #fff;
+            box-shadow: 0 6px 18px rgba(99,102,241,0.35);
+        }
+
+        body.table-view-compact .table thead th { padding: 9px 7px; font-size: 11px; }
+        body.table-view-compact .table tbody td { padding: 7px 6px; font-size: 12px; }
+        body.table-view-compact .action-btn { padding: 2px 6px; font-size: 10px; }
+
+        body.table-view-cards .table.mobile-readable thead { display: none; }
+        body.table-view-cards .table.mobile-readable,
+        body.table-view-cards .table.mobile-readable tbody,
+        body.table-view-cards .table.mobile-readable tr,
+        body.table-view-cards .table.mobile-readable td {
+            display: block;
+            width: 100%;
+            text-align: right !important;
+        }
+        body.table-view-cards .table.mobile-readable tr {
+            margin-bottom: 10px;
+            border: 1px solid var(--border);
+            border-radius: 12px;
+            background: var(--card);
+            box-shadow: 0 8px 20px rgba(15,23,42,0.06);
+            padding: 8px;
+        }
+        body.table-view-cards .table.mobile-readable td {
+            border: none !important;
+            border-bottom: 1px dashed rgba(148,163,184,0.25) !important;
+            padding: 8px 8px 8px 44% !important;
+            position: relative;
+            min-height: 36px;
+        }
+        body.table-view-cards .table.mobile-readable td:last-child { border-bottom: none !important; }
+        body.table-view-cards .table.mobile-readable td::before {
+            display: block;
+            position: absolute;
+            inset-inline-end: 8px;
+            top: 8px;
+            width: 40%;
+            font-weight: 700;
+            color: var(--text-muted);
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+
+        .dark-mode .stat-value,
+        .dark-mode .table tbody td,
+        .dark-mode .table tbody td strong,
+        .dark-mode .table tbody td .badge,
+        .dark-mode .list-group-item,
+        .dark-mode .chat-text {
+            color: #d8c8ff !important;
+            text-shadow: 0 0 10px rgba(139,92,246,0.35);
+        }
+
+        .dark-mode .table thead th,
+        .dark-mode .card-header,
+        .dark-mode .modal-title {
+            color: #e9ddff !important;
+            text-shadow: 0 0 12px rgba(139,92,246,0.35);
+        }
+
+        .dark-mode .table tbody td a,
+        .dark-mode .table.mobile-readable td::before,
+        .dark-mode .text-muted {
+            color: #bda4ff !important;
+        }
+
+        .dark-mode.table-view-cards .table.mobile-readable tr,
+        .dark-mode body.table-view-cards .table.mobile-readable tr {
+            background: linear-gradient(145deg, #1b1532, #111827);
+            border-color: rgba(167,139,250,0.45);
+        }
+
         /* ═══════════════ المراسلات بأسلوب تيليجرام ═══════════════ */
         .chat-layout {
             background: linear-gradient(180deg, #f8fafc, #eef2ff);
@@ -3206,6 +3285,11 @@ if ($loggedIn) {
         <button class="btn btn-outline-light btn-sm" id="refreshAll" title="تحديث البيانات">
             <i class="bi bi-arrow-clockwise"></i>
         </button>
+        <div class="btn-group btn-group-sm table-view-switch" role="group" aria-label="طرق عرض الجداول">
+            <button class="btn btn-outline-light btn-table-view active" data-view="default" title="العرض الافتراضي"><i class="bi bi-table"></i></button>
+            <button class="btn btn-outline-light btn-table-view" data-view="compact" title="عرض مضغوط"><i class="bi bi-distribute-vertical"></i></button>
+            <button class="btn btn-outline-light btn-table-view" data-view="cards" title="عرض بطاقات"><i class="bi bi-grid-3x2-gap"></i></button>
+        </div>
         <?php if ($_SESSION['admin_role'] === 'admin'): ?>
         <button class="btn btn-success btn-sm" id="markAllPaidBtn" title="جعل كل الإجازات مدفوعة"><i class="bi bi-check2-all"></i></button>
         <button class="btn btn-warning btn-sm" id="resetAllPaymentsBtn" title="تصفير المدفوعات والمستحقات"><i class="bi bi-eraser"></i></button>
@@ -6353,6 +6437,20 @@ document.addEventListener('DOMContentLoaded', () => {
             confirmModal.show();
         });
     }
+
+    // أوضاع عرض الجداول
+    function applyTableViewMode(mode) {
+        const m = ['default', 'compact', 'cards'].includes(mode) ? mode : 'default';
+        document.body.classList.remove('table-view-default', 'table-view-compact', 'table-view-cards');
+        document.body.classList.add(`table-view-${m}`);
+        document.querySelectorAll('.btn-table-view').forEach(btn => btn.classList.toggle('active', btn.dataset.view === m));
+        localStorage.setItem('tableViewMode', m);
+    }
+    const savedTableMode = localStorage.getItem('tableViewMode') || 'default';
+    applyTableViewMode(savedTableMode);
+    document.querySelectorAll('.btn-table-view').forEach(btn => {
+        btn.addEventListener('click', () => applyTableViewMode(btn.dataset.view || 'default'));
+    });
 
     renderChatUsers(currentTableData.chat_users || []);
     refreshChatUsers();
