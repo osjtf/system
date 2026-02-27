@@ -1377,7 +1377,7 @@ if (isset($_POST['action']) && $_POST['action'] !== 'login' && $_POST['action'] 
                 echo json_encode(['success' => false, 'message' => 'ليس لديك صلاحية.']);
                 break;
             }
-            $allowedFonts = ['Cairo','Tajawal','Almarai','Changa','IBM Plex Sans Arabic'];
+            $allowedFonts = ['Cairo','Tajawal','Almarai','Changa','IBM Plex Sans Arabic','Noto Kufi Arabic','Readex Pro','El Messiri','Reem Kufi','Amiri'];
             $fontFamily = trim((string)($_POST['font_family'] ?? 'Cairo'));
             if (!in_array($fontFamily, $allowedFonts, true)) $fontFamily = 'Cairo';
             $darkTextColor = sanitizeHexColor((string)($_POST['dark_text_color'] ?? '#d8c8ff'), '#d8c8ff');
@@ -1588,7 +1588,7 @@ if ($loggedIn) {
 
 
 $uiFontFamily = getSetting($pdo, 'ui_font_family', 'Cairo');
-$allowedUiFonts = ['Cairo','Tajawal','Almarai','Changa','IBM Plex Sans Arabic'];
+$allowedUiFonts = ['Cairo','Tajawal','Almarai','Changa','IBM Plex Sans Arabic','Noto Kufi Arabic','Readex Pro','El Messiri','Reem Kufi','Amiri'];
 if (!in_array($uiFontFamily, $allowedUiFonts, true)) $uiFontFamily = 'Cairo';
 $uiDarkTextColor = sanitizeHexColor(getSetting($pdo, 'dark_text_color', '#d8c8ff') ?? '#d8c8ff', '#d8c8ff');
 $uiDarkGlowColor = sanitizeHexColor(getSetting($pdo, 'dark_glow_color', '#8b5cf6') ?? '#8b5cf6', '#8b5cf6');
@@ -1602,7 +1602,7 @@ $uiDarkGlowEnabled = getSetting($pdo, 'dark_glow_enabled', '1') === '1' ? '1' : 
     <title>لوحة تحكم الإجازات المرضية</title>
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.rtl.min.css" rel="stylesheet">
     <link href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.0/font/bootstrap-icons.css" rel="stylesheet">
-    <link href="https://fonts.googleapis.com/css2?family=Almarai:wght@300;400;700;800&family=Cairo:wght@300;400;500;600;700;800&family=Changa:wght@300;400;500;600;700;800&family=IBM+Plex+Sans+Arabic:wght@300;400;500;600;700&family=Tajawal:wght@300;400;500;700;800&display=swap" rel="stylesheet">
+    <link href="https://fonts.googleapis.com/css2?family=Almarai:wght@300;400;700;800&family=Amiri:wght@400;700&family=Cairo:wght@300;400;500;600;700;800&family=Changa:wght@300;400;500;600;700;800&family=El+Messiri:wght@400;500;600;700&family=IBM+Plex+Sans+Arabic:wght@300;400;500;600;700&family=Noto+Kufi+Arabic:wght@300;400;500;600;700&family=Readex+Pro:wght@300;400;500;600;700&family=Reem+Kufi:wght@400;500;600;700&family=Tajawal:wght@300;400;500;700;800&display=swap" rel="stylesheet">
     <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf-autotable/3.5.25/jspdf.plugin.autotable.min.js"></script>
@@ -4213,6 +4213,45 @@ $uiDarkGlowEnabled = getSetting($pdo, 'dark_glow_enabled', '1') === '1' ? '1' : 
                     <button class="btn btn-sm btn-outline-primary" id="openUsersManagerFromSettings"><i class="bi bi-people"></i> إدارة المستخدمين</button>
                 </div>
                 <form id="uiAppearanceForm" class="row g-3">
+                    <div class="col-12">
+                        <div class="card border-0" style="background: var(--bg-alt); border-radius: 12px;">
+                            <div class="card-body p-3">
+                                <div class="fw-bold mb-2"><i class="bi bi-sliders"></i> إجراءات مالية سريعة</div>
+                                <div class="d-flex flex-wrap gap-2">
+                                    <button type="button" class="btn btn-success" id="settingsMarkAllPaidBtn"><i class="bi bi-check2-all"></i> جعل كل الإجازات مدفوعة</button>
+                                    <button type="button" class="btn btn-warning" id="settingsResetAllPaymentsBtn"><i class="bi bi-eraser"></i> تصفير المدفوعات والمستحقات</button>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="col-12">
+                        <div class="card border-0" style="background: var(--bg-alt); border-radius: 12px;">
+                            <div class="card-body p-3">
+                                <div class="fw-bold mb-2"><i class="bi bi-magic"></i> أمزجة جاهزة للمظهر</div>
+                                <div class="row g-2">
+                                    <div class="col-md-6">
+                                        <select class="form-select" id="settingThemePreset">
+                                            <option value="">اختر مزيج جاهز...</option>
+                                            <option value="classic_violet">بنفسجي كلاسيك</option>
+                                            <option value="deep_ocean">أزرق محيطي</option>
+                                            <option value="emerald_glow">زمردي مشع</option>
+                                            <option value="sunset_gold">غروب ذهبي</option>
+                                            <option value="mono_clear">أسود واضح بدون إشعاع</option>
+                                        </select>
+                                    </div>
+                                    <div class="col-md-6 d-flex gap-2 flex-wrap" id="quickColorMixes">
+                                        <button type="button" class="btn btn-sm btn-outline-primary btn-color-mix" data-text="#d8c8ff" data-glow="#8b5cf6" data-glow-enabled="1">بنفسجي</button>
+                                        <button type="button" class="btn btn-sm btn-outline-info btn-color-mix" data-text="#dbeafe" data-glow="#3b82f6" data-glow-enabled="1">أزرق</button>
+                                        <button type="button" class="btn btn-sm btn-outline-success btn-color-mix" data-text="#dcfce7" data-glow="#10b981" data-glow-enabled="1">أخضر</button>
+                                        <button type="button" class="btn btn-sm btn-outline-warning btn-color-mix" data-text="#fde68a" data-glow="#f59e0b" data-glow-enabled="1">ذهبي</button>
+                                        <button type="button" class="btn btn-sm btn-outline-dark btn-color-mix" data-text="#111827" data-glow="#111827" data-glow-enabled="0">أسود واضح</button>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
                     <div class="col-md-6">
                         <label class="form-label">لون النص في الدارك مود</label>
                         <input type="color" class="form-control form-control-color" id="settingDarkTextColor" value="#d8c8ff">
@@ -4229,6 +4268,11 @@ $uiDarkGlowEnabled = getSetting($pdo, 'dark_glow_enabled', '1') === '1' ? '1' : 
                             <option value="Almarai">Almarai</option>
                             <option value="Changa">Changa</option>
                             <option value="IBM Plex Sans Arabic">IBM Plex Sans Arabic</option>
+                            <option value="Noto Kufi Arabic">Noto Kufi Arabic</option>
+                            <option value="Readex Pro">Readex Pro</option>
+                            <option value="El Messiri">El Messiri</option>
+                            <option value="Reem Kufi">Reem Kufi</option>
+                            <option value="Amiri">Amiri</option>
                         </select>
                     </div>
                     <div class="col-md-6 d-flex align-items-end">
@@ -6119,6 +6163,34 @@ document.addEventListener('DOMContentLoaded', () => {
             applyAppearancePreferences(defaults);
         });
 
+        const presetMap = {
+            classic_violet: { dark_text_color: '#d8c8ff', dark_glow_color: '#8b5cf6', dark_glow_enabled: '1', font_family: 'Cairo' },
+            deep_ocean: { dark_text_color: '#dbeafe', dark_glow_color: '#2563eb', dark_glow_enabled: '1', font_family: 'IBM Plex Sans Arabic' },
+            emerald_glow: { dark_text_color: '#dcfce7', dark_glow_color: '#10b981', dark_glow_enabled: '1', font_family: 'Tajawal' },
+            sunset_gold: { dark_text_color: '#fde68a', dark_glow_color: '#f59e0b', dark_glow_enabled: '1', font_family: 'Changa' },
+            mono_clear: { dark_text_color: '#111827', dark_glow_color: '#111827', dark_glow_enabled: '0', font_family: 'Noto Kufi Arabic' }
+        };
+
+        document.getElementById('settingThemePreset')?.addEventListener('change', function() {
+            const key = this.value;
+            if (!key || !presetMap[key]) return;
+            hydrateSettingsForm(presetMap[key]);
+            applyAppearancePreferences(presetMap[key]);
+        });
+
+        document.querySelectorAll('.btn-color-mix').forEach(btn => {
+            btn.addEventListener('click', () => {
+                const pref = {
+                    dark_text_color: btn.dataset.text || '#d8c8ff',
+                    dark_glow_color: btn.dataset.glow || '#8b5cf6',
+                    dark_glow_enabled: btn.dataset.glowEnabled || '1',
+                    font_family: document.getElementById('settingFontFamily')?.value || 'Cairo'
+                };
+                hydrateSettingsForm(pref);
+                applyAppearancePreferences(pref);
+            });
+        });
+
         document.getElementById('uiAppearanceForm')?.addEventListener('submit', async (e) => {
             e.preventDefault();
             const pref = {
@@ -6537,41 +6609,40 @@ document.addEventListener('DOMContentLoaded', () => {
         });
     }
 
-    const markAllPaidBtn = document.getElementById('markAllPaidBtn');
-    if (markAllPaidBtn) {
-        markAllPaidBtn.addEventListener('click', () => {
-            confirmMessage.textContent = 'سيتم جعل كل الإجازات النشطة مدفوعة. متابعة؟';
-            confirmYesBtn.textContent = 'نعم، نفّذ';
-            currentConfirmAction = async () => {
-                const result = await sendAjaxRequest('mark_all_leaves_paid', {});
-                if (result.success) {
-                    showToast(result.message, 'success');
-                    syncTableDataFromResult(result);
-                    applyAllCurrentFilters();
-                    if (result.stats) updateStats(result.stats);
-                }
-            };
-            confirmModal.show();
-        });
+    function triggerMarkAllPaidFlow() {
+        confirmMessage.textContent = 'سيتم جعل كل الإجازات النشطة مدفوعة. متابعة؟';
+        confirmYesBtn.textContent = 'نعم، نفّذ';
+        currentConfirmAction = async () => {
+            const result = await sendAjaxRequest('mark_all_leaves_paid', {});
+            if (result.success) {
+                showToast(result.message, 'success');
+                syncTableDataFromResult(result);
+                applyAllCurrentFilters();
+                if (result.stats) updateStats(result.stats);
+            }
+        };
+        confirmModal.show();
     }
 
-    const resetAllPaymentsBtn = document.getElementById('resetAllPaymentsBtn');
-    if (resetAllPaymentsBtn) {
-        resetAllPaymentsBtn.addEventListener('click', () => {
-            confirmMessage.textContent = 'سيتم تصفير كل المدفوعات والمستحقات. متابعة؟';
-            confirmYesBtn.textContent = 'نعم، صفّر';
-            currentConfirmAction = async () => {
-                const result = await sendAjaxRequest('reset_all_payments', {});
-                if (result.success) {
-                    showToast(result.message, 'success');
-                    syncTableDataFromResult(result);
-                    applyAllCurrentFilters();
-                    if (result.stats) updateStats(result.stats);
-                }
-            };
-            confirmModal.show();
-        });
+    function triggerResetAllPaymentsFlow() {
+        confirmMessage.textContent = 'سيتم تصفير كل المدفوعات والمستحقات. متابعة؟';
+        confirmYesBtn.textContent = 'نعم، صفّر';
+        currentConfirmAction = async () => {
+            const result = await sendAjaxRequest('reset_all_payments', {});
+            if (result.success) {
+                showToast(result.message, 'success');
+                syncTableDataFromResult(result);
+                applyAllCurrentFilters();
+                if (result.stats) updateStats(result.stats);
+            }
+        };
+        confirmModal.show();
     }
+
+    document.getElementById('markAllPaidBtn')?.addEventListener('click', triggerMarkAllPaidFlow);
+    document.getElementById('resetAllPaymentsBtn')?.addEventListener('click', triggerResetAllPaymentsFlow);
+    document.getElementById('settingsMarkAllPaidBtn')?.addEventListener('click', triggerMarkAllPaidFlow);
+    document.getElementById('settingsResetAllPaymentsBtn')?.addEventListener('click', triggerResetAllPaymentsFlow);
 
     renderChatUsers(currentTableData.chat_users || []);
     refreshChatUsers();
