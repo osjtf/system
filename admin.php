@@ -2195,6 +2195,16 @@ if ($loggedIn) {
             border-color: rgba(148,163,184,0.12);
         }
 
+        .dark-mode .table tbody td a,
+        .dark-mode .table tbody td .btn-link,
+        .dark-mode .table tbody td .text-dark {
+            color: #93c5fd !important;
+        }
+
+        .dark-mode .table .no-results td {
+            color: #94a3b8 !important;
+        }
+
         .table-hover tbody tr {
             transition: all var(--t-fast) var(--ease);
         }
@@ -2219,6 +2229,117 @@ if ($loggedIn) {
             border-radius: var(--radius-sm);
             overflow: auto;
             border: 1px solid var(--border);
+            -webkit-overflow-scrolling: touch;
+        }
+
+        .table.mobile-readable td::before {
+            content: attr(data-label);
+            display: none;
+        }
+
+        /* ═══════════════ المراسلات بأسلوب تيليجرام ═══════════════ */
+        .chat-layout {
+            background: linear-gradient(180deg, #f8fafc, #eef2ff);
+            border: 1px solid rgba(99,102,241,0.12);
+            border-radius: 18px;
+            padding: 10px;
+        }
+
+        #chatMessagesBox {
+            height: 380px;
+            overflow: auto;
+            border-radius: 14px;
+            padding: 14px;
+            background:
+                radial-gradient(circle at top right, rgba(99,102,241,0.08), transparent 35%),
+                radial-gradient(circle at bottom left, rgba(16,185,129,0.08), transparent 35%),
+                #f8fafc;
+        }
+
+        .chat-empty {
+            text-align: center;
+            color: var(--text-muted);
+            margin-top: 32px;
+            font-weight: 600;
+        }
+
+        .chat-message-row { display: flex; margin-bottom: 10px; }
+        .chat-message-row.mine { justify-content: flex-start; }
+        .chat-message-row.other { justify-content: flex-end; }
+
+        .msg-bubble {
+            max-width: min(82%, 520px);
+            padding: 10px 12px;
+            border-radius: 14px;
+            box-shadow: 0 8px 18px rgba(15,23,42,0.08);
+            position: relative;
+            border: 1px solid transparent;
+        }
+
+        .msg-mine {
+            background: linear-gradient(135deg, #ffffff, #f8fafc);
+            border-color: rgba(99,102,241,0.15);
+            border-bottom-left-radius: 6px;
+        }
+
+        .msg-other {
+            background: linear-gradient(135deg, #6366f1, #4f46e5);
+            color: #fff;
+            border-bottom-right-radius: 6px;
+        }
+
+        .msg-other .chat-author,
+        .msg-other .chat-time,
+        .msg-other .chat-reply-preview,
+        .msg-other .chat-text {
+            color: #f8fafc;
+        }
+
+        .chat-author { font-size: 11px; font-weight: 700; margin-bottom: 4px; opacity: 0.88; }
+        .chat-text { white-space: pre-wrap; word-break: break-word; }
+        .chat-time { font-size: 11px; opacity: 0.75; margin-top: 6px; }
+        .chat-actions { display: flex; gap: 6px; margin-top: 8px; }
+
+        .chat-reply-preview {
+            border-inline-start: 3px solid rgba(99,102,241,0.45);
+            padding-inline-start: 8px;
+            margin-bottom: 8px;
+            font-size: 11px;
+        }
+
+        .chat-media { margin-top: 8px; }
+        .chat-media img { max-width: 240px; border-radius: 10px; display: block; }
+        .chat-media audio { width: min(280px, 100%); }
+
+        .chat-input-wrap .input-group,
+        .chat-input-wrap .input-group-sm {
+            border-radius: 12px;
+            overflow: hidden;
+        }
+
+        .dark-mode .chat-layout {
+            background: linear-gradient(180deg, rgba(19,28,46,0.98), rgba(15,23,42,0.95));
+            border-color: rgba(148,163,184,0.2);
+        }
+
+        .dark-mode #chatMessagesBox {
+            background:
+                radial-gradient(circle at top right, rgba(99,102,241,0.2), transparent 35%),
+                radial-gradient(circle at bottom left, rgba(16,185,129,0.14), transparent 35%),
+                #0f172a;
+            border-color: rgba(148,163,184,0.2);
+        }
+
+        .dark-mode .msg-mine {
+            background: linear-gradient(135deg, #1e293b, #111827);
+            border-color: rgba(148,163,184,0.25);
+            color: #f1f5f9;
+        }
+
+        .dark-mode .msg-other {
+            background: linear-gradient(135deg, #4f46e5, #4338ca);
+            border-color: rgba(165,180,252,0.4);
+            color: #fff;
         }
 
         .no-results td {
@@ -2752,6 +2873,57 @@ if ($loggedIn) {
             .card-custom .card-body { padding: 16px; }
             .modal-content { border-radius: 18px; margin: 8px; }
             .nav-tabs .nav-link { padding: 8px 14px; font-size: 12px; }
+
+            .table.mobile-readable thead {
+                display: none;
+            }
+
+            .table.mobile-readable,
+            .table.mobile-readable tbody,
+            .table.mobile-readable tr,
+            .table.mobile-readable td {
+                display: block;
+                width: 100%;
+                text-align: right !important;
+            }
+
+            .table.mobile-readable tr {
+                margin-bottom: 10px;
+                border: 1px solid var(--border);
+                border-radius: 12px;
+                background: var(--card);
+                box-shadow: 0 8px 20px rgba(15,23,42,0.05);
+                padding: 8px;
+            }
+
+            .table.mobile-readable td {
+                border: none !important;
+                border-bottom: 1px dashed rgba(148,163,184,0.25) !important;
+                padding: 8px 8px 8px 44% !important;
+                position: relative;
+                min-height: 36px;
+            }
+
+            .table.mobile-readable td:last-child {
+                border-bottom: none !important;
+            }
+
+            .table.mobile-readable td::before {
+                display: block;
+                position: absolute;
+                inset-inline-end: 8px;
+                top: 8px;
+                width: 40%;
+                font-weight: 700;
+                color: var(--text-muted);
+                white-space: nowrap;
+                overflow: hidden;
+                text-overflow: ellipsis;
+            }
+
+            #chatMessagesBox { height: 320px; }
+            .msg-bubble { max-width: 90%; }
+            .chat-actions { flex-wrap: wrap; }
         }
 
         @media (max-width: 480px) {
@@ -2980,7 +3152,7 @@ if ($loggedIn) {
                         </div>
                     </div>
                     <div class="table-responsive">
-                        <table class="table table-bordered table-hover table-striped text-center" id="leavesTable">
+                        <table class="table table-bordered table-hover table-striped text-center mobile-readable" id="leavesTable">
                             <thead>
                                 <tr>
                                     <th>#</th>
@@ -3152,7 +3324,7 @@ if ($loggedIn) {
                         </div>
                     </div>
                     <div class="table-responsive">
-                        <table class="table table-bordered table-hover table-striped text-center" id="archivedTable">
+                        <table class="table table-bordered table-hover table-striped text-center mobile-readable" id="archivedTable">
                             <thead>
                                 <tr>
                                     <th>#</th>
@@ -3196,7 +3368,7 @@ if ($loggedIn) {
                         <div class="col-md-3"><button type="submit" class="btn btn-gradient w-100"><i class="bi bi-plus"></i> إضافة طبيب</button></div>
                     </form>
                     <div class="table-responsive">
-                        <table class="table table-bordered table-hover table-striped text-center" id="doctorsTable">
+                        <table class="table table-bordered table-hover table-striped text-center mobile-readable" id="doctorsTable">
                             <thead><tr><th>#</th><th>الاسم</th><th>المسمى</th><th>ملاحظة</th><th>التحكم</th></tr></thead>
                             <tbody></tbody>
                         </table>
@@ -3231,7 +3403,7 @@ if ($loggedIn) {
                         <div class="col-md-12"><button type="submit" class="btn btn-success-custom w-100"><i class="bi bi-plus"></i> إضافة مريض</button></div>
                     </form>
                     <div class="table-responsive">
-                        <table class="table table-bordered table-hover table-striped text-center" id="patientsTable">
+                        <table class="table table-bordered table-hover table-striped text-center mobile-readable" id="patientsTable">
                             <thead><tr><th>#</th><th>الاسم</th><th>رقم الهوية</th><th>الهاتف</th><th>المجلد</th><th>عدد الإجازات</th><th>مبلغ مدفوع</th><th>مبلغ مستحق</th><th>إجازات المريض</th><th>التحكم</th></tr></thead>
                             <tbody></tbody>
                         </table>
@@ -3261,8 +3433,10 @@ if ($loggedIn) {
                             <?php endif; ?>
                         </div>
                         <div class="col-lg-8">
-                            <div id="chatMessagesBox" class="border rounded p-2 mb-2" style="height:320px; overflow:auto; background:#f8f9fa;"></div>
+                            <div class="chat-layout">
+                            <div id="chatMessagesBox" class="mb-2"></div>
                             <div id="chatReplyPreview" class="small text-muted mb-2 d-none"></div>
+                            <div class="chat-input-wrap">
                             <div class="input-group mb-2">
                                 <input type="text" class="form-control" id="chatMessageInput" placeholder="اكتب رسالتك...">
                                 <button class="btn btn-gradient" id="sendChatMessageBtn"><i class="bi bi-send"></i> إرسال</button>
@@ -3272,6 +3446,8 @@ if ($loggedIn) {
                             <div class="input-group input-group-sm">
                                 <input type="file" class="form-control" id="chatFileInput" accept="image/*,audio/*,.pdf,.doc,.docx,.xls,.xlsx,.txt,.mp4">
                                 <button class="btn btn-outline-secondary" id="clearChatFileBtn" type="button">إلغاء المرفق</button>
+                            </div>
+                            </div>
                             </div>
                         </div>
                     </div>
@@ -3309,7 +3485,7 @@ if ($loggedIn) {
                         </div>
                     </div>
                     <div class="table-responsive">
-                        <table class="table table-bordered table-hover table-striped text-center" id="queriesTable">
+                        <table class="table table-bordered table-hover table-striped text-center mobile-readable" id="queriesTable">
                             <thead><tr><th>#</th><th>رمز الخدمة</th><th>المريض</th><th>الهوية</th><th>تاريخ الاستعلام</th><th>المصدر</th><th>التحكم</th></tr></thead>
                             <tbody></tbody>
                         </table>
@@ -3395,7 +3571,7 @@ if ($loggedIn) {
                         </div>
                     </div>
                     <div class="table-responsive">
-                        <table class="table table-bordered table-hover table-striped text-center" id="paymentsTable">
+                        <table class="table table-bordered table-hover table-striped text-center mobile-readable" id="paymentsTable">
                             <thead><tr><th>#</th><th>المريض</th><th>الإجمالي</th><th>مدفوعة</th><th>غير مدفوعة</th><th>مبلغ مدفوع</th><th>مبلغ مستحق</th><th>عرض</th></tr></thead>
                             <tbody></tbody>
                         </table>
@@ -3759,7 +3935,7 @@ if ($loggedIn) {
                 </div>
                 <!-- قائمة المستخدمين -->
                 <div class="table-responsive">
-                    <table class="table table-bordered table-hover table-striped text-center" id="usersTable">
+                    <table class="table table-bordered table-hover table-striped text-center mobile-readable" id="usersTable">
                         <thead><tr><th>#</th><th>اسم المستخدم</th><th>الاسم المعروض</th><th>الدور</th><th>الحالة</th><th>تاريخ الإنشاء</th><th>التحكم</th></tr></thead>
                         <tbody></tbody>
                     </table>
@@ -3812,7 +3988,7 @@ if ($loggedIn) {
                     <li class="list-group-item text-center text-muted">لا توجد جلسات.</li>
                 </ul>
                 <div class="table-responsive d-none">
-                    <table class="table table-bordered table-hover table-striped text-center" id="sessionsTable">
+                    <table class="table table-bordered table-hover table-striped text-center mobile-readable" id="sessionsTable">
                         <thead><tr><th>#</th><th>وقت الدخول</th><th>وقت الخروج</th><th>عنوان IP</th><th>المتصفح</th></tr></thead>
                         <tbody></tbody>
                     </table>
@@ -3933,10 +4109,21 @@ function updateTable(tableEl, data, rowGenerator) {
         return;
     }
     tbody.innerHTML = data.map(item => rowGenerator(item)).join('');
+    applyTableMobileLabels(tableEl);
     // ترقيم الصفوف
     tbody.querySelectorAll('tr').forEach((row, i) => {
         const numCell = row.querySelector('.row-num');
         if (numCell) numCell.textContent = i + 1;
+    });
+}
+
+function applyTableMobileLabels(tableEl) {
+    if (!tableEl) return;
+    const headers = Array.from(tableEl.querySelectorAll('thead th')).map(th => th.textContent.trim());
+    tableEl.querySelectorAll('tbody tr').forEach(tr => {
+        tr.querySelectorAll('td').forEach((td, idx) => {
+            td.setAttribute('data-label', headers[idx] || '');
+        });
     });
 }
 
@@ -5588,13 +5775,23 @@ document.addEventListener('DOMContentLoaded', () => {
         const me = String(<?php echo intval($_SESSION['admin_user_id'] ?? 0); ?>);
         const rows = (list || []).map(m => {
             const mine = String(m.sender_id) === me;
-            const fileHtml = m.file_path ? (m.message_type === 'image' ? `<div><img src="${htmlspecialchars(m.file_path)}" style="max-width:220px;border-radius:8px;"></div>` : (m.message_type === 'voice' ? `<audio controls src="${htmlspecialchars(m.file_path)}" style="max-width:240px;"></audio>` : `<a href="${htmlspecialchars(m.file_path)}" target="_blank" class="btn btn-sm btn-outline-primary mt-1"><i class="bi bi-paperclip"></i> ${htmlspecialchars(m.file_name || 'ملف')}</a>`)) : '';
-            const replyHtml = m.reply_to_id ? `<div class="small text-muted border-end pe-2 mb-1"><i class="bi bi-reply"></i> ${htmlspecialchars(m.reply_message_text || m.reply_file_name || 'رسالة')}</div>` : '';
-            const delBtn = mine || IS_ADMIN ? `<button class="btn btn-sm btn-outline-danger mt-1 btn-delete-chat-message" data-id="${m.id}"><i class="bi bi-trash3"></i></button>` : '';
-            const replyBtn = `<button class="btn btn-sm btn-outline-secondary mt-1 btn-reply-chat-message" data-id="${m.id}" data-text="${htmlspecialchars(m.message_text || m.file_name || 'رسالة')}"><i class="bi bi-reply"></i></button>`;
-            return `<div class="mb-2 d-flex ${mine ? 'justify-content-start' : 'justify-content-end'}"><div class="msg-bubble ${mine ? 'msg-mine' : 'msg-other'}" style="max-width:78%;"><div class="small fw-bold">${htmlspecialchars(m.sender_name || '')}</div>${replyHtml}<div>${htmlspecialchars(m.message_text || '')}</div>${fileHtml}<div class="small text-muted">${formatSaudiDateTime(m.created_at)}</div>${replyBtn} ${delBtn}</div></div>`;
+            const fileHtml = m.file_path
+                ? (m.message_type === 'image'
+                    ? `<div class="chat-media"><img src="${htmlspecialchars(m.file_path)}" alt="مرفق صورة"></div>`
+                    : (m.message_type === 'voice'
+                        ? `<div class="chat-media"><audio controls src="${htmlspecialchars(m.file_path)}"></audio></div>`
+                        : `<div class="chat-media"><a href="${htmlspecialchars(m.file_path)}" target="_blank" class="btn btn-sm btn-outline-primary"><i class="bi bi-paperclip"></i> ${htmlspecialchars(m.file_name || 'ملف')}</a></div>`))
+                : '';
+            const replyHtml = m.reply_to_id
+                ? `<div class="chat-reply-preview"><i class="bi bi-reply"></i> ${htmlspecialchars(m.reply_message_text || m.reply_file_name || 'رسالة')}</div>`
+                : '';
+            const delBtn = mine || IS_ADMIN
+                ? `<button class="btn btn-sm btn-outline-danger btn-delete-chat-message" data-id="${m.id}" title="حذف"><i class="bi bi-trash3"></i></button>`
+                : '';
+            const replyBtn = `<button class="btn btn-sm btn-outline-secondary btn-reply-chat-message" data-id="${m.id}" data-text="${htmlspecialchars(m.message_text || m.file_name || 'رسالة')}" title="رد"><i class="bi bi-reply"></i></button>`;
+            return `<div class="chat-message-row ${mine ? 'mine' : 'other'}"><div class="msg-bubble ${mine ? 'msg-mine' : 'msg-other'}"><div class="chat-author">${htmlspecialchars(m.sender_name || '')}</div>${replyHtml}<div class="chat-text">${htmlspecialchars(m.message_text || '')}</div>${fileHtml}<div class="chat-time">${formatSaudiDateTime(m.created_at)}</div><div class="chat-actions">${replyBtn}${delBtn}</div></div></div>`;
         }).join('');
-        box.innerHTML = rows || '<div class="text-muted text-center mt-4">لا توجد رسائل بعد.</div>';
+        box.innerHTML = rows || '<div class="chat-empty">لا توجد رسائل بعد. ابدأ محادثة الآن ✨</div>';
         box.scrollTop = box.scrollHeight;
     }
 
@@ -6200,4 +6397,3 @@ document.addEventListener('DOMContentLoaded', () => {
 </script>
 </body>
 </html>
-
