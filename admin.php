@@ -3451,16 +3451,13 @@ if (!in_array($uiDataViewMode, ['table','compact','cards','zebra'], true)) $uiDa
             <div class="stat-value sensitive-value" id="stat-paid-amount" data-raw="<?php echo number_format($stats['paid_amount'], 2, '.', ''); ?>">*****</div>
             <div class="stat-label d-flex align-items-center justify-content-center gap-2">
                 <span>المبالغ المدفوعة</span>
-                <button type="button" class="btn-sensitive-toggle" data-target="stat-paid-amount" title="إظهار/إخفاء"><i class="bi bi-eye"></i></button>
+                <button type="button" class="btn-sensitive-toggle" id="toggleSensitiveAmounts" title="إظهار/إخفاء"><i class="bi bi-eye"></i></button>
             </div>
         </div>
         <div class="stat-card">
             <div class="stat-icon"><i class="bi bi-cash"></i></div>
             <div class="stat-value sensitive-value" id="stat-unpaid-amount" data-raw="<?php echo number_format($stats['unpaid_amount'], 2, '.', ''); ?>">*****</div>
-            <div class="stat-label d-flex align-items-center justify-content-center gap-2">
-                <span>المبالغ المستحقة</span>
-                <button type="button" class="btn-sensitive-toggle" data-target="stat-unpaid-amount" title="إظهار/إخفاء"><i class="bi bi-eye"></i></button>
-            </div>
+            <div class="stat-label">المبالغ المستحقة</div>
         </div>
         <?php endif; ?>
     </div>
@@ -6351,6 +6348,18 @@ document.addEventListener('DOMContentLoaded', () => {
         const m = allowed.includes(mode) ? mode : 'table';
         document.body.classList.remove('data-view-table','data-view-compact','data-view-cards','data-view-zebra');
         document.body.classList.add(`data-view-${m}`);
+        // إعادة رسم سريعة للتأكد من تطبيق النمط على كل الجداول مباشرة
+        try { applyAllCurrentFilters(); } catch (_) {}
+        [
+            document.getElementById('leavesTable'),
+            document.getElementById('archivedTable'),
+            document.getElementById('doctorsTable'),
+            document.getElementById('patientsTable'),
+            document.getElementById('queriesTable'),
+            document.getElementById('paymentsTable'),
+            document.getElementById('usersTable'),
+            document.getElementById('sessionsTable')
+        ].forEach(t => { if (t) applyTableMobileLabels(t); });
     }
 
     function applyAppearancePreferences(pref = {}) {
@@ -6844,18 +6853,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 showToast('المتصفح لا يدعم تسجيل الفويس مباشرة. يمكنك رفع ملف صوتي يدويًا.', 'warning');
                 return;
             }
-
-            if (navigator.permissions?.query) {
-                try {
-                    const perm = await navigator.permissions.query({ name: 'microphone' });
-                    if (perm.state === 'denied') {
-                        showToast('صلاحية الميكروفون مرفوضة مسبقاً. فعّلها من إعدادات المتصفح ثم أعد المحاولة.', 'warning');
-                        return;
-                    }
-                } catch (_) {}
-            }
-
-            // هذا السطر يجبر المتصفح على طلب الإذن عند عدم وجوده
+            // هذا السطر يطلب إذن الميكروفون مباشرة من المتصفح
             const stream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true } });
             const mimeCandidates = ['audio/webm;codecs=opus', 'audio/webm', 'audio/ogg;codecs=opus', 'audio/mp4'];
             const selectedMime = mimeCandidates.find(m => MediaRecorder.isTypeSupported(m)) || '';
@@ -7071,16 +7069,15 @@ document.addEventListener('DOMContentLoaded', () => {
     // ====== التحميل الأولي ======
     applyAllCurrentFilters();
     refreshSensitiveValuesMask();
-    document.querySelectorAll('.btn-sensitive-toggle').forEach(btn => {
-        btn.addEventListener('click', () => {
-            const targetId = btn.dataset.target;
-            const target = targetId ? document.getElementById(targetId) : null;
-            if (!target) return;
-            const next = target.dataset.visible === '1' ? '0' : '1';
-            target.dataset.visible = next;
-            btn.innerHTML = next === '1' ? '<i class="bi bi-eye-slash"></i>' : '<i class="bi bi-eye"></i>';
-            refreshSensitiveValuesMask();
-        });
+    document.getElementById('toggleSensitiveAmounts')?.addEventListener('click', (e) => {
+        const paidEl = document.getElementById('stat-paid-amount');
+        const unpaidEl = document.getElementById('stat-unpaid-amount');
+        if (!paidEl || !unpaidEl) return;
+        const next = paidEl.dataset.visible === '1' ? '0' : '1';
+        paidEl.dataset.visible = next;
+        unpaidEl.dataset.visible = next;
+        e.currentTarget.innerHTML = next === '1' ? '<i class="bi bi-eye-slash"></i>' : '<i class="bi bi-eye"></i>';
+        refreshSensitiveValuesMask();
     });
     updateDoctorSelects(currentTableData.doctors);
     updatePatientSelects(currentTableData.patients);
