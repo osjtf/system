@@ -124,6 +124,10 @@ ensureColumn($pdo, 'user_messages', 'mime_type', "VARCHAR(150) NULL AFTER file_p
 ensureColumn($pdo, 'user_messages', 'file_size', "INT NULL AFTER mime_type");
 ensureColumn($pdo, 'user_messages', 'deleted_at', "DATETIME NULL AFTER is_read");
 ensureColumn($pdo, 'user_messages', 'reply_to_id', "INT NULL AFTER deleted_at");
+ensureColumn($pdo, 'user_messages', 'chat_scope', "ENUM('private','global') DEFAULT 'private' AFTER reply_to_id");
+ensureColumn($pdo, 'user_messages', 'broadcast_group_id', "VARCHAR(50) NULL AFTER chat_scope");
+ensureIndex($pdo, 'user_messages', 'idx_user_messages_scope_created', 'chat_scope, created_at');
+ensureIndex($pdo, 'user_messages', 'idx_user_messages_broadcast', 'broadcast_group_id');
 ensureIndex($pdo, 'user_messages', 'idx_user_messages_deleted', 'deleted_at');
 
 // إنشاء مستخدم افتراضي إذا لم يوجد أي مستخدم
@@ -1107,20 +1111,80 @@ if (isset($_POST['action']) && $_POST['action'] !== 'login' && $_POST['action'] 
 
         case 'fetch_chat_users':
             $currentUserId = intval($_SESSION['admin_user_id'] ?? 0);
-            if ($_SESSION['admin_role'] === 'admin') {
-                $stmt = $pdo->prepare("SELECT id, username, display_name, role FROM admin_users WHERE is_active = 1 AND id <> ? ORDER BY display_name");
-                $stmt->execute([$currentUserId]);
-            } else {
-                $stmt = $pdo->prepare("SELECT id, username, display_name, role FROM admin_users WHERE is_active = 1 AND role = 'admin' ORDER BY display_name");
-                $stmt->execute();
-            }
-            echo json_encode(['success' => true, 'users' => $stmt->fetchAll(), 'chat_retention_hours' => intval(getSetting($pdo, 'chat_retention_hours', '0')), 'unread_messages_count' => getUnreadMessagesCount($pdo, intval($_SESSION['admin_user_id'] ?? 0))]);
+            $stmt = $pdo->prepare("SELECT id, username, display_name, role FROM admin_users WHERE is_active = 1 AND id <> ? ORDER BY display_name");
+            $stmt->execute([$currentUserId]);
+            $users = $stmt->fetchAll();
+            $maxUploadMB = 50;
+            echo json_encode([
+                'success' => true,
+                'users' => $users,
+                'chat_retention_hours' => intval(getSetting($pdo, 'chat_retention_hours', '0')),
+                'unread_messages_count' => getUnreadMessagesCount($pdo, intval($_SESSION['admin_user_id'] ?? 0)),
+                'max_upload_mb' => $maxUploadMB
+            ]);
             break;
 
         case 'fetch_messages':
-            $peerId = intval($_POST['peer_id'] ?? 0);
+            $peerRaw = trim((string)($_POST['peer_id'] ?? ''));
             $me = intval($_SESSION['admin_user_id'] ?? 0);
-            if ($peerId <= 0 || $me <= 0) {
+            $isAdmin = (($_SESSION['admin_role'] ?? 'user') === 'admin');
+            if ($peerRaw === '' || $me <= 0) {
+                echo json_encode(['success' => false, 'message' => 'مستخدم غير صالح.']);
+                break;
+            }
+
+            if ($peerRaw === '__monitor__') {
+                if (!$isAdmin) {
+                    echo json_encode(['success' => false, 'message' => 'ليس لديك صلاحية.']);
+                    break;
+                }
+                $stmt = $pdo->query("
+                    SELECT um.*,
+                           s.display_name AS sender_name,
+                           r.display_name AS receiver_name,
+                           rp.message_text AS reply_message_text,
+                           rp.file_name AS reply_file_name
+                    FROM user_messages um
+                    LEFT JOIN admin_users s ON um.sender_id = s.id
+                    LEFT JOIN admin_users r ON um.receiver_id = r.id
+                    LEFT JOIN user_messages rp ON um.reply_to_id = rp.id
+                    WHERE um.deleted_at IS NULL
+                      AND (um.chat_scope = 'private' OR (um.chat_scope = 'global' AND um.receiver_id = um.sender_id))
+                    ORDER BY um.created_at DESC, um.id DESC
+                    LIMIT 800
+                ");
+                $messages = array_reverse($stmt->fetchAll());
+                echo json_encode(['success' => true, 'messages' => $messages]);
+                break;
+            }
+
+            if ($peerRaw === '__all__') {
+                $stmt = $pdo->prepare("
+                    SELECT um.*,
+                           s.display_name AS sender_name,
+                           r.display_name AS receiver_name,
+                           rp.message_text AS reply_message_text,
+                           rp.file_name AS reply_file_name
+                    FROM user_messages um
+                    LEFT JOIN admin_users s ON um.sender_id = s.id
+                    LEFT JOIN admin_users r ON um.receiver_id = r.id
+                    LEFT JOIN user_messages rp ON um.reply_to_id = rp.id
+                    WHERE um.deleted_at IS NULL
+                      AND um.chat_scope = 'global'
+                      AND (um.sender_id = ? OR um.receiver_id = ?)
+                    ORDER BY um.created_at ASC, um.id ASC
+                    LIMIT 800
+                ");
+                $stmt->execute([$me, $me]);
+                $messages = $stmt->fetchAll();
+                $pdo->prepare("UPDATE user_messages SET is_read = 1 WHERE receiver_id = ? AND chat_scope = 'global' AND is_read = 0")
+                    ->execute([$me]);
+                echo json_encode(['success' => true, 'messages' => $messages]);
+                break;
+            }
+
+            $peerId = intval($peerRaw);
+            if ($peerId <= 0) {
                 echo json_encode(['success' => false, 'message' => 'مستخدم غير صالح.']);
                 break;
             }
@@ -1134,48 +1198,57 @@ if (isset($_POST['action']) && $_POST['action'] !== 'login' && $_POST['action'] 
                 LEFT JOIN admin_users s ON um.sender_id = s.id
                 LEFT JOIN admin_users r ON um.receiver_id = r.id
                 LEFT JOIN user_messages rp ON um.reply_to_id = rp.id
-                WHERE um.deleted_at IS NULL AND ((um.sender_id = ? AND um.receiver_id = ?)
+                WHERE um.deleted_at IS NULL AND um.chat_scope = 'private' AND ((um.sender_id = ? AND um.receiver_id = ?)
                    OR (um.sender_id = ? AND um.receiver_id = ?))
                 ORDER BY um.created_at ASC, um.id ASC
                 LIMIT 500
             ");
             $stmt->execute([$me, $peerId, $peerId, $me]);
             $messages = $stmt->fetchAll();
-            $pdo->prepare("UPDATE user_messages SET is_read = 1 WHERE receiver_id = ? AND sender_id = ? AND is_read = 0")
+            $pdo->prepare("UPDATE user_messages SET is_read = 1 WHERE receiver_id = ? AND sender_id = ? AND chat_scope = 'private' AND is_read = 0")
                 ->execute([$me, $peerId]);
             echo json_encode(['success' => true, 'messages' => $messages]);
             break;
 
         case 'send_message':
-            $peerId = intval($_POST['peer_id'] ?? 0);
+            $peerRaw = trim((string)($_POST['peer_id'] ?? ''));
             $messageText = trim($_POST['message_text'] ?? '');
             $me = intval($_SESSION['admin_user_id'] ?? 0);
-            if ($peerId <= 0 || $me <= 0) {
+            if ($peerRaw === '' || $me <= 0) {
                 echo json_encode(['success' => false, 'message' => 'بيانات الرسالة غير مكتملة.']);
-                break;
-            }
-            $check = $pdo->prepare("SELECT id FROM admin_users WHERE id = ? AND is_active = 1");
-            $check->execute([$peerId]);
-            if (!$check->fetch()) {
-                echo json_encode(['success' => false, 'message' => 'المستخدم غير موجود أو غير مفعل.']);
                 break;
             }
 
             $replyToId = intval($_POST['reply_to_id'] ?? 0);
             $messageType = 'text';
             $fileName = null; $filePath = null; $mimeType = null; $fileSize = null;
-            if (!empty($_FILES['chat_file']) && intval($_FILES['chat_file']['error']) === UPLOAD_ERR_OK) {
+
+            if (!empty($_FILES['chat_file'])) {
                 $upload = $_FILES['chat_file'];
-                $ext = strtolower(pathinfo($upload['name'], PATHINFO_EXTENSION));
-                $allowed = ['jpg','jpeg','png','gif','webp','pdf','doc','docx','xls','xlsx','txt','mp3','wav','ogg','m4a','aac','mp4'];
-                if (!in_array($ext, $allowed)) {
+                $errCode = intval($upload['error'] ?? UPLOAD_ERR_NO_FILE);
+                if ($errCode !== UPLOAD_ERR_OK) {
+                    $msg = match ($errCode) {
+                        UPLOAD_ERR_INI_SIZE, UPLOAD_ERR_FORM_SIZE => 'حجم الملف أكبر من الحد المسموح في الخادم. حاول ملفًا أصغر.',
+                        UPLOAD_ERR_PARTIAL => 'تم رفع جزء من الملف فقط. أعد المحاولة.',
+                        UPLOAD_ERR_NO_TMP_DIR => 'مجلد الرفع المؤقت غير متاح في الخادم.',
+                        UPLOAD_ERR_CANT_WRITE => 'تعذر حفظ الملف على الخادم.',
+                        UPLOAD_ERR_EXTENSION => 'تم إيقاف الرفع بسبب إضافة في الخادم.',
+                        default => 'تعذر رفع الملف.'
+                    };
+                    echo json_encode(['success' => false, 'message' => $msg]);
+                    break;
+                }
+                $ext = strtolower(pathinfo($upload['name'] ?? '', PATHINFO_EXTENSION));
+                $allowed = ['jpg','jpeg','png','gif','webp','pdf','doc','docx','xls','xlsx','txt','mp3','wav','ogg','m4a','aac','mp4','webm'];
+                if (!in_array($ext, $allowed, true)) {
                     echo json_encode(['success' => false, 'message' => 'نوع الملف غير مسموح.']);
                     break;
                 }
                 $mimeType = mime_content_type($upload['tmp_name']) ?: 'application/octet-stream';
                 $fileSize = intval($upload['size'] ?? 0);
-                if ($fileSize > 15 * 1024 * 1024) {
-                    echo json_encode(['success' => false, 'message' => 'حجم الملف كبير (الحد 15MB).']);
+                $maxBytes = 50 * 1024 * 1024;
+                if ($fileSize > $maxBytes) {
+                    echo json_encode(['success' => false, 'message' => 'حجم الملف كبير (الحد 50MB).']);
                     break;
                 }
                 $dir = __DIR__ . '/uploads/chat';
@@ -1196,7 +1269,34 @@ if (isset($_POST['action']) && $_POST['action'] !== 'login' && $_POST['action'] 
                 break;
             }
 
-            $ins = $pdo->prepare("INSERT INTO user_messages (sender_id, receiver_id, message_text, message_type, file_name, file_path, mime_type, file_size, reply_to_id, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)");
+            if ($peerRaw === '__all__') {
+                $usersStmt = $pdo->query("SELECT id FROM admin_users WHERE is_active = 1");
+                $userIds = array_map(fn($r) => intval($r['id']), $usersStmt->fetchAll());
+                if (!$userIds) {
+                    echo json_encode(['success' => false, 'message' => 'لا يوجد مستخدمون متاحون.']);
+                    break;
+                }
+                $broadcastId = 'g_' . date('YmdHis') . '_' . bin2hex(random_bytes(4));
+                $ins = $pdo->prepare("INSERT INTO user_messages (sender_id, receiver_id, message_text, message_type, file_name, file_path, mime_type, file_size, reply_to_id, chat_scope, broadcast_group_id, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'global', ?, ?)");
+                foreach ($userIds as $uid) {
+                    $ins->execute([$me, $uid, $messageText, $messageType, $fileName, $filePath, $mimeType, $fileSize, $replyToId > 0 ? $replyToId : null, $broadcastId, nowSaudi()]);
+                }
+                echo json_encode(['success' => true, 'message' => 'تم إرسال الرسالة إلى مجموعة الكل.']);
+                break;
+            }
+
+            $peerId = intval($peerRaw);
+            if ($peerId <= 0) {
+                echo json_encode(['success' => false, 'message' => 'المستخدم غير صالح.']);
+                break;
+            }
+            $check = $pdo->prepare("SELECT id FROM admin_users WHERE id = ? AND is_active = 1");
+            $check->execute([$peerId]);
+            if (!$check->fetch()) {
+                echo json_encode(['success' => false, 'message' => 'المستخدم غير موجود أو غير مفعل.']);
+                break;
+            }
+            $ins = $pdo->prepare("INSERT INTO user_messages (sender_id, receiver_id, message_text, message_type, file_name, file_path, mime_type, file_size, reply_to_id, chat_scope, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'private', ?)");
             $ins->execute([$me, $peerId, $messageText, $messageType, $fileName, $filePath, $mimeType, $fileSize, $replyToId > 0 ? $replyToId : null, nowSaudi()]);
             echo json_encode(['success' => true, 'message' => 'تم إرسال الرسالة.']);
             break;
@@ -1205,7 +1305,7 @@ if (isset($_POST['action']) && $_POST['action'] !== 'login' && $_POST['action'] 
             $messageId = intval($_POST['message_id'] ?? 0);
             $me = intval($_SESSION['admin_user_id'] ?? 0);
             $role = $_SESSION['admin_role'] ?? 'user';
-            $stmt = $pdo->prepare("SELECT sender_id, file_path, deleted_at FROM user_messages WHERE id = ? LIMIT 1");
+            $stmt = $pdo->prepare("SELECT sender_id, file_path, deleted_at, chat_scope, broadcast_group_id FROM user_messages WHERE id = ? LIMIT 1");
             $stmt->execute([$messageId]);
             $msg = $stmt->fetch();
             if (!$msg || !empty($msg['deleted_at'])) {
@@ -1220,7 +1320,12 @@ if (isset($_POST['action']) && $_POST['action'] !== 'login' && $_POST['action'] 
                 $full = __DIR__ . '/' . ltrim($msg['file_path'], '/');
                 if (is_file($full)) @unlink($full);
             }
-            $pdo->prepare("UPDATE user_messages SET deleted_at = ? WHERE id = ?")->execute([nowSaudi(), $messageId]);
+            if (($msg['chat_scope'] ?? 'private') === 'global' && !empty($msg['broadcast_group_id'])) {
+                $pdo->prepare("UPDATE user_messages SET deleted_at = ? WHERE broadcast_group_id = ? AND deleted_at IS NULL")
+                    ->execute([nowSaudi(), $msg['broadcast_group_id']]);
+            } else {
+                $pdo->prepare("UPDATE user_messages SET deleted_at = ? WHERE id = ?")->execute([nowSaudi(), $messageId]);
+            }
             echo json_encode(['success' => true, 'message' => 'تم حذف الرسالة.']);
             break;
 
@@ -1418,10 +1523,8 @@ if ($loggedIn) {
     $stats = getStats($pdo);
     
     $users = [];
-    $chat_users_stmt = ($_SESSION['admin_role'] === 'admin')
-        ? $pdo->prepare("SELECT id, username, display_name, role FROM admin_users WHERE is_active = 1 AND id <> ? ORDER BY display_name")
-        : $pdo->prepare("SELECT id, username, display_name, role FROM admin_users WHERE is_active = 1 AND role = 'admin' ORDER BY display_name");
-    if ($_SESSION['admin_role'] === 'admin') { $chat_users_stmt->execute([intval($_SESSION['admin_user_id'])]); } else { $chat_users_stmt->execute(); }
+    $chat_users_stmt = $pdo->prepare("SELECT id, username, display_name, role FROM admin_users WHERE is_active = 1 AND id <> ? ORDER BY display_name");
+    $chat_users_stmt->execute([intval($_SESSION['admin_user_id'])]);
     $chat_users = $chat_users_stmt->fetchAll();
     if ($_SESSION['admin_role'] === 'admin') {
         $users = $pdo->query("SELECT id, username, display_name, role, is_active, created_at FROM admin_users ORDER BY created_at DESC")->fetchAll();
@@ -2300,6 +2403,8 @@ if ($loggedIn) {
             box-shadow: 0 8px 18px rgba(15,23,42,0.08);
             position: relative;
             border: 1px solid transparent;
+            overflow: hidden;
+            word-break: break-word;
         }
 
         .msg-mine {
@@ -2333,9 +2438,35 @@ if ($loggedIn) {
             font-size: 11px;
         }
 
-        .chat-media { margin-top: 8px; }
-        .chat-media img { max-width: 240px; border-radius: 10px; display: block; }
-        .chat-media audio { width: min(280px, 100%); }
+        .chat-media { margin-top: 8px; max-width: 100%; }
+        .chat-media img {
+            max-width: 100%;
+            width: auto;
+            max-height: 320px;
+            border-radius: 10px;
+            display: block;
+            object-fit: cover;
+            cursor: zoom-in;
+            border: 1px solid rgba(148,163,184,0.25);
+        }
+        .chat-media audio { width: min(300px, 100%); display: block; }
+        .chat-media .chat-file-link {
+            max-width: 100%;
+            display: inline-flex;
+            white-space: normal;
+            align-items: center;
+            gap: 4px;
+            text-align: right;
+        }
+
+        #chatImageModal .modal-content { background: rgba(2,6,23,0.95); border-color: rgba(148,163,184,0.3); }
+        #chatImageModal .modal-body { text-align: center; }
+        #chatImageModal img {
+            max-width: 100%;
+            max-height: 80vh;
+            object-fit: contain;
+            border-radius: 12px;
+        }
 
         .chat-input-wrap .input-group,
         .chat-input-wrap .input-group-sm {
@@ -2986,6 +3117,8 @@ if ($loggedIn) {
             #chatMessagesBox { height: 320px; }
             .msg-bubble { max-width: 90%; }
             .chat-actions { flex-wrap: wrap; }
+            .chat-media img { width: 100%; max-width: 100%; }
+            .chat-media .chat-file-link { width: 100%; justify-content: center; }
         }
 
         @media (max-width: 480px) {
@@ -3506,7 +3639,7 @@ if ($loggedIn) {
                                 <button class="btn btn-outline-secondary d-none" id="stopVoiceBtn" type="button"><i class="bi bi-stop-fill"></i> إيقاف</button>
                             </div>
                             <div class="input-group input-group-sm">
-                                <input type="file" class="form-control" id="chatFileInput" accept="image/*,audio/*,.pdf,.doc,.docx,.xls,.xlsx,.txt,.mp4">
+                                <input type="file" class="form-control" id="chatFileInput" accept="image/*,audio/*,.pdf,.doc,.docx,.xls,.xlsx,.txt,.mp4,.webm">
                                 <button class="btn btn-outline-secondary" id="clearChatFileBtn" type="button">إلغاء المرفق</button>
                             </div>
                             </div>
@@ -5813,19 +5946,27 @@ document.addEventListener('DOMContentLoaded', () => {
     let currentReplyMessage = null;
     let mediaRecorder = null;
     let voiceChunks = [];
+    let chatMaxUploadMB = 50;
 
     function renderChatUsers(list) {
         const sel = document.getElementById('chatPeerSelect');
         if (!sel) return;
         const users = Array.isArray(list) ? list : [];
-        if (users.length === 0) {
+        const options = [
+            { id: '__all__', label: '💬 مجموعة الكل (جروب عام)' },
+            ...(IS_ADMIN ? [{ id: '__monitor__', label: '🛡️ مراقبة كل محادثات المستخدمين' }] : [])
+        ];
+        users.forEach(u => options.push({ id: String(u.id), label: `${u.display_name} (${u.username})` }));
+
+        const prev = activeChatPeerId || sel.value;
+        if (options.length === 0) {
             sel.innerHTML = '<option value="">لا يوجد مستخدمون</option>';
             activeChatPeerId = null;
             return;
         }
-        const prev = activeChatPeerId || sel.value;
-        sel.innerHTML = '<option value="">اختر المستخدم</option>' + users.map(u => `<option value="${u.id}">${htmlspecialchars(u.display_name)} (${htmlspecialchars(u.username)})</option>`).join('');
-        if (prev && users.some(u => String(u.id) === String(prev))) {
+
+        sel.innerHTML = '<option value="">اختر جهة التواصل</option>' + options.map(o => `<option value="${htmlspecialchars(o.id)}">${htmlspecialchars(o.label)}</option>`).join('');
+        if (prev && options.some(o => String(o.id) === String(prev))) {
             sel.value = prev;
             activeChatPeerId = String(prev);
         }
@@ -5835,14 +5976,21 @@ document.addEventListener('DOMContentLoaded', () => {
         const box = document.getElementById('chatMessagesBox');
         if (!box) return;
         const me = String(<?php echo intval($_SESSION['admin_user_id'] ?? 0); ?>);
+        const monitorMode = activeChatPeerId === '__monitor__';
         const rows = (list || []).map(m => {
             const mine = String(m.sender_id) === me;
+            const rowClass = monitorMode ? 'mine' : (mine ? 'mine' : 'other');
+            const bubbleClass = monitorMode ? 'msg-mine' : (mine ? 'msg-mine' : 'msg-other');
+            const isGlobal = (m.chat_scope || '') === 'global';
+            const scopeBadge = isGlobal ? '<span class="badge bg-info ms-1">مجموعة الكل</span>' : '<span class="badge bg-secondary ms-1">خاص</span>';
+            const peerTarget = isGlobal ? 'مجموعة الكل' : (m.receiver_name || '');
+            const peerInfo = monitorMode ? `<span class="small text-muted">${htmlspecialchars(m.sender_name || '')} → ${htmlspecialchars(peerTarget)}</span>${scopeBadge}` : '';
             const fileHtml = m.file_path
                 ? (m.message_type === 'image'
-                    ? `<div class="chat-media"><img src="${htmlspecialchars(m.file_path)}" alt="مرفق صورة"></div>`
+                    ? `<div class="chat-media"><img class="chat-image-preview" src="${htmlspecialchars(m.file_path)}" alt="مرفق صورة"></div>`
                     : (m.message_type === 'voice'
-                        ? `<div class="chat-media"><audio controls src="${htmlspecialchars(m.file_path)}"></audio></div>`
-                        : `<div class="chat-media"><a href="${htmlspecialchars(m.file_path)}" target="_blank" class="btn btn-sm btn-outline-primary"><i class="bi bi-paperclip"></i> ${htmlspecialchars(m.file_name || 'ملف')}</a></div>`))
+                        ? `<div class="chat-media"><audio controls preload="metadata" src="${htmlspecialchars(m.file_path)}"></audio></div>`
+                        : `<div class="chat-media"><a href="${htmlspecialchars(m.file_path)}" target="_blank" class="btn btn-sm btn-outline-primary chat-file-link"><i class="bi bi-paperclip"></i> ${htmlspecialchars(m.file_name || 'ملف')}</a></div>`))
                 : '';
             const replyHtml = m.reply_to_id
                 ? `<div class="chat-reply-preview"><i class="bi bi-reply"></i> ${htmlspecialchars(m.reply_message_text || m.reply_file_name || 'رسالة')}</div>`
@@ -5851,7 +5999,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 ? `<button class="btn btn-sm btn-outline-danger btn-delete-chat-message" data-id="${m.id}" title="حذف"><i class="bi bi-trash3"></i></button>`
                 : '';
             const replyBtn = `<button class="btn btn-sm btn-outline-secondary btn-reply-chat-message" data-id="${m.id}" data-text="${htmlspecialchars(m.message_text || m.file_name || 'رسالة')}" title="رد"><i class="bi bi-reply"></i></button>`;
-            return `<div class="chat-message-row ${mine ? 'mine' : 'other'}"><div class="msg-bubble ${mine ? 'msg-mine' : 'msg-other'}"><div class="chat-author">${htmlspecialchars(m.sender_name || '')}</div>${replyHtml}<div class="chat-text">${htmlspecialchars(m.message_text || '')}</div>${fileHtml}<div class="chat-time">${formatSaudiDateTime(m.created_at)}</div><div class="chat-actions">${replyBtn}${delBtn}</div></div></div>`;
+            return `<div class="chat-message-row ${rowClass}"><div class="msg-bubble ${bubbleClass}"><div class="chat-author">${htmlspecialchars(m.sender_name || '')}</div>${peerInfo}${replyHtml}<div class="chat-text">${htmlspecialchars(m.message_text || '')}</div>${fileHtml}<div class="chat-time">${formatSaudiDateTime(m.created_at)}</div><div class="chat-actions">${replyBtn}${delBtn}</div></div></div>`;
         }).join('');
         box.innerHTML = rows || '<div class="chat-empty">لا توجد رسائل بعد. ابدأ محادثة الآن ✨</div>';
         box.scrollTop = box.scrollHeight;
@@ -5863,6 +6011,7 @@ document.addEventListener('DOMContentLoaded', () => {
             currentTableData.chat_users = result.users || [];
             renderChatUsers(currentTableData.chat_users);
             const rh = document.getElementById('chatRetentionHours'); if (rh && result.chat_retention_hours !== undefined) rh.value = result.chat_retention_hours;
+            if (result.max_upload_mb) chatMaxUploadMB = parseInt(result.max_upload_mb, 10) || 50;
             if (result.unread_messages_count !== undefined) updateChatUnreadBadge(result.unread_messages_count);
         }
     }
@@ -6216,6 +6365,11 @@ document.addEventListener('DOMContentLoaded', () => {
     }, 120));
     document.getElementById('chatPeerSelect')?.addEventListener('change', async function() {
         activeChatPeerId = this.value || null;
+        const readOnly = activeChatPeerId === '__monitor__';
+        document.getElementById('chatMessageInput')?.toggleAttribute('disabled', readOnly);
+        document.getElementById('chatFileInput')?.toggleAttribute('disabled', readOnly);
+        document.getElementById('sendChatMessageBtn')?.toggleAttribute('disabled', readOnly);
+        document.getElementById('recordVoiceBtn')?.toggleAttribute('disabled', readOnly);
         await loadChatMessages();
     });
     document.getElementById('refreshChatUsersBtn')?.addEventListener('click', async () => { await refreshChatUsers(); });
@@ -6225,6 +6379,14 @@ document.addEventListener('DOMContentLoaded', () => {
         const fileInput = document.getElementById('chatFileInput');
         const file = fileInput?.files?.[0] || null;
         if (!activeChatPeerId || (!text && !file)) return;
+        if (activeChatPeerId === '__monitor__') {
+            showToast('وضع المراقبة للقراءة فقط.', 'warning');
+            return;
+        }
+        if (file && file.size > (chatMaxUploadMB * 1024 * 1024)) {
+            showToast(`حجم الملف أكبر من ${chatMaxUploadMB}MB.`, 'danger');
+            return;
+        }
         const payload = { peer_id: activeChatPeerId, message_text: text, reply_to_id: currentReplyMessage ? currentReplyMessage.id : '' };
         if (file) payload.chat_file = file;
         const result = await sendAjaxRequest('send_message', payload);
@@ -6247,23 +6409,38 @@ document.addEventListener('DOMContentLoaded', () => {
     
     document.getElementById('recordVoiceBtn')?.addEventListener('click', async () => {
         try {
-            const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-            mediaRecorder = new MediaRecorder(stream);
+            if (!window.MediaRecorder || !navigator.mediaDevices?.getUserMedia) {
+                showToast('المتصفح لا يدعم تسجيل الفويس مباشرة. يمكنك رفع ملف صوتي يدويًا.', 'warning');
+                return;
+            }
+            const stream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true } });
+            const mimeCandidates = ['audio/webm;codecs=opus', 'audio/webm', 'audio/ogg;codecs=opus', 'audio/mp4'];
+            const selectedMime = mimeCandidates.find(m => MediaRecorder.isTypeSupported(m)) || '';
+            mediaRecorder = selectedMime ? new MediaRecorder(stream, { mimeType: selectedMime }) : new MediaRecorder(stream);
             voiceChunks = [];
-            mediaRecorder.ondataavailable = e => { if (e.data.size > 0) voiceChunks.push(e.data); };
+            mediaRecorder.ondataavailable = e => { if (e.data && e.data.size > 0) voiceChunks.push(e.data); };
+            mediaRecorder.onerror = () => { showToast('حدث خطأ أثناء تسجيل الفويس.', 'danger'); };
             mediaRecorder.onstop = () => {
-                const blob = new Blob(voiceChunks, { type: 'audio/webm' });
-                const file = new File([blob], `voice_${Date.now()}.webm`, { type: 'audio/webm' });
+                const mime = mediaRecorder.mimeType || selectedMime || 'audio/webm';
+                const ext = mime.includes('ogg') ? 'ogg' : (mime.includes('mp4') ? 'mp4' : 'webm');
+                const blob = new Blob(voiceChunks, { type: mime });
+                if (!blob.size) {
+                    showToast('لم يتم التقاط أي صوت، حاول مرة أخرى.', 'warning');
+                    return;
+                }
+                const file = new File([blob], `voice_${Date.now()}.${ext}`, { type: mime });
                 const fileInput = document.getElementById('chatFileInput');
                 const dt = new DataTransfer(); dt.items.add(file); fileInput.files = dt.files;
+                stream.getTracks().forEach(t => t.stop());
                 document.getElementById('recordVoiceBtn')?.classList.remove('d-none');
                 document.getElementById('stopVoiceBtn')?.classList.add('d-none');
+                showToast('تم تجهيز ملف الفويس، اضغط إرسال.', 'success');
             };
-            mediaRecorder.start();
+            mediaRecorder.start(250);
             document.getElementById('recordVoiceBtn')?.classList.add('d-none');
             document.getElementById('stopVoiceBtn')?.classList.remove('d-none');
         } catch (e) {
-            showToast('تعذر بدء تسجيل الفويس.', 'danger');
+            showToast('تعذر بدء تسجيل الفويس. تأكد من السماح بالمايكروفون.', 'danger');
         }
     });
     document.getElementById('stopVoiceBtn')?.addEventListener('click', () => {
@@ -6286,6 +6463,17 @@ document.addEventListener('DOMContentLoaded', () => {
             currentReplyMessage = { id: rep.dataset.id, text: rep.dataset.text };
             const rp = document.getElementById('chatReplyPreview');
             if (rp) { rp.classList.remove('d-none'); rp.textContent = `رد على: ${rep.dataset.text}`; }
+            return;
+        }
+        const img = e.target.closest('.chat-image-preview');
+        if (img) {
+            const modalEl = document.getElementById('chatImageModal');
+            const modalImg = document.getElementById('chatImageModalImg');
+            if (modalEl && modalImg) {
+                modalImg.src = img.src;
+                const modal = bootstrap.Modal.getOrCreateInstance(modalEl);
+                modal.show();
+            }
         }
     });
     document.getElementById('saveChatRetentionBtn')?.addEventListener('click', async () => {
@@ -6457,5 +6645,21 @@ document.addEventListener('DOMContentLoaded', () => {
 
 }); // نهاية DOMContentLoaded
 </script>
+
+<!-- عرض الصورة بحجم كبير -->
+<div class="modal fade" id="chatImageModal" tabindex="-1" aria-hidden="true">
+  <div class="modal-dialog modal-dialog-centered modal-xl">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h5 class="modal-title"><i class="bi bi-image"></i> معاينة الصورة</h5>
+        <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+      </div>
+      <div class="modal-body">
+        <img id="chatImageModalImg" src="" alt="chat image preview">
+      </div>
+    </div>
+  </div>
+</div>
+
 </body>
 </html>
