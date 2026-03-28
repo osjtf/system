@@ -22,7 +22,7 @@ date_default_timezone_set('Asia/Riyadh');
 header('X-Frame-Options: SAMEORIGIN');
 header('X-Content-Type-Options: nosniff');
 header('Referrer-Policy: strict-origin-when-cross-origin');
-header('Permissions-Policy: geolocation=(), microphone=(), camera=()');
+header('Permissions-Policy: geolocation=(), microphone=(self), camera=()');
 
 // ======================== إعدادات قاعدة البيانات ========================
 $db_host = 'mysql.railway.internal';
@@ -124,6 +124,10 @@ ensureColumn($pdo, 'user_messages', 'mime_type', "VARCHAR(150) NULL AFTER file_p
 ensureColumn($pdo, 'user_messages', 'file_size', "INT NULL AFTER mime_type");
 ensureColumn($pdo, 'user_messages', 'deleted_at', "DATETIME NULL AFTER is_read");
 ensureColumn($pdo, 'user_messages', 'reply_to_id', "INT NULL AFTER deleted_at");
+ensureColumn($pdo, 'user_messages', 'chat_scope', "ENUM('private','global') DEFAULT 'private' AFTER reply_to_id");
+ensureColumn($pdo, 'user_messages', 'broadcast_group_id', "VARCHAR(50) NULL AFTER chat_scope");
+ensureIndex($pdo, 'user_messages', 'idx_user_messages_scope_created', 'chat_scope, created_at');
+ensureIndex($pdo, 'user_messages', 'idx_user_messages_broadcast', 'broadcast_group_id');
 ensureIndex($pdo, 'user_messages', 'idx_user_messages_deleted', 'deleted_at');
 
 // إنشاء مستخدم افتراضي إذا لم يوجد أي مستخدم
@@ -202,6 +206,16 @@ function getSetting(PDO $pdo, string $key, ?string $default = null): ?string {
 function setSetting(PDO $pdo, string $key, string $value): void {
     $stmt = $pdo->prepare("INSERT INTO app_settings (setting_key, setting_value) VALUES (?, ?) ON DUPLICATE KEY UPDATE setting_value = VALUES(setting_value)");
     $stmt->execute([$key, $value]);
+}
+
+function sanitizeHexColor(string $color, string $fallback): string {
+    $color = trim($color);
+    if (preg_match('/^#([0-9a-fA-F]{6})$/', $color)) return strtolower($color);
+    if (preg_match('/^#([0-9a-fA-F]{3})$/', $color)) {
+        $c = strtolower($color);
+        return '#' . $c[1] . $c[1] . $c[2] . $c[2] . $c[3] . $c[3];
+    }
+    return $fallback;
 }
 
 function getUnreadMessagesCount(PDO $pdo, int $userId): int {
@@ -1107,20 +1121,80 @@ if (isset($_POST['action']) && $_POST['action'] !== 'login' && $_POST['action'] 
 
         case 'fetch_chat_users':
             $currentUserId = intval($_SESSION['admin_user_id'] ?? 0);
-            if ($_SESSION['admin_role'] === 'admin') {
-                $stmt = $pdo->prepare("SELECT id, username, display_name, role FROM admin_users WHERE is_active = 1 AND id <> ? ORDER BY display_name");
-                $stmt->execute([$currentUserId]);
-            } else {
-                $stmt = $pdo->prepare("SELECT id, username, display_name, role FROM admin_users WHERE is_active = 1 AND role = 'admin' ORDER BY display_name");
-                $stmt->execute();
-            }
-            echo json_encode(['success' => true, 'users' => $stmt->fetchAll(), 'chat_retention_hours' => intval(getSetting($pdo, 'chat_retention_hours', '0')), 'unread_messages_count' => getUnreadMessagesCount($pdo, intval($_SESSION['admin_user_id'] ?? 0))]);
+            $stmt = $pdo->prepare("SELECT id, username, display_name, role FROM admin_users WHERE is_active = 1 AND id <> ? ORDER BY display_name");
+            $stmt->execute([$currentUserId]);
+            $users = $stmt->fetchAll();
+            $maxUploadMB = 50;
+            echo json_encode([
+                'success' => true,
+                'users' => $users,
+                'chat_retention_hours' => intval(getSetting($pdo, 'chat_retention_hours', '0')),
+                'unread_messages_count' => getUnreadMessagesCount($pdo, intval($_SESSION['admin_user_id'] ?? 0)),
+                'max_upload_mb' => $maxUploadMB
+            ]);
             break;
 
         case 'fetch_messages':
-            $peerId = intval($_POST['peer_id'] ?? 0);
+            $peerRaw = trim((string)($_POST['peer_id'] ?? ''));
             $me = intval($_SESSION['admin_user_id'] ?? 0);
-            if ($peerId <= 0 || $me <= 0) {
+            $isAdmin = (($_SESSION['admin_role'] ?? 'user') === 'admin');
+            if ($peerRaw === '' || $me <= 0) {
+                echo json_encode(['success' => false, 'message' => 'مستخدم غير صالح.']);
+                break;
+            }
+
+            if ($peerRaw === '__monitor__') {
+                if (!$isAdmin) {
+                    echo json_encode(['success' => false, 'message' => 'ليس لديك صلاحية.']);
+                    break;
+                }
+                $stmt = $pdo->query("
+                    SELECT um.*,
+                           s.display_name AS sender_name,
+                           r.display_name AS receiver_name,
+                           rp.message_text AS reply_message_text,
+                           rp.file_name AS reply_file_name
+                    FROM user_messages um
+                    LEFT JOIN admin_users s ON um.sender_id = s.id
+                    LEFT JOIN admin_users r ON um.receiver_id = r.id
+                    LEFT JOIN user_messages rp ON um.reply_to_id = rp.id
+                    WHERE um.deleted_at IS NULL
+                      AND (um.chat_scope = 'private' OR (um.chat_scope = 'global' AND um.receiver_id = um.sender_id))
+                    ORDER BY um.created_at DESC, um.id DESC
+                    LIMIT 800
+                ");
+                $messages = array_reverse($stmt->fetchAll());
+                echo json_encode(['success' => true, 'messages' => $messages]);
+                break;
+            }
+
+            if ($peerRaw === '__all__') {
+                $stmt = $pdo->prepare("
+                    SELECT um.*,
+                           s.display_name AS sender_name,
+                           r.display_name AS receiver_name,
+                           rp.message_text AS reply_message_text,
+                           rp.file_name AS reply_file_name
+                    FROM user_messages um
+                    LEFT JOIN admin_users s ON um.sender_id = s.id
+                    LEFT JOIN admin_users r ON um.receiver_id = r.id
+                    LEFT JOIN user_messages rp ON um.reply_to_id = rp.id
+                    WHERE um.deleted_at IS NULL
+                      AND um.chat_scope = 'global'
+                      AND um.receiver_id = ?
+                    ORDER BY um.created_at ASC, um.id ASC
+                    LIMIT 800
+                ");
+                $stmt->execute([$me]);
+                $messages = $stmt->fetchAll();
+                $pdo->prepare("UPDATE user_messages SET is_read = 1 WHERE receiver_id = ? AND chat_scope = 'global' AND is_read = 0")
+                    ->execute([$me]);
+                echo json_encode(['success' => true, 'messages' => $messages]);
+                break;
+            }
+
+            $peerId = intval($peerRaw);
+            if ($peerId <= 0) {
                 echo json_encode(['success' => false, 'message' => 'مستخدم غير صالح.']);
                 break;
             }
@@ -1134,48 +1208,57 @@ if (isset($_POST['action']) && $_POST['action'] !== 'login' && $_POST['action'] 
                 LEFT JOIN admin_users s ON um.sender_id = s.id
                 LEFT JOIN admin_users r ON um.receiver_id = r.id
                 LEFT JOIN user_messages rp ON um.reply_to_id = rp.id
-                WHERE um.deleted_at IS NULL AND ((um.sender_id = ? AND um.receiver_id = ?)
+                WHERE um.deleted_at IS NULL AND um.chat_scope = 'private' AND ((um.sender_id = ? AND um.receiver_id = ?)
                    OR (um.sender_id = ? AND um.receiver_id = ?))
                 ORDER BY um.created_at ASC, um.id ASC
                 LIMIT 500
             ");
             $stmt->execute([$me, $peerId, $peerId, $me]);
             $messages = $stmt->fetchAll();
-            $pdo->prepare("UPDATE user_messages SET is_read = 1 WHERE receiver_id = ? AND sender_id = ? AND is_read = 0")
+            $pdo->prepare("UPDATE user_messages SET is_read = 1 WHERE receiver_id = ? AND sender_id = ? AND chat_scope = 'private' AND is_read = 0")
                 ->execute([$me, $peerId]);
             echo json_encode(['success' => true, 'messages' => $messages]);
             break;
 
         case 'send_message':
-            $peerId = intval($_POST['peer_id'] ?? 0);
+            $peerRaw = trim((string)($_POST['peer_id'] ?? ''));
             $messageText = trim($_POST['message_text'] ?? '');
             $me = intval($_SESSION['admin_user_id'] ?? 0);
-            if ($peerId <= 0 || $me <= 0) {
+            if ($peerRaw === '' || $me <= 0) {
                 echo json_encode(['success' => false, 'message' => 'بيانات الرسالة غير مكتملة.']);
-                break;
-            }
-            $check = $pdo->prepare("SELECT id FROM admin_users WHERE id = ? AND is_active = 1");
-            $check->execute([$peerId]);
-            if (!$check->fetch()) {
-                echo json_encode(['success' => false, 'message' => 'المستخدم غير موجود أو غير مفعل.']);
                 break;
             }
 
             $replyToId = intval($_POST['reply_to_id'] ?? 0);
             $messageType = 'text';
             $fileName = null; $filePath = null; $mimeType = null; $fileSize = null;
-            if (!empty($_FILES['chat_file']) && intval($_FILES['chat_file']['error']) === UPLOAD_ERR_OK) {
+
+            if (!empty($_FILES['chat_file'])) {
                 $upload = $_FILES['chat_file'];
-                $ext = strtolower(pathinfo($upload['name'], PATHINFO_EXTENSION));
-                $allowed = ['jpg','jpeg','png','gif','webp','pdf','doc','docx','xls','xlsx','txt','mp3','wav','ogg','m4a','aac','mp4'];
-                if (!in_array($ext, $allowed)) {
+                $errCode = intval($upload['error'] ?? UPLOAD_ERR_NO_FILE);
+                if ($errCode !== UPLOAD_ERR_OK) {
+                    $msg = match ($errCode) {
+                        UPLOAD_ERR_INI_SIZE, UPLOAD_ERR_FORM_SIZE => 'حجم الملف أكبر من الحد المسموح في الخادم. حاول ملفًا أصغر.',
+                        UPLOAD_ERR_PARTIAL => 'تم رفع جزء من الملف فقط. أعد المحاولة.',
+                        UPLOAD_ERR_NO_TMP_DIR => 'مجلد الرفع المؤقت غير متاح في الخادم.',
+                        UPLOAD_ERR_CANT_WRITE => 'تعذر حفظ الملف على الخادم.',
+                        UPLOAD_ERR_EXTENSION => 'تم إيقاف الرفع بسبب إضافة في الخادم.',
+                        default => 'تعذر رفع الملف.'
+                    };
+                    echo json_encode(['success' => false, 'message' => $msg]);
+                    break;
+                }
+                $ext = strtolower(pathinfo($upload['name'] ?? '', PATHINFO_EXTENSION));
+                $allowed = ['jpg','jpeg','png','gif','webp','pdf','doc','docx','xls','xlsx','txt','mp3','wav','ogg','m4a','aac','mp4','webm'];
+                if (!in_array($ext, $allowed, true)) {
                     echo json_encode(['success' => false, 'message' => 'نوع الملف غير مسموح.']);
                     break;
                 }
                 $mimeType = mime_content_type($upload['tmp_name']) ?: 'application/octet-stream';
                 $fileSize = intval($upload['size'] ?? 0);
-                if ($fileSize > 15 * 1024 * 1024) {
-                    echo json_encode(['success' => false, 'message' => 'حجم الملف كبير (الحد 15MB).']);
+                $maxBytes = 50 * 1024 * 1024;
+                if ($fileSize > $maxBytes) {
+                    echo json_encode(['success' => false, 'message' => 'حجم الملف كبير (الحد 50MB).']);
                     break;
                 }
                 $dir = __DIR__ . '/uploads/chat';
@@ -1188,7 +1271,9 @@ if (isset($_POST['action']) && $_POST['action'] !== 'login' && $_POST['action'] 
                 }
                 $fileName = $upload['name'];
                 $filePath = 'uploads/chat/' . $safe;
-                $messageType = (str_starts_with($mimeType, 'image/')) ? 'image' : ((str_starts_with($mimeType, 'audio/')) ? 'voice' : 'file');
+                $audioExts = ['mp3','wav','ogg','m4a','aac','webm'];
+                $isAudioByExt = in_array($ext, $audioExts, true);
+                $messageType = (str_starts_with($mimeType, 'image/')) ? 'image' : ((str_starts_with($mimeType, 'audio/') || $isAudioByExt) ? 'voice' : 'file');
             }
 
             if ($messageText === '' && !$filePath) {
@@ -1196,7 +1281,34 @@ if (isset($_POST['action']) && $_POST['action'] !== 'login' && $_POST['action'] 
                 break;
             }
 
-            $ins = $pdo->prepare("INSERT INTO user_messages (sender_id, receiver_id, message_text, message_type, file_name, file_path, mime_type, file_size, reply_to_id, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)");
+            if ($peerRaw === '__all__') {
+                $usersStmt = $pdo->query("SELECT id FROM admin_users WHERE is_active = 1");
+                $userIds = array_map(fn($r) => intval($r['id']), $usersStmt->fetchAll());
+                if (!$userIds) {
+                    echo json_encode(['success' => false, 'message' => 'لا يوجد مستخدمون متاحون.']);
+                    break;
+                }
+                $broadcastId = 'g_' . date('YmdHis') . '_' . bin2hex(random_bytes(4));
+                $ins = $pdo->prepare("INSERT INTO user_messages (sender_id, receiver_id, message_text, message_type, file_name, file_path, mime_type, file_size, reply_to_id, chat_scope, broadcast_group_id, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'global', ?, ?)");
+                foreach ($userIds as $uid) {
+                    $ins->execute([$me, $uid, $messageText, $messageType, $fileName, $filePath, $mimeType, $fileSize, $replyToId > 0 ? $replyToId : null, $broadcastId, nowSaudi()]);
+                }
+                echo json_encode(['success' => true, 'message' => 'تم إرسال الرسالة إلى مجموعة الكل.']);
+                break;
+            }
+
+            $peerId = intval($peerRaw);
+            if ($peerId <= 0) {
+                echo json_encode(['success' => false, 'message' => 'المستخدم غير صالح.']);
+                break;
+            }
+            $check = $pdo->prepare("SELECT id FROM admin_users WHERE id = ? AND is_active = 1");
+            $check->execute([$peerId]);
+            if (!$check->fetch()) {
+                echo json_encode(['success' => false, 'message' => 'المستخدم غير موجود أو غير مفعل.']);
+                break;
+            }
+            $ins = $pdo->prepare("INSERT INTO user_messages (sender_id, receiver_id, message_text, message_type, file_name, file_path, mime_type, file_size, reply_to_id, chat_scope, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'private', ?)");
             $ins->execute([$me, $peerId, $messageText, $messageType, $fileName, $filePath, $mimeType, $fileSize, $replyToId > 0 ? $replyToId : null, nowSaudi()]);
             echo json_encode(['success' => true, 'message' => 'تم إرسال الرسالة.']);
             break;
@@ -1205,7 +1317,7 @@ if (isset($_POST['action']) && $_POST['action'] !== 'login' && $_POST['action'] 
             $messageId = intval($_POST['message_id'] ?? 0);
             $me = intval($_SESSION['admin_user_id'] ?? 0);
             $role = $_SESSION['admin_role'] ?? 'user';
-            $stmt = $pdo->prepare("SELECT sender_id, file_path, deleted_at FROM user_messages WHERE id = ? LIMIT 1");
+            $stmt = $pdo->prepare("SELECT sender_id, file_path, deleted_at, chat_scope, broadcast_group_id FROM user_messages WHERE id = ? LIMIT 1");
             $stmt->execute([$messageId]);
             $msg = $stmt->fetch();
             if (!$msg || !empty($msg['deleted_at'])) {
@@ -1220,7 +1332,12 @@ if (isset($_POST['action']) && $_POST['action'] !== 'login' && $_POST['action'] 
                 $full = __DIR__ . '/' . ltrim($msg['file_path'], '/');
                 if (is_file($full)) @unlink($full);
             }
-            $pdo->prepare("UPDATE user_messages SET deleted_at = ? WHERE id = ?")->execute([nowSaudi(), $messageId]);
+            if (($msg['chat_scope'] ?? 'private') === 'global' && !empty($msg['broadcast_group_id'])) {
+                $pdo->prepare("UPDATE user_messages SET deleted_at = ? WHERE broadcast_group_id = ? AND deleted_at IS NULL")
+                    ->execute([nowSaudi(), $msg['broadcast_group_id']]);
+            } else {
+                $pdo->prepare("UPDATE user_messages SET deleted_at = ? WHERE id = ?")->execute([nowSaudi(), $messageId]);
+            }
             echo json_encode(['success' => true, 'message' => 'تم حذف الرسالة.']);
             break;
 
@@ -1240,8 +1357,100 @@ if (isset($_POST['action']) && $_POST['action'] !== 'login' && $_POST['action'] 
                 echo json_encode(['success' => false, 'message' => 'ليس لديك صلاحية.']);
                 break;
             }
-            purgeExpiredMessages($pdo);
-            echo json_encode(['success' => true, 'message' => 'تم تنظيف المحادثات حسب المدة.']);
+            $peerRaw = trim((string)($_POST['peer_id'] ?? ''));
+            $me = intval($_SESSION['admin_user_id'] ?? 0);
+            if ($me <= 0 || $peerRaw === '') {
+                echo json_encode(['success' => false, 'message' => 'حدد المحادثة أولاً.']);
+                break;
+            }
+            if ($peerRaw === '__monitor__') {
+                echo json_encode(['success' => false, 'message' => 'لا يمكن تنظيف وضع المراقبة. اختر محادثة فعلية.']);
+                break;
+            }
+
+            if ($peerRaw === '__all__') {
+                $sel = $pdo->prepare("SELECT id, file_path FROM user_messages WHERE deleted_at IS NULL AND chat_scope = 'global' AND receiver_id = ?");
+                $sel->execute([$me]);
+            } else {
+                $peerId = intval($peerRaw);
+                if ($peerId <= 0) {
+                    echo json_encode(['success' => false, 'message' => 'محادثة غير صالحة.']);
+                    break;
+                }
+                $sel = $pdo->prepare("SELECT id, file_path FROM user_messages WHERE deleted_at IS NULL AND chat_scope = 'private' AND ((sender_id = ? AND receiver_id = ?) OR (sender_id = ? AND receiver_id = ?))");
+                $sel->execute([$me, $peerId, $peerId, $me]);
+            }
+
+            $rows = $sel->fetchAll();
+            if (!$rows) {
+                echo json_encode(['success' => true, 'message' => 'لا توجد رسائل للحذف في هذه المحادثة.', 'deleted_count' => 0]);
+                break;
+            }
+            $ids = array_map(fn($r) => intval($r['id']), $rows);
+            $files = array_values(array_unique(array_filter(array_map(fn($r) => (string)($r['file_path'] ?? ''), $rows))));
+
+            $in = implode(',', array_fill(0, count($ids), '?'));
+            $params = array_merge([nowSaudi()], $ids);
+            $pdo->prepare("UPDATE user_messages SET deleted_at = ? WHERE id IN ($in)")->execute($params);
+
+            foreach ($files as $fp) {
+                $check = $pdo->prepare("SELECT COUNT(*) FROM user_messages WHERE file_path = ? AND deleted_at IS NULL");
+                $check->execute([$fp]);
+                if (intval($check->fetchColumn()) === 0) {
+                    $full = __DIR__ . '/' . ltrim($fp, '/');
+                    if (is_file($full)) @unlink($full);
+                }
+            }
+
+            echo json_encode(['success' => true, 'message' => 'تم تنظيف المحادثة الحالية بنجاح.', 'deleted_count' => count($ids)]);
+            break;
+
+
+        case 'fetch_ui_preferences':
+            echo json_encode([
+                'success' => true,
+                'preferences' => [
+                    'dark_text_color' => getSetting($pdo, 'dark_text_color', '#d8c8ff'),
+                    'dark_glow_enabled' => getSetting($pdo, 'dark_glow_enabled', '1'),
+                    'dark_glow_color' => getSetting($pdo, 'dark_glow_color', '#8b5cf6'),
+                    'font_family' => getSetting($pdo, 'ui_font_family', 'Cairo'),
+                    'data_view_mode' => getSetting($pdo, 'ui_data_view_mode', 'table')
+                ]
+            ]);
+            break;
+
+        case 'save_ui_preferences':
+            if (($_SESSION['admin_role'] ?? 'user') !== 'admin') {
+                echo json_encode(['success' => false, 'message' => 'ليس لديك صلاحية.']);
+                break;
+            }
+            $allowedFonts = ['Cairo','Tajawal','Almarai','Changa','IBM Plex Sans Arabic','Noto Kufi Arabic','Readex Pro','El Messiri','Reem Kufi','Amiri'];
+            $fontFamily = trim((string)($_POST['font_family'] ?? 'Cairo'));
+            if (!in_array($fontFamily, $allowedFonts, true)) $fontFamily = 'Cairo';
+            $darkTextColor = sanitizeHexColor((string)($_POST['dark_text_color'] ?? '#d8c8ff'), '#d8c8ff');
+            $darkGlowColor = sanitizeHexColor((string)($_POST['dark_glow_color'] ?? '#8b5cf6'), '#8b5cf6');
+            $darkGlowEnabled = (($_POST['dark_glow_enabled'] ?? '1') === '1') ? '1' : '0';
+            $allowedViewModes = ['table','compact','cards','zebra','glass','minimal'];
+            $dataViewMode = trim((string)($_POST['data_view_mode'] ?? 'table'));
+            if (!in_array($dataViewMode, $allowedViewModes, true)) $dataViewMode = 'table';
+
+            setSetting($pdo, 'ui_font_family', $fontFamily);
+            setSetting($pdo, 'dark_text_color', $darkTextColor);
+            setSetting($pdo, 'dark_glow_color', $darkGlowColor);
+            setSetting($pdo, 'dark_glow_enabled', $darkGlowEnabled);
+            setSetting($pdo, 'ui_data_view_mode', $dataViewMode);
+
+            echo json_encode([
+                'success' => true,
+                'message' => 'تم حفظ إعدادات المظهر بنجاح.',
+                'preferences' => [
+                    'dark_text_color' => $darkTextColor,
+                    'dark_glow_enabled' => $darkGlowEnabled,
+                    'dark_glow_color' => $darkGlowColor,
+                    'font_family' => $fontFamily,
+                    'data_view_mode' => $dataViewMode
+                ]
+            ]);
             break;
 
         // ======================== إدارة المستخدمين ========================
@@ -1418,10 +1627,8 @@ if ($loggedIn) {
     $stats = getStats($pdo);
     
     $users = [];
-    $chat_users_stmt = ($_SESSION['admin_role'] === 'admin')
-        ? $pdo->prepare("SELECT id, username, display_name, role FROM admin_users WHERE is_active = 1 AND id <> ? ORDER BY display_name")
-        : $pdo->prepare("SELECT id, username, display_name, role FROM admin_users WHERE is_active = 1 AND role = 'admin' ORDER BY display_name");
-    if ($_SESSION['admin_role'] === 'admin') { $chat_users_stmt->execute([intval($_SESSION['admin_user_id'])]); } else { $chat_users_stmt->execute(); }
+    $chat_users_stmt = $pdo->prepare("SELECT id, username, display_name, role FROM admin_users WHERE is_active = 1 AND id <> ? ORDER BY display_name");
+    $chat_users_stmt->execute([intval($_SESSION['admin_user_id'])]);
     $chat_users = $chat_users_stmt->fetchAll();
     if ($_SESSION['admin_role'] === 'admin') {
         $users = $pdo->query("SELECT id, username, display_name, role, is_active, created_at FROM admin_users ORDER BY created_at DESC")->fetchAll();
@@ -1430,6 +1637,16 @@ if ($loggedIn) {
     $doctors = $patients = $leaves = $archived = $queries = $notifications_payment = $payments = $users = $chat_users = [];
     $stats = ['total' => 0, 'active' => 0, 'archived' => 0, 'patients' => 0, 'doctors' => 0, 'paid' => 0, 'unpaid' => 0, 'paid_amount' => 0, 'unpaid_amount' => 0];
 }
+
+
+$uiFontFamily = getSetting($pdo, 'ui_font_family', 'Cairo');
+$allowedUiFonts = ['Cairo','Tajawal','Almarai','Changa','IBM Plex Sans Arabic','Noto Kufi Arabic','Readex Pro','El Messiri','Reem Kufi','Amiri'];
+if (!in_array($uiFontFamily, $allowedUiFonts, true)) $uiFontFamily = 'Cairo';
+$uiDarkTextColor = sanitizeHexColor(getSetting($pdo, 'dark_text_color', '#d8c8ff') ?? '#d8c8ff', '#d8c8ff');
+$uiDarkGlowColor = sanitizeHexColor(getSetting($pdo, 'dark_glow_color', '#8b5cf6') ?? '#8b5cf6', '#8b5cf6');
+$uiDarkGlowEnabled = getSetting($pdo, 'dark_glow_enabled', '1') === '1' ? '1' : '0';
+$uiDataViewMode = getSetting($pdo, 'ui_data_view_mode', 'table') ?: 'table';
+if (!in_array($uiDataViewMode, ['table','compact','cards','zebra','glass','minimal'], true)) $uiDataViewMode = 'table';
 ?>
 <!DOCTYPE html>
 <html lang="ar" dir="rtl">
@@ -1439,7 +1656,7 @@ if ($loggedIn) {
     <title>لوحة تحكم الإجازات المرضية</title>
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.rtl.min.css" rel="stylesheet">
     <link href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.0/font/bootstrap-icons.css" rel="stylesheet">
-    <link href="https://fonts.googleapis.com/css2?family=Cairo:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
+    <link href="https://fonts.googleapis.com/css2?family=Almarai:wght@300;400;700;800&family=Amiri:wght@400;700&family=Cairo:wght@300;400;500;600;700;800&family=Changa:wght@300;400;500;600;700;800&family=El+Messiri:wght@400;500;600;700&family=IBM+Plex+Sans+Arabic:wght@300;400;500;600;700&family=Noto+Kufi+Arabic:wght@300;400;500;600;700&family=Readex+Pro:wght@300;400;500;600;700&family=Reem+Kufi:wght@400;500;600;700&family=Tajawal:wght@300;400;500;700;800&display=swap" rel="stylesheet">
     <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf-autotable/3.5.25/jspdf.plugin.autotable.min.js"></script>
@@ -1505,6 +1722,10 @@ if ($loggedIn) {
             --grad-warning: linear-gradient(135deg, #f59e0b, #fbbf24);
             --grad-dark: linear-gradient(135deg, #1e293b, #334155, #475569);
             --grad-glass: linear-gradient(135deg, rgba(255,255,255,0.9), rgba(255,255,255,0.7));
+            --app-font-family: '<?php echo addslashes($uiFontFamily); ?>', sans-serif;
+            --dark-data-color: <?php echo htmlspecialchars($uiDarkTextColor, ENT_QUOTES, 'UTF-8'); ?>;
+            --dark-glow-color: <?php echo htmlspecialchars($uiDarkGlowColor, ENT_QUOTES, 'UTF-8'); ?>;
+            --dark-glow-shadow: <?php echo ($uiDarkGlowEnabled === '1') ? ('0 0 10px ' . htmlspecialchars($uiDarkGlowColor, ENT_QUOTES, 'UTF-8')) : 'none'; ?>;
         }
 
         /* ═══════════════ المتغيرات - دارك مود (نصوص واضحة جداً) ═══════════════ */
@@ -1530,7 +1751,7 @@ if ($loggedIn) {
         * { box-sizing: border-box; margin: 0; padding: 0; }
 
         body {
-            font-family: 'Cairo', sans-serif;
+            font-family: var(--app-font-family);
             background: var(--bg);
             color: var(--text);
             direction: rtl;
@@ -2187,12 +2408,80 @@ if ($loggedIn) {
             padding: 10px 8px;
             vertical-align: middle;
             border-color: var(--border);
-            color: var(--text);
+            color: #111827;
+            font-weight: 600;
+        }
+
+        .table tbody td a,
+        .table tbody td .text-dark,
+        .table tbody td .text-muted,
+        .table tbody td span,
+        .table tbody td small {
+            color: #0f172a !important;
+            text-shadow: none !important;
         }
 
         .dark-mode .table tbody td {
-            color: #e2e8f0;
-            border-color: rgba(148,163,184,0.12);
+            color: #111827 !important;
+            border-color: rgba(148,163,184,0.25);
+            background: rgba(248,250,252,0.96);
+            text-shadow: none !important;
+        }
+
+        .dark-mode .table tbody td a,
+        .dark-mode .table tbody td .btn-link,
+        .dark-mode .table tbody td .text-dark,
+        .dark-mode .table tbody td .text-muted,
+        .dark-mode .table tbody td span,
+        .dark-mode .table tbody td small {
+            color: #0f172a !important;
+            text-shadow: none !important;
+        }
+
+        .dark-mode .table .no-results td {
+            color: #94a3b8 !important;
+        }
+
+
+        .dark-mode .table,
+        .dark-mode .table tbody td,
+        .dark-mode .table tbody td *,
+        .dark-mode .table-responsive,
+        .dark-mode .table-responsive .form-control,
+        .dark-mode .table-responsive .form-select {
+            color: #111827 !important;
+            text-shadow: none !important;
+        }
+
+        .dark-mode .table tbody td small,
+        .dark-mode .table tbody td .small,
+        .dark-mode .table tbody td .text-muted {
+            color: #334155 !important;
+            text-shadow: none !important;
+        }
+
+        .dark-mode .table .btn-outline-secondary {
+            color: #dbe7fb;
+            border-color: rgba(203,213,225,0.45);
+        }
+
+        .dark-mode .table .btn-outline-secondary:hover {
+            background: #64748b;
+            color: #fff;
+        }
+
+        /* تخصيص لون بيانات الدارك مود (من الإعدادات) */
+        .dark-mode .stat-value,
+        .dark-mode .list-group-item,
+        .dark-mode .card-header,
+        .dark-mode .modal-title {
+            color: var(--dark-data-color) !important;
+            text-shadow: var(--dark-glow-shadow);
+        }
+
+        .dark-mode .table.mobile-readable td::before,
+        .dark-mode .text-muted {
+            color: var(--dark-data-color) !important;
         }
 
         .table-hover tbody tr {
@@ -2219,6 +2508,261 @@ if ($loggedIn) {
             border-radius: var(--radius-sm);
             overflow: auto;
             border: 1px solid var(--border);
+            -webkit-overflow-scrolling: touch;
+        }
+
+        .table.mobile-readable td::before {
+            content: attr(data-label);
+            display: none;
+        }
+
+        body.data-view-compact .table thead th { padding: 9px 8px; font-size: 11px; }
+        body.data-view-compact .table tbody td { padding: 7px 6px; font-size: 12px; }
+
+        body.data-view-cards .table.mobile-readable thead { display: none; }
+        body.data-view-cards .table.mobile-readable,
+        body.data-view-cards .table.mobile-readable tbody,
+        body.data-view-cards .table.mobile-readable tr,
+        body.data-view-cards .table.mobile-readable td {
+            display: block;
+            width: 100%;
+            text-align: right !important;
+        }
+        body.data-view-cards .table.mobile-readable tr {
+            margin-bottom: 10px;
+            border: 1px solid var(--border);
+            border-radius: 12px;
+            background: var(--card);
+            box-shadow: 0 8px 20px rgba(15,23,42,0.06);
+            padding: 8px;
+        }
+        body.data-view-cards .table.mobile-readable td {
+            border: none !important;
+            border-bottom: 1px dashed rgba(148,163,184,0.25) !important;
+            padding: 8px 8px 8px 44% !important;
+            position: relative;
+            min-height: 36px;
+        }
+        body.data-view-cards .table.mobile-readable td:last-child { border-bottom: none !important; }
+        body.data-view-cards .table.mobile-readable td::before {
+            display: block;
+            position: absolute;
+            inset-inline-end: 8px;
+            top: 8px;
+            width: 40%;
+            font-weight: 700;
+            color: #334155;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+
+        body.data-view-zebra .table tbody tr:nth-child(odd) { background: rgba(15,23,42,0.04); }
+        .dark-mode body.data-view-zebra .table tbody tr:nth-child(odd),
+        body.dark-mode.data-view-zebra .table tbody tr:nth-child(odd) { background: rgba(255,255,255,0.12); }
+
+        body.data-view-glass .table-responsive {
+            background: linear-gradient(135deg, rgba(255,255,255,0.55), rgba(241,245,249,0.75));
+            backdrop-filter: blur(10px);
+            border-color: rgba(99,102,241,0.25);
+        }
+        .dark-mode body.data-view-glass .table-responsive,
+        body.dark-mode.data-view-glass .table-responsive {
+            background: linear-gradient(135deg, rgba(15,23,42,0.55), rgba(30,41,59,0.7));
+            border-color: rgba(129,140,248,0.45);
+        }
+
+        body.data-view-minimal .table,
+        body.data-view-minimal .table th,
+        body.data-view-minimal .table td {
+            border: none !important;
+            box-shadow: none !important;
+        }
+        body.data-view-minimal .table tbody td { border-bottom: 1px solid rgba(148,163,184,0.2) !important; }
+
+        /* ═══════════════ المراسلات بأسلوب تيليجرام ═══════════════ */
+        .chat-layout {
+            background: linear-gradient(180deg, #f8fafc, #eef2ff);
+            border: 1px solid rgba(99,102,241,0.12);
+            border-radius: 18px;
+            padding: 10px;
+        }
+
+        #chatMessagesBox {
+            height: 380px;
+            overflow: auto;
+            border-radius: 14px;
+            padding: 14px;
+            background:
+                radial-gradient(circle at top right, rgba(99,102,241,0.08), transparent 35%),
+                radial-gradient(circle at bottom left, rgba(16,185,129,0.08), transparent 35%),
+                #f8fafc;
+        }
+
+        .chat-empty {
+            text-align: center;
+            color: var(--text-muted);
+            margin-top: 32px;
+            font-weight: 600;
+        }
+
+        .chat-message-row { display: flex; margin-bottom: 10px; }
+        .chat-message-row.mine { justify-content: flex-start; }
+        .chat-message-row.other { justify-content: flex-end; }
+
+        .msg-bubble {
+            max-width: min(82%, 520px);
+            padding: 10px 12px;
+            border-radius: 14px;
+            box-shadow: 0 8px 18px rgba(15,23,42,0.08);
+            position: relative;
+            border: 1px solid transparent;
+            overflow: hidden;
+            word-break: break-word;
+        }
+
+        .msg-mine {
+            background: linear-gradient(135deg, #ffffff, #f8fafc);
+            border-color: rgba(99,102,241,0.15);
+            border-bottom-left-radius: 6px;
+        }
+
+        .msg-other {
+            background: linear-gradient(135deg, #6366f1, #4f46e5);
+            color: #fff;
+            border-bottom-right-radius: 6px;
+        }
+
+        .msg-other .chat-author,
+        .msg-other .chat-time,
+        .msg-other .chat-reply-preview,
+        .msg-other .chat-text {
+            color: #f8fafc;
+        }
+
+        .chat-author { font-size: 11px; font-weight: 700; margin-bottom: 4px; opacity: 0.88; }
+        .chat-text { white-space: pre-wrap; word-break: break-word; }
+
+        .chat-text { color: inherit !important; text-shadow: none !important; }
+        .msg-mine .chat-text { color: #111827 !important; }
+        .msg-other .chat-text { color: #f8fafc !important; }
+        .dark-mode .msg-mine .chat-text { color: #e2e8f0 !important; }
+        .dark-mode .msg-other .chat-text { color: #f8fafc !important; }
+        .chat-time { font-size: 11px; opacity: 0.75; margin-top: 6px; }
+        .chat-actions { display: flex; gap: 6px; margin-top: 8px; }
+
+        .chat-reply-preview {
+            border-inline-start: 3px solid rgba(99,102,241,0.45);
+            padding-inline-start: 8px;
+            margin-bottom: 8px;
+            font-size: 11px;
+        }
+
+        .chat-media { margin-top: 8px; max-width: 100%; }
+        .chat-media img {
+            max-width: 100%;
+            width: auto;
+            max-height: 320px;
+            border-radius: 10px;
+            display: block;
+            object-fit: cover;
+            cursor: zoom-in;
+            border: 1px solid rgba(148,163,184,0.25);
+        }
+        .chat-media audio { width: min(300px, 100%); display: block; }
+        .chat-voice-player {
+            display: grid;
+            gap: 8px;
+            width: min(320px, 100%);
+            background: rgba(15,23,42,0.04);
+            border: 1px solid rgba(99,102,241,0.18);
+            border-radius: 12px;
+            padding: 8px;
+        }
+        .msg-other .chat-voice-player {
+            background: rgba(255,255,255,0.14);
+            border-color: rgba(255,255,255,0.2);
+        }
+        .chat-voice-speeds {
+            display: inline-flex;
+            gap: 6px;
+            flex-wrap: wrap;
+        }
+        .chat-voice-speed {
+            border: 1px solid rgba(99,102,241,0.35);
+            border-radius: 999px;
+            background: transparent;
+            padding: 2px 8px;
+            font-size: 11px;
+            font-weight: 700;
+            color: inherit;
+            cursor: pointer;
+        }
+        .chat-voice-speed.active {
+            background: rgba(99,102,241,0.18);
+            border-color: rgba(99,102,241,0.65);
+        }
+        .chat-media .chat-file-link {
+            max-width: 100%;
+            display: inline-flex;
+            white-space: normal;
+            align-items: center;
+            gap: 4px;
+            text-align: right;
+        }
+
+        #chatImageModal .modal-content { background: rgba(2,6,23,0.95); border-color: rgba(148,163,184,0.3); }
+        #chatImageModal .modal-body { text-align: center; }
+        #chatImageModal img {
+            max-width: 100%;
+            max-height: 80vh;
+            object-fit: contain;
+            border-radius: 12px;
+        }
+
+        .chat-input-wrap .input-group,
+        .chat-input-wrap .input-group-sm {
+            border-radius: 12px;
+            overflow: hidden;
+        }
+
+        .dark-mode .chat-layout {
+            background: linear-gradient(180deg, rgba(19,28,46,0.98), rgba(15,23,42,0.95));
+            border-color: rgba(148,163,184,0.2);
+        }
+
+        .dark-mode #chatMessagesBox {
+            background:
+                radial-gradient(circle at top right, rgba(99,102,241,0.2), transparent 35%),
+                radial-gradient(circle at bottom left, rgba(16,185,129,0.14), transparent 35%),
+                #0f172a;
+            border-color: rgba(148,163,184,0.2);
+        }
+
+        .dark-mode .msg-mine {
+            background: linear-gradient(135deg, #1e293b, #111827);
+            border-color: rgba(148,163,184,0.25);
+            color: #f1f5f9;
+        }
+
+        .dark-mode .msg-other {
+            background: linear-gradient(135deg, #4f46e5, #4338ca);
+            border-color: rgba(165,180,252,0.4);
+            color: #fff;
+        }
+
+
+        .dark-mode .chat-time,
+        .dark-mode .chat-author,
+        .dark-mode .chat-reply-preview,
+        .dark-mode #chatReplyPreview {
+            color: #cbd5e1 !important;
+        }
+
+        .dark-mode .msg-other .chat-time,
+        .dark-mode .msg-other .chat-author,
+        .dark-mode .msg-other .chat-reply-preview {
+            color: #eef2ff !important;
         }
 
         .no-results td {
@@ -2603,7 +3147,7 @@ if ($loggedIn) {
         .dark-mode li,
         .dark-mode td,
         .dark-mode th {
-            color: inherit;
+            color: #e2e8f0;
         }
 
         /* العناوين */
@@ -2708,6 +3252,13 @@ if ($loggedIn) {
             border-color: rgba(148,163,184,0.15);
         }
 
+
+        .dark-mode .list-group-item {
+            background: #131c2e;
+            border-color: rgba(148,163,184,0.18);
+            color: #e2e8f0;
+        }
+
         /* table inside dark mode */
         .dark-mode .table {
             color: #e2e8f0;
@@ -2752,6 +3303,80 @@ if ($loggedIn) {
             .card-custom .card-body { padding: 16px; }
             .modal-content { border-radius: 18px; margin: 8px; }
             .nav-tabs .nav-link { padding: 8px 14px; font-size: 12px; }
+
+            /* على الجوال: الكروت تتفعّل فقط إذا اخترت وضع cards */
+            body.data-view-cards .table.mobile-readable thead {
+                display: none;
+            }
+
+            body.data-view-cards .table.mobile-readable,
+            body.data-view-cards .table.mobile-readable tbody,
+            body.data-view-cards .table.mobile-readable tr,
+            body.data-view-cards .table.mobile-readable td {
+                display: block;
+                width: 100%;
+                text-align: right !important;
+            }
+
+            body.data-view-cards .table.mobile-readable tr {
+                margin-bottom: 10px;
+                border: 1px solid var(--border);
+                border-radius: 12px;
+                background: var(--card);
+                box-shadow: 0 8px 20px rgba(15,23,42,0.05);
+                padding: 8px;
+            }
+
+            body.data-view-cards .table.mobile-readable td {
+                border: none !important;
+                border-bottom: 1px dashed rgba(148,163,184,0.25) !important;
+                padding: 8px 8px 8px 44% !important;
+                position: relative;
+                min-height: 36px;
+            }
+
+            body.data-view-cards .table.mobile-readable td:last-child {
+                border-bottom: none !important;
+            }
+
+            body.data-view-cards .table.mobile-readable td::before {
+                display: block;
+                position: absolute;
+                inset-inline-end: 8px;
+                top: 8px;
+                width: 40%;
+                font-weight: 700;
+                color: var(--text-muted);
+                white-space: nowrap;
+                overflow: hidden;
+                text-overflow: ellipsis;
+            }
+
+            body.data-view-compact .table tbody td { padding: 6px 5px; font-size: 11px; }
+
+            .dark-mode body.data-view-cards .table.mobile-readable tr,
+            body.dark-mode.data-view-cards .table.mobile-readable tr {
+                background: linear-gradient(145deg, #182337, #111827);
+                border-color: rgba(148,163,184,0.35);
+            }
+
+            .dark-mode body.data-view-cards .table.mobile-readable td,
+            body.dark-mode.data-view-cards .table.mobile-readable td {
+                color: #111827 !important;
+                background: #f8fafc;
+                border-bottom-color: rgba(148,163,184,0.28) !important;
+            }
+
+            .dark-mode body.data-view-cards .table.mobile-readable td::before,
+            body.dark-mode.data-view-cards .table.mobile-readable td::before {
+                color: #334155;
+            }
+
+            #chatMessagesBox { height: 320px; }
+            .msg-bubble { max-width: 90%; }
+            .chat-actions { flex-wrap: wrap; }
+            .chat-media img { width: 100%; max-width: 100%; }
+            .chat-media .chat-file-link { width: 100%; justify-content: center; }
         }
 
         @media (max-width: 480px) {
@@ -2832,17 +3457,13 @@ if ($loggedIn) {
             <span class="badge bg-danger pulse-badge" id="notifCount">0</span>
         </button>
         <?php if ($_SESSION['admin_role'] === 'admin'): ?>
-        <button class="btn btn-outline-light btn-sm" data-bs-toggle="modal" data-bs-target="#addUserModal" id="btnAddUser" title="إدارة المستخدمين">
-            <i class="bi bi-people"></i>
+        <button class="btn btn-outline-light btn-sm" data-bs-toggle="modal" data-bs-target="#settingsModal" id="btnSettings" title="الإعدادات">
+            <i class="bi bi-gear-fill"></i>
         </button>
         <?php endif; ?>
         <button class="btn btn-outline-light btn-sm" id="refreshAll" title="تحديث البيانات">
             <i class="bi bi-arrow-clockwise"></i>
         </button>
-        <?php if ($_SESSION['admin_role'] === 'admin'): ?>
-        <button class="btn btn-success btn-sm" id="markAllPaidBtn" title="جعل كل الإجازات مدفوعة"><i class="bi bi-check2-all"></i></button>
-        <button class="btn btn-warning btn-sm" id="resetAllPaymentsBtn" title="تصفير المدفوعات والمستحقات"><i class="bi bi-eraser"></i></button>
-        <?php endif; ?>
         <button class="btn btn-danger-custom btn-sm" id="logoutBtn" title="تسجيل الخروج">
             <i class="bi bi-box-arrow-right"></i> خروج
         </button>
@@ -2885,12 +3506,15 @@ if ($loggedIn) {
         <?php if ($_SESSION['admin_role'] === 'admin'): ?>
         <div class="stat-card">
             <div class="stat-icon"><i class="bi bi-cash-stack"></i></div>
-            <div class="stat-value" id="stat-paid-amount"><?php echo number_format($stats['paid_amount'], 2); ?></div>
-            <div class="stat-label">المبالغ المدفوعة</div>
+            <div class="stat-value sensitive-value" id="stat-paid-amount" data-raw="<?php echo number_format($stats['paid_amount'], 2, '.', ''); ?>">*****</div>
+            <div class="stat-label d-flex align-items-center justify-content-center gap-2">
+                <span>المبالغ المدفوعة</span>
+                <button type="button" class="btn-sensitive-toggle" id="toggleSensitiveAmounts" title="إظهار/إخفاء"><i class="bi bi-eye"></i></button>
+            </div>
         </div>
         <div class="stat-card">
             <div class="stat-icon"><i class="bi bi-cash"></i></div>
-            <div class="stat-value" id="stat-unpaid-amount"><?php echo number_format($stats['unpaid_amount'], 2); ?></div>
+            <div class="stat-value sensitive-value" id="stat-unpaid-amount" data-raw="<?php echo number_format($stats['unpaid_amount'], 2, '.', ''); ?>">*****</div>
             <div class="stat-label">المبالغ المستحقة</div>
         </div>
         <?php endif; ?>
@@ -2980,7 +3604,7 @@ if ($loggedIn) {
                         </div>
                     </div>
                     <div class="table-responsive">
-                        <table class="table table-bordered table-hover table-striped text-center" id="leavesTable">
+                        <table class="table table-bordered table-hover table-striped text-center mobile-readable" id="leavesTable">
                             <thead>
                                 <tr>
                                     <th>#</th>
@@ -3152,7 +3776,7 @@ if ($loggedIn) {
                         </div>
                     </div>
                     <div class="table-responsive">
-                        <table class="table table-bordered table-hover table-striped text-center" id="archivedTable">
+                        <table class="table table-bordered table-hover table-striped text-center mobile-readable" id="archivedTable">
                             <thead>
                                 <tr>
                                     <th>#</th>
@@ -3196,7 +3820,7 @@ if ($loggedIn) {
                         <div class="col-md-3"><button type="submit" class="btn btn-gradient w-100"><i class="bi bi-plus"></i> إضافة طبيب</button></div>
                     </form>
                     <div class="table-responsive">
-                        <table class="table table-bordered table-hover table-striped text-center" id="doctorsTable">
+                        <table class="table table-bordered table-hover table-striped text-center mobile-readable" id="doctorsTable">
                             <thead><tr><th>#</th><th>الاسم</th><th>المسمى</th><th>ملاحظة</th><th>التحكم</th></tr></thead>
                             <tbody></tbody>
                         </table>
@@ -3231,7 +3855,7 @@ if ($loggedIn) {
                         <div class="col-md-12"><button type="submit" class="btn btn-success-custom w-100"><i class="bi bi-plus"></i> إضافة مريض</button></div>
                     </form>
                     <div class="table-responsive">
-                        <table class="table table-bordered table-hover table-striped text-center" id="patientsTable">
+                        <table class="table table-bordered table-hover table-striped text-center mobile-readable" id="patientsTable">
                             <thead><tr><th>#</th><th>الاسم</th><th>رقم الهوية</th><th>الهاتف</th><th>المجلد</th><th>عدد الإجازات</th><th>مبلغ مدفوع</th><th>مبلغ مستحق</th><th>إجازات المريض</th><th>التحكم</th></tr></thead>
                             <tbody></tbody>
                         </table>
@@ -3261,8 +3885,10 @@ if ($loggedIn) {
                             <?php endif; ?>
                         </div>
                         <div class="col-lg-8">
-                            <div id="chatMessagesBox" class="border rounded p-2 mb-2" style="height:320px; overflow:auto; background:#f8f9fa;"></div>
+                            <div class="chat-layout">
+                            <div id="chatMessagesBox" class="mb-2"></div>
                             <div id="chatReplyPreview" class="small text-muted mb-2 d-none"></div>
+                            <div class="chat-input-wrap">
                             <div class="input-group mb-2">
                                 <input type="text" class="form-control" id="chatMessageInput" placeholder="اكتب رسالتك...">
                                 <button class="btn btn-gradient" id="sendChatMessageBtn"><i class="bi bi-send"></i> إرسال</button>
@@ -3270,8 +3896,10 @@ if ($loggedIn) {
                                 <button class="btn btn-outline-secondary d-none" id="stopVoiceBtn" type="button"><i class="bi bi-stop-fill"></i> إيقاف</button>
                             </div>
                             <div class="input-group input-group-sm">
-                                <input type="file" class="form-control" id="chatFileInput" accept="image/*,audio/*,.pdf,.doc,.docx,.xls,.xlsx,.txt,.mp4">
+                                <input type="file" class="form-control" id="chatFileInput" accept="image/*,audio/*,.pdf,.doc,.docx,.xls,.xlsx,.txt,.mp4,.webm">
                                 <button class="btn btn-outline-secondary" id="clearChatFileBtn" type="button">إلغاء المرفق</button>
+                            </div>
+                            </div>
                             </div>
                         </div>
                     </div>
@@ -3309,7 +3937,7 @@ if ($loggedIn) {
                         </div>
                     </div>
                     <div class="table-responsive">
-                        <table class="table table-bordered table-hover table-striped text-center" id="queriesTable">
+                        <table class="table table-bordered table-hover table-striped text-center mobile-readable" id="queriesTable">
                             <thead><tr><th>#</th><th>رمز الخدمة</th><th>المريض</th><th>الهوية</th><th>تاريخ الاستعلام</th><th>المصدر</th><th>التحكم</th></tr></thead>
                             <tbody></tbody>
                         </table>
@@ -3395,7 +4023,7 @@ if ($loggedIn) {
                         </div>
                     </div>
                     <div class="table-responsive">
-                        <table class="table table-bordered table-hover table-striped text-center" id="paymentsTable">
+                        <table class="table table-bordered table-hover table-striped text-center mobile-readable" id="paymentsTable">
                             <thead><tr><th>#</th><th>المريض</th><th>الإجمالي</th><th>مدفوعة</th><th>غير مدفوعة</th><th>مبلغ مدفوع</th><th>مبلغ مستحق</th><th>عرض</th></tr></thead>
                             <tbody></tbody>
                         </table>
@@ -3730,6 +4358,112 @@ if ($loggedIn) {
 </div>
 
 <?php if ($_SESSION['admin_role'] === 'admin'): ?>
+<!-- ======================== مودال الإعدادات ======================== -->
+<div class="modal fade" id="settingsModal" tabindex="-1" aria-hidden="true">
+    <div class="modal-dialog modal-lg modal-dialog-centered modal-dialog-scrollable">
+        <div class="modal-content">
+            <div class="modal-header" style="background: var(--grad-dark); color: #fff;">
+                <h5 class="modal-title"><i class="bi bi-gear-fill"></i> الإعدادات المتقدمة</h5>
+                <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body">
+                <div class="d-flex justify-content-between align-items-center flex-wrap gap-2 mb-3">
+                    <h6 class="mb-0"><i class="bi bi-palette-fill text-primary"></i> تخصيص مظهر الوضع الداكن</h6>
+                    <button class="btn btn-sm btn-outline-primary" id="openUsersManagerFromSettings"><i class="bi bi-people"></i> إدارة المستخدمين</button>
+                </div>
+                <form id="uiAppearanceForm" class="row g-3">
+                    <div class="col-12">
+                        <div class="card border-0" style="background: var(--bg-alt); border-radius: 12px;">
+                            <div class="card-body p-3">
+                                <div class="fw-bold mb-2"><i class="bi bi-sliders"></i> إجراءات مالية سريعة</div>
+                                <div class="d-flex flex-wrap gap-2">
+                                    <button type="button" class="btn btn-success" id="settingsMarkAllPaidBtn"><i class="bi bi-check2-all"></i> جعل كل الإجازات مدفوعة</button>
+                                    <button type="button" class="btn btn-warning" id="settingsResetAllPaymentsBtn"><i class="bi bi-eraser"></i> تصفير المدفوعات والمستحقات</button>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="col-12">
+                        <div class="card border-0" style="background: var(--bg-alt); border-radius: 12px;">
+                            <div class="card-body p-3">
+                                <div class="fw-bold mb-2"><i class="bi bi-magic"></i> أمزجة جاهزة للمظهر</div>
+                                <div class="row g-2">
+                                    <div class="col-md-6">
+                                        <select class="form-select" id="settingThemePreset">
+                                            <option value="">اختر مزيج جاهز...</option>
+                                            <option value="classic_violet">بنفسجي كلاسيك</option>
+                                            <option value="deep_ocean">أزرق محيطي</option>
+                                            <option value="emerald_glow">زمردي مشع</option>
+                                            <option value="sunset_gold">غروب ذهبي</option>
+                                            <option value="mono_clear">أسود واضح بدون إشعاع</option>
+                                            <option value="glass_lux">زجاجي فاخر</option>
+                                            <option value="minimal_clean">Minimal نظيف</option>
+                                        </select>
+                                    </div>
+                                    <div class="col-md-6 d-flex gap-2 flex-wrap" id="quickColorMixes">
+                                        <button type="button" class="btn btn-sm btn-outline-primary btn-color-mix" data-text="#d8c8ff" data-glow="#8b5cf6" data-glow-enabled="1">بنفسجي</button>
+                                        <button type="button" class="btn btn-sm btn-outline-info btn-color-mix" data-text="#dbeafe" data-glow="#3b82f6" data-glow-enabled="1">أزرق</button>
+                                        <button type="button" class="btn btn-sm btn-outline-success btn-color-mix" data-text="#dcfce7" data-glow="#10b981" data-glow-enabled="1">أخضر</button>
+                                        <button type="button" class="btn btn-sm btn-outline-warning btn-color-mix" data-text="#fde68a" data-glow="#f59e0b" data-glow-enabled="1">ذهبي</button>
+                                        <button type="button" class="btn btn-sm btn-outline-dark btn-color-mix" data-text="#111827" data-glow="#111827" data-glow-enabled="0">أسود واضح</button>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="col-md-6">
+                        <label class="form-label">لون النص في الدارك مود</label>
+                        <input type="color" class="form-control form-control-color" id="settingDarkTextColor" value="#d8c8ff">
+                    </div>
+                    <div class="col-md-6">
+                        <label class="form-label">لون الإشعاع</label>
+                        <input type="color" class="form-control form-control-color" id="settingDarkGlowColor" value="#8b5cf6">
+                    </div>
+                    <div class="col-md-6">
+                        <label class="form-label">نوع الخط</label>
+                        <select class="form-select" id="settingFontFamily">
+                            <option value="Cairo">Cairo</option>
+                            <option value="Tajawal">Tajawal</option>
+                            <option value="Almarai">Almarai</option>
+                            <option value="Changa">Changa</option>
+                            <option value="IBM Plex Sans Arabic">IBM Plex Sans Arabic</option>
+                            <option value="Noto Kufi Arabic">Noto Kufi Arabic</option>
+                            <option value="Readex Pro">Readex Pro</option>
+                            <option value="El Messiri">El Messiri</option>
+                            <option value="Reem Kufi">Reem Kufi</option>
+                            <option value="Amiri">Amiri</option>
+                        </select>
+                    </div>
+                    <div class="col-md-6 d-flex align-items-end">
+                        <div class="form-check form-switch">
+                            <input class="form-check-input" type="checkbox" role="switch" id="settingDarkGlowEnabled" checked>
+                            <label class="form-check-label" for="settingDarkGlowEnabled">تفعيل الإشعاع للنص</label>
+                        </div>
+                    </div>
+                    <div class="col-md-6">
+                        <label class="form-label">طريقة عرض البيانات في الجداول</label>
+                        <select class="form-select" id="settingDataViewMode">
+                            <option value="table">جدول كلاسيكي (افتراضي)</option>
+                            <option value="compact">جدول مضغوط</option>
+                            <option value="cards">بطاقات بيانات</option>
+                            <option value="zebra">جدول بخطوط متبادلة واضحة</option>
+                            <option value="glass">زجاجي احترافي</option>
+                            <option value="minimal">أقل تفاصيل (Minimal)</option>
+                        </select>
+                    </div>
+                    <div class="col-12 d-flex gap-2 justify-content-end">
+                        <button type="button" class="btn btn-outline-secondary" id="resetAppearanceSettings"><i class="bi bi-arrow-counterclockwise"></i> افتراضي</button>
+                        <button type="submit" class="btn btn-gradient"><i class="bi bi-save2"></i> حفظ الإعدادات</button>
+                    </div>
+                </form>
+            </div>
+            <div class="modal-footer"><button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">إغلاق</button></div>
+        </div>
+    </div>
+</div>
+
 <!-- ======================== مودال إدارة المستخدمين ======================== -->
 <div class="modal fade" id="addUserModal" tabindex="-1" aria-hidden="true">
     <div class="modal-dialog modal-xl modal-dialog-centered modal-dialog-scrollable">
@@ -3759,7 +4493,7 @@ if ($loggedIn) {
                 </div>
                 <!-- قائمة المستخدمين -->
                 <div class="table-responsive">
-                    <table class="table table-bordered table-hover table-striped text-center" id="usersTable">
+                    <table class="table table-bordered table-hover table-striped text-center mobile-readable" id="usersTable">
                         <thead><tr><th>#</th><th>اسم المستخدم</th><th>الاسم المعروض</th><th>الدور</th><th>الحالة</th><th>تاريخ الإنشاء</th><th>التحكم</th></tr></thead>
                         <tbody></tbody>
                     </table>
@@ -3812,7 +4546,7 @@ if ($loggedIn) {
                     <li class="list-group-item text-center text-muted">لا توجد جلسات.</li>
                 </ul>
                 <div class="table-responsive d-none">
-                    <table class="table table-bordered table-hover table-striped text-center" id="sessionsTable">
+                    <table class="table table-bordered table-hover table-striped text-center mobile-readable" id="sessionsTable">
                         <thead><tr><th>#</th><th>وقت الدخول</th><th>وقت الخروج</th><th>عنوان IP</th><th>المتصفح</th></tr></thead>
                         <tbody></tbody>
                     </table>
@@ -3833,6 +4567,13 @@ if ($loggedIn) {
 // ======================== البيانات الأولية من PHP ========================
 const CSRF_TOKEN = '<?php echo csrf_token(); ?>';
 const IS_ADMIN = <?php echo ($loggedIn && $_SESSION['admin_role'] === 'admin') ? 'true' : 'false'; ?>;
+const INITIAL_UI_PREFERENCES = {
+    dark_text_color: <?php echo json_encode($uiDarkTextColor); ?>,
+    dark_glow_enabled: <?php echo json_encode($uiDarkGlowEnabled); ?>,
+    dark_glow_color: <?php echo json_encode($uiDarkGlowColor); ?>,
+    font_family: <?php echo json_encode($uiFontFamily); ?>,
+    data_view_mode: <?php echo json_encode($uiDataViewMode); ?>
+};
 const IS_LOGGED_IN = <?php echo $loggedIn ? 'true' : 'false'; ?>;
 const REQUEST_URL = window.location.pathname;
 
@@ -3933,10 +4674,21 @@ function updateTable(tableEl, data, rowGenerator) {
         return;
     }
     tbody.innerHTML = data.map(item => rowGenerator(item)).join('');
+    applyTableMobileLabels(tableEl);
     // ترقيم الصفوف
     tbody.querySelectorAll('tr').forEach((row, i) => {
         const numCell = row.querySelector('.row-num');
         if (numCell) numCell.textContent = i + 1;
+    });
+}
+
+function applyTableMobileLabels(tableEl) {
+    if (!tableEl) return;
+    const headers = Array.from(tableEl.querySelectorAll('thead th')).map(th => th.textContent.trim());
+    tableEl.querySelectorAll('tbody tr').forEach(tr => {
+        tr.querySelectorAll('td').forEach((td, idx) => {
+            td.setAttribute('data-label', headers[idx] || '');
+        });
     });
 }
 
@@ -4470,8 +5222,20 @@ function updateStats(stats) {
     setText('stat-archived', stats.archived || 0);
     setText('stat-patients', stats.patients || 0);
     setText('stat-doctors', stats.doctors || 0);
-    setText('stat-paid-amount', parseFloat(stats.paid_amount || 0).toFixed(2));
-    setText('stat-unpaid-amount', parseFloat(stats.unpaid_amount || 0).toFixed(2));
+
+    const paidAmountEl = document.getElementById('stat-paid-amount');
+    const unpaidAmountEl = document.getElementById('stat-unpaid-amount');
+    if (paidAmountEl) paidAmountEl.dataset.raw = parseFloat(stats.paid_amount || 0).toFixed(2);
+    if (unpaidAmountEl) unpaidAmountEl.dataset.raw = parseFloat(stats.unpaid_amount || 0).toFixed(2);
+    refreshSensitiveValuesMask();
+}
+
+function refreshSensitiveValuesMask() {
+    document.querySelectorAll('.sensitive-value').forEach(el => {
+        const visible = el.dataset.visible === '1';
+        const raw = el.dataset.raw || '0.00';
+        el.textContent = visible ? raw : '*****';
+    });
 }
 
 function updateDoctorSelects(doctors) {
@@ -4601,7 +5365,7 @@ document.addEventListener('DOMContentLoaded', () => {
         });
     }
 
-    ['editLeaveModal','duplicateLeaveModal','confirmModal','leaveDetailsModal','viewQueriesModal','paymentNotifsModal','payConfirmModal','editDoctorModal','editPatientModal','addUserModal','editUserModal','sessionsModal'].forEach(setupModalStacking);
+    ['editLeaveModal','duplicateLeaveModal','confirmModal','leaveDetailsModal','viewQueriesModal','paymentNotifsModal','payConfirmModal','editDoctorModal','editPatientModal','settingsModal','addUserModal','editUserModal','sessionsModal'].forEach(setupModalStacking);
 
     const confirmMessage = document.getElementById('confirmMessage');
     const confirmYesBtn = document.getElementById('confirmYesBtn');
@@ -5439,7 +6203,6 @@ document.addEventListener('DOMContentLoaded', () => {
 
         updateTable(usersTable, currentTableData.users, generateUserRow);
 
-        // btnAddUser already opens modal via data-bs-toggle attribute
 
         document.getElementById('saveNewUser').addEventListener('click', async () => {
             showLoading();
@@ -5559,24 +6322,159 @@ document.addEventListener('DOMContentLoaded', () => {
         });
     }
 
+
+    // ====== الإعدادات ======
+    if (IS_ADMIN) {
+        document.getElementById('openUsersManagerFromSettings')?.addEventListener('click', () => {
+            const settingsModal = bootstrap.Modal.getInstance(document.getElementById('settingsModal'));
+            if (settingsModal) settingsModal.hide();
+            const usersModalEl = document.getElementById('addUserModal');
+            if (usersModalEl) bootstrap.Modal.getOrCreateInstance(usersModalEl).show();
+        });
+
+        document.getElementById('settingsModal')?.addEventListener('show.bs.modal', async () => {
+            const result = await sendAjaxRequest('fetch_ui_preferences', {});
+            if (result.success && result.preferences) {
+                hydrateSettingsForm(result.preferences);
+                applyAppearancePreferences(result.preferences);
+            } else {
+                hydrateSettingsForm(INITIAL_UI_PREFERENCES);
+            }
+        });
+
+        document.getElementById('resetAppearanceSettings')?.addEventListener('click', () => {
+            const defaults = { dark_text_color: '#d8c8ff', dark_glow_color: '#8b5cf6', dark_glow_enabled: '1', font_family: 'Cairo', data_view_mode: 'table' };
+            hydrateSettingsForm(defaults);
+            applyAppearancePreferences(defaults);
+        });
+
+        const presetMap = {
+            classic_violet: { dark_text_color: '#d8c8ff', dark_glow_color: '#8b5cf6', dark_glow_enabled: '1', font_family: 'Cairo', data_view_mode: 'table' },
+            deep_ocean: { dark_text_color: '#dbeafe', dark_glow_color: '#2563eb', dark_glow_enabled: '1', font_family: 'IBM Plex Sans Arabic', data_view_mode: 'compact' },
+            emerald_glow: { dark_text_color: '#dcfce7', dark_glow_color: '#10b981', dark_glow_enabled: '1', font_family: 'Tajawal', data_view_mode: 'cards' },
+            sunset_gold: { dark_text_color: '#fde68a', dark_glow_color: '#f59e0b', dark_glow_enabled: '1', font_family: 'Changa', data_view_mode: 'zebra' },
+            glass_lux: { dark_text_color: '#e2e8f0', dark_glow_color: '#6366f1', dark_glow_enabled: '1', font_family: 'Readex Pro', data_view_mode: 'glass' },
+            minimal_clean: { dark_text_color: '#111827', dark_glow_color: '#111827', dark_glow_enabled: '0', font_family: 'Noto Kufi Arabic', data_view_mode: 'minimal' },
+            mono_clear: { dark_text_color: '#111827', dark_glow_color: '#111827', dark_glow_enabled: '0', font_family: 'Noto Kufi Arabic', data_view_mode: 'table' }
+        };
+
+        document.getElementById('settingThemePreset')?.addEventListener('change', function() {
+            const key = this.value;
+            if (!key || !presetMap[key]) return;
+            hydrateSettingsForm(presetMap[key]);
+            applyAppearancePreferences(presetMap[key]);
+        });
+
+        document.getElementById('settingDataViewMode')?.addEventListener('change', function() {
+            applyDataViewMode(this.value || 'table');
+        });
+
+        document.querySelectorAll('.btn-color-mix').forEach(btn => {
+            btn.addEventListener('click', () => {
+                const pref = {
+                    dark_text_color: btn.dataset.text || '#d8c8ff',
+                    dark_glow_color: btn.dataset.glow || '#8b5cf6',
+                    dark_glow_enabled: btn.dataset.glowEnabled || '1',
+                    font_family: document.getElementById('settingFontFamily')?.value || 'Cairo',
+                    data_view_mode: document.getElementById('settingDataViewMode')?.value || 'table'
+                };
+                hydrateSettingsForm(pref);
+                applyAppearancePreferences(pref);
+            });
+        });
+
+        document.getElementById('uiAppearanceForm')?.addEventListener('submit', async (e) => {
+            e.preventDefault();
+            const pref = {
+                dark_text_color: document.getElementById('settingDarkTextColor')?.value || '#d8c8ff',
+                dark_glow_color: document.getElementById('settingDarkGlowColor')?.value || '#8b5cf6',
+                dark_glow_enabled: document.getElementById('settingDarkGlowEnabled')?.checked ? '1' : '0',
+                font_family: document.getElementById('settingFontFamily')?.value || 'Cairo',
+                data_view_mode: document.getElementById('settingDataViewMode')?.value || 'table'
+            };
+            const result = await sendAjaxRequest('save_ui_preferences', pref);
+            if (result.success) {
+                applyAppearancePreferences(result.preferences || pref);
+                showToast(result.message || 'تم الحفظ.', 'success');
+            }
+        });
+    }
+
     // ====== المراسلات ======
     let activeChatPeerId = null;
     let currentReplyMessage = null;
     let mediaRecorder = null;
     let voiceChunks = [];
+    let pendingVoiceFile = null;
+    let chatMaxUploadMB = 50;
+
+    function applyDataViewMode(mode = 'table') {
+        const allowed = ['table','compact','cards','zebra','glass','minimal'];
+        const m = allowed.includes(mode) ? mode : 'table';
+        document.body.classList.remove('data-view-table','data-view-compact','data-view-cards','data-view-zebra','data-view-glass','data-view-minimal');
+        document.body.classList.add(`data-view-${m}`);
+        // إعادة رسم سريعة للتأكد من تطبيق النمط على كل الجداول مباشرة
+        try { applyAllCurrentFilters(); } catch (_) {}
+        [
+            document.getElementById('leavesTable'),
+            document.getElementById('archivedTable'),
+            document.getElementById('doctorsTable'),
+            document.getElementById('patientsTable'),
+            document.getElementById('queriesTable'),
+            document.getElementById('paymentsTable'),
+            document.getElementById('usersTable'),
+            document.getElementById('sessionsTable')
+        ].forEach(t => { if (t) applyTableMobileLabels(t); });
+    }
+
+    function applyAppearancePreferences(pref = {}) {
+        const root = document.documentElement;
+        const textColor = pref.dark_text_color || '#d8c8ff';
+        const glowColor = pref.dark_glow_color || '#8b5cf6';
+        const glowEnabled = String(pref.dark_glow_enabled || '1') === '1';
+        const fontFamily = pref.font_family || 'Cairo';
+        const dataViewMode = pref.data_view_mode || 'table';
+        root.style.setProperty('--dark-data-color', textColor);
+        root.style.setProperty('--dark-glow-color', glowColor);
+        root.style.setProperty('--dark-glow-shadow', glowEnabled ? `0 0 10px ${glowColor}` : 'none');
+        root.style.setProperty('--app-font-family', `'${fontFamily}', sans-serif`);
+        applyDataViewMode(dataViewMode);
+    }
+
+    function hydrateSettingsForm(pref = {}) {
+        const text = document.getElementById('settingDarkTextColor');
+        const glow = document.getElementById('settingDarkGlowColor');
+        const enabled = document.getElementById('settingDarkGlowEnabled');
+        const font = document.getElementById('settingFontFamily');
+        const dataView = document.getElementById('settingDataViewMode');
+        if (text) text.value = pref.dark_text_color || '#d8c8ff';
+        if (glow) glow.value = pref.dark_glow_color || '#8b5cf6';
+        if (enabled) enabled.checked = String(pref.dark_glow_enabled || '1') === '1';
+        if (font) font.value = pref.font_family || 'Cairo';
+        if (dataView) dataView.value = pref.data_view_mode || 'table';
+    }
+
+    applyAppearancePreferences(INITIAL_UI_PREFERENCES);
 
     function renderChatUsers(list) {
         const sel = document.getElementById('chatPeerSelect');
         if (!sel) return;
         const users = Array.isArray(list) ? list : [];
-        if (users.length === 0) {
+        const options = [
+            { id: '__all__', label: '💬 مجموعة الكل (جروب عام)' },
+            ...(IS_ADMIN ? [{ id: '__monitor__', label: '🛡️ مراقبة كل محادثات المستخدمين' }] : [])
+        ];
+        users.forEach(u => options.push({ id: String(u.id), label: `${u.display_name} (${u.username})` }));
+
+        const prev = activeChatPeerId || sel.value;
+        if (options.length === 0) {
             sel.innerHTML = '<option value="">لا يوجد مستخدمون</option>';
             activeChatPeerId = null;
             return;
         }
-        const prev = activeChatPeerId || sel.value;
-        sel.innerHTML = '<option value="">اختر المستخدم</option>' + users.map(u => `<option value="${u.id}">${htmlspecialchars(u.display_name)} (${htmlspecialchars(u.username)})</option>`).join('');
-        if (prev && users.some(u => String(u.id) === String(prev))) {
+
+        sel.innerHTML = '<option value="">اختر جهة التواصل</option>' + options.map(o => `<option value="${htmlspecialchars(o.id)}">${htmlspecialchars(o.label)}</option>`).join('');
+        if (prev && options.some(o => String(o.id) === String(prev))) {
             sel.value = prev;
             activeChatPeerId = String(prev);
         }
@@ -5586,15 +6484,36 @@ document.addEventListener('DOMContentLoaded', () => {
         const box = document.getElementById('chatMessagesBox');
         if (!box) return;
         const me = String(<?php echo intval($_SESSION['admin_user_id'] ?? 0); ?>);
+        const monitorMode = activeChatPeerId === '__monitor__';
         const rows = (list || []).map(m => {
             const mine = String(m.sender_id) === me;
-            const fileHtml = m.file_path ? (m.message_type === 'image' ? `<div><img src="${htmlspecialchars(m.file_path)}" style="max-width:220px;border-radius:8px;"></div>` : (m.message_type === 'voice' ? `<audio controls src="${htmlspecialchars(m.file_path)}" style="max-width:240px;"></audio>` : `<a href="${htmlspecialchars(m.file_path)}" target="_blank" class="btn btn-sm btn-outline-primary mt-1"><i class="bi bi-paperclip"></i> ${htmlspecialchars(m.file_name || 'ملف')}</a>`)) : '';
-            const replyHtml = m.reply_to_id ? `<div class="small text-muted border-end pe-2 mb-1"><i class="bi bi-reply"></i> ${htmlspecialchars(m.reply_message_text || m.reply_file_name || 'رسالة')}</div>` : '';
-            const delBtn = mine || IS_ADMIN ? `<button class="btn btn-sm btn-outline-danger mt-1 btn-delete-chat-message" data-id="${m.id}"><i class="bi bi-trash3"></i></button>` : '';
-            const replyBtn = `<button class="btn btn-sm btn-outline-secondary mt-1 btn-reply-chat-message" data-id="${m.id}" data-text="${htmlspecialchars(m.message_text || m.file_name || 'رسالة')}"><i class="bi bi-reply"></i></button>`;
-            return `<div class="mb-2 d-flex ${mine ? 'justify-content-start' : 'justify-content-end'}"><div class="msg-bubble ${mine ? 'msg-mine' : 'msg-other'}" style="max-width:78%;"><div class="small fw-bold">${htmlspecialchars(m.sender_name || '')}</div>${replyHtml}<div>${htmlspecialchars(m.message_text || '')}</div>${fileHtml}<div class="small text-muted">${formatSaudiDateTime(m.created_at)}</div>${replyBtn} ${delBtn}</div></div>`;
+            const rowClass = monitorMode ? 'mine' : (mine ? 'mine' : 'other');
+            const bubbleClass = monitorMode ? 'msg-mine' : (mine ? 'msg-mine' : 'msg-other');
+            const isGlobal = (m.chat_scope || '') === 'global';
+            const scopeBadge = isGlobal ? '<span class="badge bg-info ms-1">مجموعة الكل</span>' : '<span class="badge bg-secondary ms-1">خاص</span>';
+            const peerTarget = isGlobal ? 'مجموعة الكل' : (m.receiver_name || '');
+            const peerInfo = monitorMode ? `<span class="small text-muted">${htmlspecialchars(m.sender_name || '')} → ${htmlspecialchars(peerTarget)}</span>${scopeBadge}` : '';
+            const fileExt = (m.file_name || m.file_path || '').split('.').pop().toLowerCase();
+            const mime = String(m.mime_type || '').toLowerCase();
+            const isImage = m.message_type === 'image';
+            const isVoice = m.message_type === 'voice' || mime.startsWith('audio/') || ['mp3','wav','ogg','m4a','aac','webm'].includes(fileExt);
+            const fileHtml = m.file_path
+                ? (isImage
+                    ? `<div class="chat-media"><img class="chat-image-preview" src="${htmlspecialchars(m.file_path)}" alt="مرفق صورة"></div>`
+                    : (isVoice
+                        ? `<div class="chat-media"><div class="chat-voice-player"><audio controls preload="metadata" playsinline src="${htmlspecialchars(m.file_path)}"></audio><div class="chat-voice-speeds" role="group" aria-label="سرعة تشغيل الفويس"><button type="button" class="chat-voice-speed active" data-rate="1">1x</button><button type="button" class="chat-voice-speed" data-rate="1.5">1.5x</button><button type="button" class="chat-voice-speed" data-rate="2">2x</button></div></div></div>`
+                        : `<div class="chat-media"><a href="${htmlspecialchars(m.file_path)}" target="_blank" class="btn btn-sm btn-outline-primary chat-file-link"><i class="bi bi-paperclip"></i> ${htmlspecialchars(m.file_name || 'ملف')}</a></div>`))
+                : '';
+            const replyHtml = m.reply_to_id
+                ? `<div class="chat-reply-preview"><i class="bi bi-reply"></i> ${htmlspecialchars(m.reply_message_text || m.reply_file_name || 'رسالة')}</div>`
+                : '';
+            const delBtn = mine || IS_ADMIN
+                ? `<button class="btn btn-sm btn-outline-danger btn-delete-chat-message" data-id="${m.id}" title="حذف"><i class="bi bi-trash3"></i></button>`
+                : '';
+            const replyBtn = `<button class="btn btn-sm btn-outline-secondary btn-reply-chat-message" data-id="${m.id}" data-text="${htmlspecialchars(m.message_text || m.file_name || 'رسالة')}" title="رد"><i class="bi bi-reply"></i></button>`;
+            return `<div class="chat-message-row ${rowClass}"><div class="msg-bubble ${bubbleClass}"><div class="chat-author">${htmlspecialchars(m.sender_name || '')}</div>${peerInfo}${replyHtml}<div class="chat-text">${htmlspecialchars(m.message_text || '')}</div>${fileHtml}<div class="chat-time">${formatSaudiDateTime(m.created_at)}</div><div class="chat-actions">${replyBtn}${delBtn}</div></div></div>`;
         }).join('');
-        box.innerHTML = rows || '<div class="text-muted text-center mt-4">لا توجد رسائل بعد.</div>';
+        box.innerHTML = rows || '<div class="chat-empty">لا توجد رسائل بعد. ابدأ محادثة الآن ✨</div>';
         box.scrollTop = box.scrollHeight;
     }
 
@@ -5604,6 +6523,7 @@ document.addEventListener('DOMContentLoaded', () => {
             currentTableData.chat_users = result.users || [];
             renderChatUsers(currentTableData.chat_users);
             const rh = document.getElementById('chatRetentionHours'); if (rh && result.chat_retention_hours !== undefined) rh.value = result.chat_retention_hours;
+            if (result.max_upload_mb) chatMaxUploadMB = parseInt(result.max_upload_mb, 10) || 50;
             if (result.unread_messages_count !== undefined) updateChatUnreadBadge(result.unread_messages_count);
         }
     }
@@ -5910,41 +6830,38 @@ document.addEventListener('DOMContentLoaded', () => {
         });
     }
 
-    const markAllPaidBtn = document.getElementById('markAllPaidBtn');
-    if (markAllPaidBtn) {
-        markAllPaidBtn.addEventListener('click', () => {
-            confirmMessage.textContent = 'سيتم جعل كل الإجازات النشطة مدفوعة. متابعة؟';
-            confirmYesBtn.textContent = 'نعم، نفّذ';
-            currentConfirmAction = async () => {
-                const result = await sendAjaxRequest('mark_all_leaves_paid', {});
-                if (result.success) {
-                    showToast(result.message, 'success');
-                    syncTableDataFromResult(result);
-                    applyAllCurrentFilters();
-                    if (result.stats) updateStats(result.stats);
-                }
-            };
-            confirmModal.show();
-        });
+    function triggerMarkAllPaidFlow() {
+        confirmMessage.textContent = 'سيتم جعل كل الإجازات النشطة مدفوعة. متابعة؟';
+        confirmYesBtn.textContent = 'نعم، نفّذ';
+        currentConfirmAction = async () => {
+            const result = await sendAjaxRequest('mark_all_leaves_paid', {});
+            if (result.success) {
+                showToast(result.message, 'success');
+                syncTableDataFromResult(result);
+                applyAllCurrentFilters();
+                if (result.stats) updateStats(result.stats);
+            }
+        };
+        confirmModal.show();
     }
 
-    const resetAllPaymentsBtn = document.getElementById('resetAllPaymentsBtn');
-    if (resetAllPaymentsBtn) {
-        resetAllPaymentsBtn.addEventListener('click', () => {
-            confirmMessage.textContent = 'سيتم تصفير كل المدفوعات والمستحقات. متابعة؟';
-            confirmYesBtn.textContent = 'نعم، صفّر';
-            currentConfirmAction = async () => {
-                const result = await sendAjaxRequest('reset_all_payments', {});
-                if (result.success) {
-                    showToast(result.message, 'success');
-                    syncTableDataFromResult(result);
-                    applyAllCurrentFilters();
-                    if (result.stats) updateStats(result.stats);
-                }
-            };
-            confirmModal.show();
-        });
+    function triggerResetAllPaymentsFlow() {
+        confirmMessage.textContent = 'سيتم تصفير كل المدفوعات والمستحقات. متابعة؟';
+        confirmYesBtn.textContent = 'نعم، صفّر';
+        currentConfirmAction = async () => {
+            const result = await sendAjaxRequest('reset_all_payments', {});
+            if (result.success) {
+                showToast(result.message, 'success');
+                syncTableDataFromResult(result);
+                applyAllCurrentFilters();
+                if (result.stats) updateStats(result.stats);
+            }
+        };
+        confirmModal.show();
     }
+
+    document.getElementById('settingsMarkAllPaidBtn')?.addEventListener('click', triggerMarkAllPaidFlow);
+    document.getElementById('settingsResetAllPaymentsBtn')?.addEventListener('click', triggerResetAllPaymentsFlow);
 
     renderChatUsers(currentTableData.chat_users || []);
     refreshChatUsers();
@@ -5957,6 +6874,11 @@ document.addEventListener('DOMContentLoaded', () => {
     }, 120));
     document.getElementById('chatPeerSelect')?.addEventListener('change', async function() {
         activeChatPeerId = this.value || null;
+        const readOnly = activeChatPeerId === '__monitor__';
+        document.getElementById('chatMessageInput')?.toggleAttribute('disabled', readOnly);
+        document.getElementById('chatFileInput')?.toggleAttribute('disabled', readOnly);
+        document.getElementById('sendChatMessageBtn')?.toggleAttribute('disabled', readOnly);
+        document.getElementById('recordVoiceBtn')?.toggleAttribute('disabled', readOnly);
         await loadChatMessages();
     });
     document.getElementById('refreshChatUsersBtn')?.addEventListener('click', async () => { await refreshChatUsers(); });
@@ -5964,14 +6886,23 @@ document.addEventListener('DOMContentLoaded', () => {
         const input = document.getElementById('chatMessageInput');
         const text = (input?.value || '').trim();
         const fileInput = document.getElementById('chatFileInput');
-        const file = fileInput?.files?.[0] || null;
+        const file = fileInput?.files?.[0] || pendingVoiceFile || null;
         if (!activeChatPeerId || (!text && !file)) return;
+        if (activeChatPeerId === '__monitor__') {
+            showToast('وضع المراقبة للقراءة فقط.', 'warning');
+            return;
+        }
+        if (file && file.size > (chatMaxUploadMB * 1024 * 1024)) {
+            showToast(`حجم الملف أكبر من ${chatMaxUploadMB}MB.`, 'danger');
+            return;
+        }
         const payload = { peer_id: activeChatPeerId, message_text: text, reply_to_id: currentReplyMessage ? currentReplyMessage.id : '' };
         if (file) payload.chat_file = file;
         const result = await sendAjaxRequest('send_message', payload);
         if (result.success) {
             input.value = '';
             if (fileInput) fileInput.value = '';
+            pendingVoiceFile = null;
             currentReplyMessage = null;
             const rp = document.getElementById('chatReplyPreview'); if (rp) { rp.classList.add('d-none'); rp.textContent = ''; }
             await loadChatMessages();
@@ -5988,23 +6919,48 @@ document.addEventListener('DOMContentLoaded', () => {
     
     document.getElementById('recordVoiceBtn')?.addEventListener('click', async () => {
         try {
-            const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-            mediaRecorder = new MediaRecorder(stream);
+            if (!window.MediaRecorder || !navigator.mediaDevices?.getUserMedia) {
+                showToast('المتصفح لا يدعم تسجيل الفويس مباشرة. يمكنك رفع ملف صوتي يدويًا.', 'warning');
+                return;
+            }
+            // هذا السطر يطلب إذن الميكروفون مباشرة من المتصفح
+            const stream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true } });
+            const mimeCandidates = ['audio/webm;codecs=opus', 'audio/webm', 'audio/ogg;codecs=opus', 'audio/mp4'];
+            const selectedMime = mimeCandidates.find(m => MediaRecorder.isTypeSupported(m)) || '';
+            mediaRecorder = selectedMime ? new MediaRecorder(stream, { mimeType: selectedMime }) : new MediaRecorder(stream);
             voiceChunks = [];
-            mediaRecorder.ondataavailable = e => { if (e.data.size > 0) voiceChunks.push(e.data); };
+            mediaRecorder.ondataavailable = e => { if (e.data && e.data.size > 0) voiceChunks.push(e.data); };
+            mediaRecorder.onerror = () => { showToast('حدث خطأ أثناء تسجيل الفويس.', 'danger'); };
             mediaRecorder.onstop = () => {
-                const blob = new Blob(voiceChunks, { type: 'audio/webm' });
-                const file = new File([blob], `voice_${Date.now()}.webm`, { type: 'audio/webm' });
+                const mime = mediaRecorder.mimeType || selectedMime || 'audio/webm';
+                const ext = mime.includes('ogg') ? 'ogg' : (mime.includes('mp4') ? 'mp4' : 'webm');
+                const blob = new Blob(voiceChunks, { type: mime });
+                if (!blob.size) {
+                    showToast('لم يتم التقاط أي صوت، حاول مرة أخرى.', 'warning');
+                    return;
+                }
+                const file = new File([blob], `voice_${Date.now()}.${ext}`, { type: mime });
+                pendingVoiceFile = file;
                 const fileInput = document.getElementById('chatFileInput');
-                const dt = new DataTransfer(); dt.items.add(file); fileInput.files = dt.files;
+                if (fileInput) {
+                    try {
+                        const dt = new DataTransfer();
+                        dt.items.add(file);
+                        fileInput.files = dt.files;
+                    } catch (_) {
+                        // بعض المتصفحات (خصوصًا على بعض أجهزة أندرويد) لا تسمح بتعيين files برمجيًا
+                    }
+                }
+                stream.getTracks().forEach(t => t.stop());
                 document.getElementById('recordVoiceBtn')?.classList.remove('d-none');
                 document.getElementById('stopVoiceBtn')?.classList.add('d-none');
+                showToast('تم تجهيز ملف الفويس، اضغط إرسال.', 'success');
             };
-            mediaRecorder.start();
+            mediaRecorder.start(250);
             document.getElementById('recordVoiceBtn')?.classList.add('d-none');
             document.getElementById('stopVoiceBtn')?.classList.remove('d-none');
         } catch (e) {
-            showToast('تعذر بدء تسجيل الفويس.', 'danger');
+            showToast('تعذر بدء تسجيل الفويس. وافق على إذن الميكروفون ثم أعد المحاولة.', 'danger');
         }
     });
     document.getElementById('stopVoiceBtn')?.addEventListener('click', () => {
@@ -6014,8 +6970,26 @@ document.addEventListener('DOMContentLoaded', () => {
     document.getElementById('clearChatFileBtn')?.addEventListener('click', () => {
         const f = document.getElementById('chatFileInput');
         if (f) f.value = '';
+        pendingVoiceFile = null;
+    });
+    document.getElementById('chatFileInput')?.addEventListener('change', () => {
+        // إذا اختار المستخدم ملفًا يدويًا نتجاهل الملف الصوتي المؤقت
+        pendingVoiceFile = null;
     });
     document.getElementById('chatMessagesBox')?.addEventListener('click', async (e) => {
+        const speedBtn = e.target.closest('.chat-voice-speed');
+        if (speedBtn) {
+            const voiceWrap = speedBtn.closest('.chat-voice-player');
+            const audioEl = voiceWrap?.querySelector('audio');
+            const nextRate = parseFloat(speedBtn.dataset.rate || '1');
+            if (audioEl && Number.isFinite(nextRate) && nextRate > 0) {
+                audioEl.playbackRate = nextRate;
+                voiceWrap?.querySelectorAll('.chat-voice-speed').forEach(b => b.classList.remove('active'));
+                speedBtn.classList.add('active');
+            }
+            return;
+        }
+
         const del = e.target.closest('.btn-delete-chat-message');
         if (del) {
             const result = await sendAjaxRequest('delete_message', { message_id: del.dataset.id });
@@ -6027,6 +7001,17 @@ document.addEventListener('DOMContentLoaded', () => {
             currentReplyMessage = { id: rep.dataset.id, text: rep.dataset.text };
             const rp = document.getElementById('chatReplyPreview');
             if (rp) { rp.classList.remove('d-none'); rp.textContent = `رد على: ${rep.dataset.text}`; }
+            return;
+        }
+        const img = e.target.closest('.chat-image-preview');
+        if (img) {
+            const modalEl = document.getElementById('chatImageModal');
+            const modalImg = document.getElementById('chatImageModalImg');
+            if (modalEl && modalImg) {
+                modalImg.src = img.src;
+                const modal = bootstrap.Modal.getOrCreateInstance(modalEl);
+                modal.show();
+            }
         }
     });
     document.getElementById('saveChatRetentionBtn')?.addEventListener('click', async () => {
@@ -6034,7 +7019,8 @@ document.addEventListener('DOMContentLoaded', () => {
         await sendAjaxRequest('set_chat_retention', { hours: h });
     });
     document.getElementById('runChatCleanupBtn')?.addEventListener('click', async () => {
-        const result = await sendAjaxRequest('run_chat_cleanup', {});
+        if (!activeChatPeerId) { showToast('اختر محادثة أولاً.', 'warning'); return; }
+        const result = await sendAjaxRequest('run_chat_cleanup', { peer_id: activeChatPeerId });
         if (result.success) await loadChatMessages();
     });
 
@@ -6179,6 +7165,17 @@ document.addEventListener('DOMContentLoaded', () => {
 
     // ====== التحميل الأولي ======
     applyAllCurrentFilters();
+    refreshSensitiveValuesMask();
+    document.getElementById('toggleSensitiveAmounts')?.addEventListener('click', (e) => {
+        const paidEl = document.getElementById('stat-paid-amount');
+        const unpaidEl = document.getElementById('stat-unpaid-amount');
+        if (!paidEl || !unpaidEl) return;
+        const next = paidEl.dataset.visible === '1' ? '0' : '1';
+        paidEl.dataset.visible = next;
+        unpaidEl.dataset.visible = next;
+        e.currentTarget.innerHTML = next === '1' ? '<i class="bi bi-eye-slash"></i>' : '<i class="bi bi-eye"></i>';
+        refreshSensitiveValuesMask();
+    });
     updateDoctorSelects(currentTableData.doctors);
     updatePatientSelects(currentTableData.patients);
 
@@ -6198,6 +7195,21 @@ document.addEventListener('DOMContentLoaded', () => {
 
 }); // نهاية DOMContentLoaded
 </script>
+
+<!-- عرض الصورة بحجم كبير -->
+<div class="modal fade" id="chatImageModal" tabindex="-1" aria-hidden="true">
+  <div class="modal-dialog modal-dialog-centered modal-xl">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h5 class="modal-title"><i class="bi bi-image"></i> معاينة الصورة</h5>
+        <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+      </div>
+      <div class="modal-body">
+        <img id="chatImageModalImg" src="" alt="chat image preview">
+      </div>
+    </div>
+  </div>
+</div>
+
 </body>
 </html>
-
