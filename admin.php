@@ -27,7 +27,7 @@ header('Permissions-Policy: geolocation=(), microphone=(self), camera=()');
 // ======================== إعدادات قاعدة البيانات ========================
 $db_host = 'mysql.railway.internal';
 $db_user = 'root';
-$db_pass = 'mDxJcHtRORIlpLbtDJKKckeuLgozRUVO';
+$db_pass = 'CSCoMqXcUDBrzyRPMgjIxRVziMqcOFoK';
 $db_name = 'railway';
 $db_port = 3306;
 
@@ -87,7 +87,76 @@ $pdo->exec("CREATE TABLE IF NOT EXISTS app_settings (
     updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci");
 
+
+$pdo->exec("CREATE TABLE IF NOT EXISTS doctors (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    name VARCHAR(150) NOT NULL,
+    title VARCHAR(150) NOT NULL,
+    note TEXT NULL,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci");
+
+$pdo->exec("CREATE TABLE IF NOT EXISTS patients (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    name VARCHAR(150) NOT NULL,
+    identity_number VARCHAR(50) NOT NULL,
+    phone VARCHAR(30) NULL,
+    folder_link VARCHAR(500) NULL,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    UNIQUE KEY uniq_patients_identity_number (identity_number)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci");
+
+$pdo->exec("CREATE TABLE IF NOT EXISTS sick_leaves (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    service_code VARCHAR(50) NOT NULL,
+    patient_id INT NOT NULL,
+    doctor_id INT NOT NULL,
+    issue_date DATE NOT NULL,
+    start_date DATE NOT NULL,
+    end_date DATE NOT NULL,
+    days_count INT NOT NULL,
+    is_companion TINYINT(1) DEFAULT 0,
+    companion_name VARCHAR(150) NULL,
+    companion_relation VARCHAR(150) NULL,
+    is_paid TINYINT(1) DEFAULT 0,
+    payment_amount DECIMAL(10,2) DEFAULT 0,
+    deleted_at DATETIME NULL,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    UNIQUE KEY uniq_sick_leaves_service_code (service_code),
+    CONSTRAINT fk_sick_leaves_patient FOREIGN KEY (patient_id) REFERENCES patients(id) ON DELETE RESTRICT,
+    CONSTRAINT fk_sick_leaves_doctor FOREIGN KEY (doctor_id) REFERENCES doctors(id) ON DELETE RESTRICT
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci");
+
+$pdo->exec("CREATE TABLE IF NOT EXISTS notifications (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    type VARCHAR(50) NOT NULL,
+    leave_id INT NOT NULL,
+    message TEXT NOT NULL,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    CONSTRAINT fk_notifications_leave FOREIGN KEY (leave_id) REFERENCES sick_leaves(id) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci");
+
+$pdo->exec("CREATE TABLE IF NOT EXISTS leave_queries (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    leave_id INT NOT NULL,
+    queried_at DATETIME NOT NULL,
+    source VARCHAR(20) NOT NULL DEFAULT 'external',
+    CONSTRAINT fk_leave_queries_leave FOREIGN KEY (leave_id) REFERENCES sick_leaves(id) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci");
+
+function tableExists(PDO $pdo, string $table): bool {
+    $stmt = $pdo->prepare("SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = DATABASE() AND table_name = ?");
+    $stmt->execute([$table]);
+    return (int)$stmt->fetchColumn() > 0;
+}
+
 function ensureColumn(PDO $pdo, string $table, string $column, string $definition): void {
+    if (!tableExists($pdo, $table)) {
+        return;
+    }
     $stmt = $pdo->prepare("SELECT COUNT(*) FROM information_schema.columns WHERE table_schema = DATABASE() AND table_name = ? AND column_name = ?");
     $stmt->execute([$table, $column]);
     if ((int)$stmt->fetchColumn() === 0) {
@@ -96,6 +165,9 @@ function ensureColumn(PDO $pdo, string $table, string $column, string $definitio
 }
 
 function ensureIndex(PDO $pdo, string $table, string $indexName, string $columns): void {
+    if (!tableExists($pdo, $table)) {
+        return;
+    }
     $check = $pdo->prepare("SELECT COUNT(*) FROM information_schema.statistics WHERE table_schema = DATABASE() AND table_name = ? AND index_name = ?");
     $check->execute([$table, $indexName]);
     if ((int)$check->fetchColumn() === 0) {
@@ -3433,7 +3505,7 @@ if (!in_array($uiDataViewMode, ['table','compact','cards','zebra','glass','minim
             </button>
         </form>
         <div class="text-center mt-3">
-            <small class="text-muted">المستخدم الافتراضي: admin / admin123</small>
+            <small class="text-muted">المستخدم الافتراضي: _______</small>
         </div>
     </div>
 </div>
