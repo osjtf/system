@@ -3709,6 +3709,41 @@ if (!in_array($uiDataViewMode, ['table','compact','cards','zebra','glass','minim
                 <h5><i class="bi bi-plus-circle-fill"></i> إضافة إجازة مرضية جديدة</h5>
                 <form id="addLeaveForm">
                     <div class="row g-3">
+                        <div class="col-12">
+                            <label class="form-label">طريقة الإدخال</label>
+                            <div class="d-flex gap-3 flex-wrap">
+                                <div class="form-check">
+                                    <input class="form-check-input" type="radio" name="add_mode" id="add_mode_assisted" value="assisted" checked>
+                                    <label class="form-check-label" for="add_mode_assisted">ذكي (تحويل البيانات تلقائياً)</label>
+                                </div>
+                                <div class="form-check">
+                                    <input class="form-check-input" type="radio" name="add_mode" id="add_mode_manual" value="manual">
+                                    <label class="form-check-label" for="add_mode_manual">يدوي (الطريقة الحالية)</label>
+                                </div>
+                            </div>
+                        </div>
+
+                        <div class="col-12" id="assistedInputCard">
+                            <label class="form-label">إدخال ذكي للبيانات</label>
+                            <textarea class="form-control" id="assisted_leave_input" rows="5" placeholder="ألصق البيانات بأي تنسيق، مثال:
+اسم المريض: أحمد علي
+الهوية: 1020304050
+الجوال: 05xxxxxxxx
+رابط الملف: https://...
+اسم الطبيب: د. سارة محمد
+المسمى: استشاري باطنية
+تاريخ الإصدار: 2026-04-22
+من: 2026-04-22
+إلى: 2026-04-25
+مدفوعة: نعم
+المبلغ: 150
+مرافق: لا"></textarea>
+                            <div class="d-flex align-items-center gap-2 mt-2 flex-wrap">
+                                <button type="button" class="btn btn-outline-primary btn-sm" id="assistParseBtn"><i class="bi bi-magic"></i> تحليل وتعبئة الحقول</button>
+                                <small class="text-muted">سيتم تعبئة النموذج تلقائياً، وإذا كانت هناك حقول ناقصة سيتم تنبيهك بها.</small>
+                            </div>
+                        </div>
+
                         <!-- رمز الخدمة -->
                         <div class="col-md-4">
                             <label class="form-label">بادئة رمز الخدمة</label>
@@ -5590,9 +5625,188 @@ document.addEventListener('DOMContentLoaded', () => {
     document.getElementById('dup_start_date').addEventListener('change', () => calcDays('dup_start_date', 'dup_end_date', 'dup_days_count'));
     document.getElementById('dup_end_date').addEventListener('change', () => calcDays('dup_start_date', 'dup_end_date', 'dup_days_count'));
 
+    function normalizeArabicText(value) {
+        return (value || '')
+            .toString()
+            .replace(/[\u064B-\u065F]/g, '')
+            .replace(/أ|إ|آ/g, 'ا')
+            .replace(/ى/g, 'ي')
+            .replace(/ة/g, 'ه')
+            .trim()
+            .toLowerCase();
+    }
+
+    function parseAssistedLeaveInput(rawText) {
+        const payload = {};
+        const lines = (rawText || '')
+            .split(/\n+/)
+            .map(l => l.trim())
+            .filter(Boolean);
+
+        const fieldMap = {
+            patient_name: ['اسم المريض', 'المريض', 'patient name'],
+            patient_identity: ['الهوية', 'رقم الهوية', 'identity', 'id number'],
+            patient_phone: ['الجوال', 'الهاتف', 'phone', 'mobile'],
+            patient_folder_link: ['رابط الملف', 'رابط المجلد', 'folder link', 'file link'],
+            doctor_name: ['اسم الطبيب', 'الطبيب', 'doctor name'],
+            doctor_title: ['المسمى', 'المسمى الوظيفي', 'الاختصاص', 'title', 'specialty'],
+            doctor_note: ['ملاحظة الطبيب', 'ملاحظة', 'note'],
+            issue_date: ['تاريخ الاصدار', 'تاريخ الإصدار', 'issue date'],
+            start_date: ['بداية الاجازة', 'بداية الإجازة', 'من', 'start date', 'from'],
+            end_date: ['نهاية الاجازة', 'نهاية الإجازة', 'الى', 'إلى', 'end date', 'to'],
+            days_count: ['عدد الايام', 'عدد الأيام', 'days', 'days count'],
+            service_code_manual: ['رمز الخدمة', 'service code'],
+            service_prefix: ['نوع الرمز', 'بادئة الرمز', 'prefix', 'service prefix'],
+            is_companion: ['مرافق', 'اجازة مرافق', 'إجازة مرافق', 'companion'],
+            companion_name: ['اسم المرافق', 'companion name'],
+            companion_relation: ['صلة القرابة', 'العلاقة', 'companion relation'],
+            is_paid: ['مدفوعة', 'دفع', 'paid'],
+            payment_amount: ['المبلغ', 'amount']
+        };
+
+        function findFieldByKey(rawKey) {
+            const normalizedKey = normalizeArabicText(rawKey);
+            for (const [fieldName, aliases] of Object.entries(fieldMap)) {
+                if (aliases.some(alias => normalizedKey.includes(normalizeArabicText(alias)))) {
+                    return fieldName;
+                }
+            }
+            return null;
+        }
+
+        lines.forEach(line => {
+            const match = line.match(/^([^:=\-]+)\s*[:=\-]\s*(.+)$/);
+            if (!match) return;
+            const key = match[1].trim();
+            const value = match[2].trim();
+            const fieldName = findFieldByKey(key);
+            if (fieldName) payload[fieldName] = value;
+        });
+
+        return payload;
+    }
+
+    function parseBooleanValue(value) {
+        const normalized = normalizeArabicText(value);
+        return ['1', 'yes', 'true', 'نعم', 'ايوه', 'اي', 'صح', 'مدفوعه', 'مدفوعة'].includes(normalized);
+    }
+
+    function applyAssistedDataToAddForm(data) {
+        const patientSelect = document.getElementById('patient_select');
+        const doctorSelect = document.getElementById('doctor_select');
+
+        if (data.service_code_manual) document.getElementById('service_code_manual').value = data.service_code_manual.toUpperCase();
+        if (data.service_prefix) {
+            const normalizedPrefix = data.service_prefix.toUpperCase().includes('P') ? 'PSL' : 'GSL';
+            document.getElementById('service_prefix').value = normalizedPrefix;
+        }
+        if (data.issue_date) document.getElementById('issue_date').value = data.issue_date;
+        if (data.start_date) document.getElementById('start_date').value = data.start_date;
+        if (data.end_date) document.getElementById('end_date').value = data.end_date;
+        if (data.days_count) document.getElementById('days_count').value = parseInt(data.days_count, 10) || '';
+
+        if (data.patient_name || data.patient_identity || data.patient_phone || data.patient_folder_link) {
+            patientSelect.value = 'manual';
+            togglePatientManualFields();
+            if (data.patient_name) document.getElementById('patient_manual_name').value = data.patient_name;
+            if (data.patient_identity) document.getElementById('patient_manual_id').value = data.patient_identity;
+            if (data.patient_phone) document.getElementById('patient_manual_phone').value = data.patient_phone;
+            if (data.patient_folder_link) document.getElementById('patient_manual_folder_link').value = data.patient_folder_link;
+        }
+
+        if (data.doctor_name || data.doctor_title || data.doctor_note) {
+            doctorSelect.value = 'manual';
+            toggleDoctorManualFields();
+            if (data.doctor_name) document.getElementById('doctor_manual_name').value = data.doctor_name;
+            if (data.doctor_title) document.getElementById('doctor_manual_title').value = data.doctor_title;
+            if (data.doctor_note) document.getElementById('doctor_manual_note').value = data.doctor_note;
+        }
+
+        if (data.is_companion !== undefined) {
+            const checked = parseBooleanValue(data.is_companion);
+            document.getElementById('is_companion').checked = checked;
+            companionFields.forEach(f => checked ? f.classList.remove('hidden-field') : f.classList.add('hidden-field'));
+        }
+        if (data.companion_name) document.getElementById('companion_name').value = data.companion_name;
+        if (data.companion_relation) document.getElementById('companion_relation').value = data.companion_relation;
+
+        if (data.is_paid !== undefined) document.getElementById('is_paid').checked = parseBooleanValue(data.is_paid);
+        if (data.payment_amount) document.getElementById('payment_amount').value = parseFloat(data.payment_amount) || 0;
+
+        if (!document.getElementById('days_count').value) calcDays('start_date', 'end_date', 'days_count');
+    }
+
+    function getAssistedMissingFields() {
+        const missing = [];
+        const patientSelect = document.getElementById('patient_select').value;
+        const doctorSelect = document.getElementById('doctor_select').value;
+        const requiredSimple = [
+            ['issue_date', 'تاريخ الإصدار'],
+            ['start_date', 'بداية الإجازة'],
+            ['end_date', 'نهاية الإجازة'],
+            ['days_count', 'عدد الأيام']
+        ];
+
+        requiredSimple.forEach(([id, label]) => {
+            if (!document.getElementById(id).value) missing.push(label);
+        });
+
+        if (!patientSelect) missing.push('المريض');
+        if (!doctorSelect) missing.push('الطبيب');
+
+        if (patientSelect === 'manual') {
+            if (!document.getElementById('patient_manual_name').value.trim()) missing.push('اسم المريض');
+            if (!document.getElementById('patient_manual_id').value.trim()) missing.push('رقم هوية المريض');
+        }
+
+        if (doctorSelect === 'manual') {
+            if (!document.getElementById('doctor_manual_name').value.trim()) missing.push('اسم الطبيب');
+            if (!document.getElementById('doctor_manual_title').value.trim()) missing.push('المسمى الوظيفي للطبيب');
+        }
+
+        return missing;
+    }
+
+    function toggleAddInputMode() {
+        const assistedMode = document.getElementById('add_mode_assisted').checked;
+        const assistedCard = document.getElementById('assistedInputCard');
+        assistedCard.classList.toggle('hidden-field', !assistedMode);
+    }
+
+    document.getElementById('add_mode_assisted').addEventListener('change', toggleAddInputMode);
+    document.getElementById('add_mode_manual').addEventListener('change', toggleAddInputMode);
+    toggleAddInputMode();
+
+    document.getElementById('assistParseBtn').addEventListener('click', () => {
+        const rawText = document.getElementById('assisted_leave_input').value;
+        if (!rawText.trim()) {
+            showToast('يرجى إدخال بيانات الإجازة أولاً.', 'warning');
+            return;
+        }
+        const parsed = parseAssistedLeaveInput(rawText);
+        if (!Object.keys(parsed).length) {
+            showToast('لم يتم التعرف على الحقول. استخدم الصيغة: اسم الحقل: القيمة', 'warning');
+            return;
+        }
+        applyAssistedDataToAddForm(parsed);
+        const missing = getAssistedMissingFields();
+        if (missing.length) {
+            showToast(`تمت التعبئة الجزئية. الحقول الناقصة: ${missing.join(' - ')}`, 'warning');
+        } else {
+            showToast('تم تحليل البيانات وتعبئة النموذج بنجاح.', 'success');
+        }
+    });
+
     // ====== إضافة إجازة ======
     document.getElementById('addLeaveForm').addEventListener('submit', async (e) => {
         e.preventDefault();
+        if (document.getElementById('add_mode_assisted').checked) {
+            const missing = getAssistedMissingFields();
+            if (missing.length) {
+                showToast(`لا يمكن الحفظ. أكمل الحقول الناقصة: ${missing.join(' - ')}`, 'danger');
+                return;
+            }
+        }
         showLoading();
         const formData = new FormData(e.target);
         formData.append('action', 'add_leave');
