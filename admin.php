@@ -336,6 +336,146 @@ function generateServiceCode($pdo, $prefix, $issueDate = null) {
     return $prefix . $datePart . str_pad((string)$num, 5, '0', STR_PAD_LEFT);
 }
 
+function extractFirstJsonObject(string $raw): ?array {
+    $trimmed = trim($raw);
+    $decoded = json_decode($trimmed, true);
+    if (is_array($decoded)) {
+        return $decoded;
+    }
+
+    if (preg_match('/\{(?:[^{}]|(?R))*\}/s', $trimmed, $m)) {
+        $decoded = json_decode($m[0], true);
+        if (is_array($decoded)) {
+            return $decoded;
+        }
+    }
+    return null;
+}
+
+function normalizeAiDraft(array $draft): array {
+    $allowed = [
+        'patient_name', 'patient_identity', 'patient_phone', 'patient_folder_link',
+        'doctor_name', 'doctor_title', 'doctor_note',
+        'issue_date', 'start_date', 'end_date', 'days_count',
+        'service_prefix', 'service_code_manual',
+        'is_companion', 'companion_name', 'companion_relation',
+        'is_paid', 'payment_amount'
+    ];
+    $normalized = [];
+    foreach ($allowed as $key) {
+        if (array_key_exists($key, $draft)) {
+            $normalized[$key] = $draft[$key];
+        }
+    }
+    return $normalized;
+}
+
+function parseLeaveWithGemini(string $userText, array $existingDraft = []): array {
+    $apiKey = trim($_ENV['GEMINI_API_KEY'] ?? getenv('GEMINI_API_KEY') ?: '');
+    if ($apiKey === '') {
+        return ['success' => false, 'message' => 'لم يتم ضبط مفتاح GEMINI_API_KEY على الخادم.'];
+    }
+    if (!function_exists('curl_init')) {
+        return ['success' => false, 'message' => 'cURL غير متوفر على الخادم.'];
+    }
+
+    $endpoint = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=" . urlencode($apiKey);
+    $schemaHint = [
+        'draft' => [
+            'patient_name' => 'string',
+            'patient_identity' => 'string',
+            'patient_phone' => 'string',
+            'patient_folder_link' => 'string',
+            'doctor_name' => 'string',
+            'doctor_title' => 'string',
+            'doctor_note' => 'string',
+            'issue_date' => 'YYYY-MM-DD',
+            'start_date' => 'YYYY-MM-DD',
+            'end_date' => 'YYYY-MM-DD',
+            'days_count' => 'number',
+            'service_prefix' => 'GSL|PSL',
+            'service_code_manual' => 'string',
+            'is_companion' => 'true|false',
+            'companion_name' => 'string',
+            'companion_relation' => 'string',
+            'is_paid' => 'true|false',
+            'payment_amount' => 'number'
+        ],
+        'missing_fields' => ['array of arabic labels for required missing fields'],
+        'assistant_message' => 'short Arabic message'
+    ];
+
+    $systemPrompt = "أنت مساعد ذكي لاستخراج بيانات إجازة مرضية من نص عربي/إنجليزي.\n"
+        . "يجب أن تعيد JSON فقط بدون أي نص إضافي.\n"
+        . "قواعد مهمة:\n"
+        . "1) إذا الجهة مستشفى/حكومي => service_prefix=GSL. إذا مركز/عيادة/خاص => PSL.\n"
+        . "2) إذا وجدت فترة من-إلى: issue_date=start_date=أول يوم, end_date=آخر يوم, days_count شاملة.\n"
+        . "3) إذا يوم واحد: issue_date=start_date=end_date ونفس اليوم, days_count=1.\n"
+        . "4) required: patient_name, patient_identity, doctor_name, doctor_title, issue_date, start_date, end_date, days_count.\n"
+        . "5) دمج existing_draft مع النص الجديد وحدث القيم الأدق.\n"
+        . "6) تنسيق التواريخ دائماً YYYY-MM-DD.\n"
+        . "الشكل المطلوب: " . json_encode($schemaHint, JSON_UNESCAPED_UNICODE);
+
+    $userPrompt = json_encode([
+        'existing_draft' => $existingDraft,
+        'user_text' => $userText
+    ], JSON_UNESCAPED_UNICODE);
+
+    $payload = [
+        'contents' => [
+            [
+                'role' => 'user',
+                'parts' => [['text' => $systemPrompt . "\n\n" . $userPrompt]]
+            ]
+        ],
+        'generationConfig' => [
+            'temperature' => 0.1,
+            'maxOutputTokens' => 700
+        ]
+    ];
+
+    $ch = curl_init($endpoint);
+    curl_setopt_array($ch, [
+        CURLOPT_RETURNTRANSFER => true,
+        CURLOPT_POST => true,
+        CURLOPT_HTTPHEADER => ['Content-Type: application/json'],
+        CURLOPT_POSTFIELDS => json_encode($payload, JSON_UNESCAPED_UNICODE),
+        CURLOPT_TIMEOUT => 25
+    ]);
+    $response = curl_exec($ch);
+    $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+    $curlErr = curl_error($ch);
+    curl_close($ch);
+
+    if ($response === false || $curlErr) {
+        return ['success' => false, 'message' => 'فشل الاتصال بخدمة الذكاء: ' . $curlErr];
+    }
+    if ($httpCode < 200 || $httpCode >= 300) {
+        return ['success' => false, 'message' => 'خدمة الذكاء أعادت خطأ HTTP ' . $httpCode, 'raw' => $response];
+    }
+
+    $decoded = json_decode($response, true);
+    $textOutput = $decoded['candidates'][0]['content']['parts'][0]['text'] ?? '';
+    $json = extractFirstJsonObject((string)$textOutput);
+    if (!$json) {
+        return ['success' => false, 'message' => 'تعذر فهم استجابة الذكاء الاصطناعي.'];
+    }
+
+    $draft = normalizeAiDraft($json['draft'] ?? []);
+    $missing = $json['missing_fields'] ?? [];
+    if (!is_array($missing)) {
+        $missing = [];
+    }
+    $assistantMessage = trim((string)($json['assistant_message'] ?? ''));
+
+    return [
+        'success' => true,
+        'draft' => $draft,
+        'missing_fields' => array_values($missing),
+        'assistant_message' => $assistantMessage !== '' ? $assistantMessage : 'تم التحليل بنجاح.'
+    ];
+}
+
 
 function fetchAllData($pdo) {
     ensureDelayedUnpaidNotifications($pdo);
@@ -573,6 +713,22 @@ if (isset($_POST['action']) && $_POST['action'] !== 'login' && $_POST['action'] 
             $data['unread_messages_count'] = getUnreadMessagesCount($pdo, intval($_SESSION['admin_user_id'] ?? 0));
             $data['success'] = true;
             echo json_encode($data);
+            break;
+
+        case 'assist_parse_ai':
+            $rawText = trim($_POST['assistant_text'] ?? '');
+            $existingRaw = $_POST['existing_draft'] ?? '{}';
+            $existingDraft = json_decode((string)$existingRaw, true);
+            if (!is_array($existingDraft)) {
+                $existingDraft = [];
+            }
+            if ($rawText === '') {
+                echo json_encode(['success' => false, 'message' => 'يرجى إرسال نص للتحليل.']);
+                break;
+            }
+
+            $aiResult = parseLeaveWithGemini($rawText, $existingDraft);
+            echo json_encode($aiResult, JSON_UNESCAPED_UNICODE);
             break;
 
         case 'add_leave':
@@ -3742,6 +3898,7 @@ if (!in_array($uiDataViewMode, ['table','compact','cards','zebra','glass','minim
                                 <button type="button" class="btn btn-outline-primary btn-sm" id="assistParseBtn"><i class="bi bi-magic"></i> تحليل وتعبئة الحقول</button>
                                 <small class="text-muted">سيتم تعبئة النموذج تلقائياً، وإذا كانت هناك حقول ناقصة سيتم تنبيهك بها.</small>
                             </div>
+                            <small class="text-muted d-block mt-1">الوضع السحابي المجاني يعمل عند ضبط مفتاح <code>GEMINI_API_KEY</code> (مع fallback محلي تلقائي عند تعذر الخدمة).</small>
                             <div class="mt-2 small" id="assistedBotStatus" style="white-space: pre-line; color:#0d6efd;"></div>
                             <div class="mt-2">
                                 <label class="form-label">متابعة النواقص (اختياري)</label>
@@ -5878,6 +6035,21 @@ document.addEventListener('DOMContentLoaded', () => {
         statusBox.textContent = `🤖 البيانات الناقصة حالياً:\n- ${missing.join('\n- ')}\n\nأرسل فقط هذه القيم في مربع "متابعة النواقص" ثم اضغط "متابعة وإكمال".`;
     }
 
+    async function requestAiAssistance(text, existingDraft = {}) {
+        const formData = new FormData();
+        formData.append('action', 'assist_parse_ai');
+        formData.append('csrf_token', CSRF_TOKEN);
+        formData.append('assistant_text', text);
+        formData.append('existing_draft', JSON.stringify(existingDraft || {}));
+
+        const res = await fetch(REQUEST_URL, {
+            method: 'POST',
+            body: formData,
+            headers: { 'X-Requested-With': 'XMLHttpRequest' }
+        });
+        return res.json();
+    }
+
     function toggleAddInputMode() {
         const assistedMode = document.getElementById('add_mode_assisted').checked;
         const assistedCard = document.getElementById('assistedInputCard');
@@ -5888,14 +6060,36 @@ document.addEventListener('DOMContentLoaded', () => {
     document.getElementById('add_mode_manual').addEventListener('change', toggleAddInputMode);
     toggleAddInputMode();
 
-    document.getElementById('assistParseBtn').addEventListener('click', () => {
+    document.getElementById('assistParseBtn').addEventListener('click', async () => {
         const rawText = document.getElementById('assisted_leave_input').value;
         if (!rawText.trim()) {
             showToast('يرجى إدخال بيانات الإجازة أولاً.', 'warning');
             return;
         }
-        assistedDraft = parseAssistedLeaveInput(rawText);
-        const parsed = assistedDraft;
+
+        showLoading();
+        let parsed = null;
+        try {
+            const aiResponse = await requestAiAssistance(rawText, assistedDraft);
+            if (aiResponse.success && aiResponse.draft) {
+                assistedDraft = { ...assistedDraft, ...aiResponse.draft };
+                parsed = assistedDraft;
+                if (aiResponse.assistant_message) {
+                    document.getElementById('assistedBotStatus').textContent = `🤖 ${aiResponse.assistant_message}`;
+                }
+            } else {
+                assistedDraft = { ...assistedDraft, ...parseAssistedLeaveInput(rawText) };
+                parsed = assistedDraft;
+                showToast(aiResponse.message || 'تعذر الوصول للذكاء السحابي، تم استخدام التحليل المحلي.', 'warning');
+            }
+        } catch (err) {
+            assistedDraft = { ...assistedDraft, ...parseAssistedLeaveInput(rawText) };
+            parsed = assistedDraft;
+            showToast('تعذر الاتصال بالذكاء السحابي، تم استخدام التحليل المحلي.', 'warning');
+        } finally {
+            hideLoading();
+        }
+
         if (!Object.keys(parsed).length) {
             showToast('لم يتم التعرف على الحقول. استخدم الصيغة: اسم الحقل: القيمة', 'warning');
             return;
@@ -5910,17 +6104,35 @@ document.addEventListener('DOMContentLoaded', () => {
         }
     });
 
-    document.getElementById('assistFollowupBtn').addEventListener('click', () => {
+    document.getElementById('assistFollowupBtn').addEventListener('click', async () => {
         const followupText = document.getElementById('assisted_followup_input').value;
         if (!followupText.trim()) {
             showToast('أدخل بيانات المتابعة أولاً.', 'warning');
             return;
         }
-        const parsedFollowup = parseAssistedLeaveInput(followupText);
+
+        showLoading();
+        let parsedFollowup = {};
+        try {
+            const aiResponse = await requestAiAssistance(followupText, assistedDraft);
+            if (aiResponse.success && aiResponse.draft) {
+                parsedFollowup = aiResponse.draft;
+            } else {
+                parsedFollowup = parseAssistedLeaveInput(followupText);
+                showToast(aiResponse.message || 'تم الرجوع للتحليل المحلي.', 'warning');
+            }
+        } catch (err) {
+            parsedFollowup = parseAssistedLeaveInput(followupText);
+            showToast('تعذر الاتصال بالذكاء السحابي، تم استخدام التحليل المحلي.', 'warning');
+        } finally {
+            hideLoading();
+        }
+
         if (!Object.keys(parsedFollowup).length) {
             showToast('لم أفهم بيانات المتابعة. استخدم نمط: اسم الحقل: القيمة', 'warning');
             return;
         }
+
         assistedDraft = { ...assistedDraft, ...parsedFollowup };
         applyAssistedDataToAddForm(assistedDraft);
         const missing = getAssistedMissingFields();
