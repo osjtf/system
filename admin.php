@@ -370,16 +370,7 @@ function normalizeAiDraft(array $draft): array {
     return $normalized;
 }
 
-function parseLeaveWithGemini(string $userText, array $existingDraft = []): array {
-    $apiKey = trim($_ENV['GEMINI_API_KEY'] ?? getenv('GEMINI_API_KEY') ?: '');
-    if ($apiKey === '') {
-        return ['success' => false, 'message' => 'لم يتم ضبط مفتاح GEMINI_API_KEY على الخادم.'];
-    }
-    if (!function_exists('curl_init')) {
-        return ['success' => false, 'message' => 'cURL غير متوفر على الخادم.'];
-    }
-
-    $endpoint = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=" . urlencode($apiKey);
+function buildLeaveAiPrompt(string $userText, array $existingDraft = []): string {
     $schemaHint = [
         'draft' => [
             'patient_name' => 'string',
@@ -421,11 +412,88 @@ function parseLeaveWithGemini(string $userText, array $existingDraft = []): arra
         'user_text' => $userText
     ], JSON_UNESCAPED_UNICODE);
 
+    return $systemPrompt . "\n\n" . $userPrompt;
+}
+
+function parseLeaveWithPollinations(string $userText, array $existingDraft = []): array {
+    if (!function_exists('curl_init')) {
+        return ['success' => false, 'message' => 'cURL غير متوفر على الخادم.'];
+    }
+
+    $token = trim($_ENV['POLLINATIONS_API_KEY'] ?? getenv('POLLINATIONS_API_KEY') ?: '');
+    $endpoint = 'https://text.pollinations.ai/openai';
+    if ($token !== '') {
+        $endpoint .= '?token=' . urlencode($token);
+    }
+
+    $prompt = buildLeaveAiPrompt($userText, $existingDraft);
+    $payload = [
+        'model' => 'openai',
+        'messages' => [
+            ['role' => 'system', 'content' => 'Return valid JSON only.'],
+            ['role' => 'user', 'content' => $prompt]
+        ],
+        'temperature' => 0.1,
+        'max_tokens' => 700
+    ];
+
+    $ch = curl_init($endpoint);
+    curl_setopt_array($ch, [
+        CURLOPT_RETURNTRANSFER => true,
+        CURLOPT_POST => true,
+        CURLOPT_HTTPHEADER => ['Content-Type: application/json'],
+        CURLOPT_POSTFIELDS => json_encode($payload, JSON_UNESCAPED_UNICODE),
+        CURLOPT_TIMEOUT => 30
+    ]);
+    $response = curl_exec($ch);
+    $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+    $curlErr = curl_error($ch);
+    curl_close($ch);
+
+    if ($response === false || $curlErr) {
+        return ['success' => false, 'message' => 'فشل الاتصال بالذكاء المفتوح: ' . $curlErr];
+    }
+    if ($httpCode < 200 || $httpCode >= 300) {
+        return ['success' => false, 'message' => 'خدمة الذكاء المفتوح أعادت HTTP ' . $httpCode];
+    }
+
+    $decoded = json_decode($response, true);
+    $textOutput = $decoded['choices'][0]['message']['content'] ?? '';
+    $json = extractFirstJsonObject((string)$textOutput);
+    if (!$json) {
+        return ['success' => false, 'message' => 'تعذر فهم استجابة الذكاء المفتوح.'];
+    }
+
+    $draft = normalizeAiDraft($json['draft'] ?? []);
+    $missing = $json['missing_fields'] ?? [];
+    if (!is_array($missing)) $missing = [];
+    $assistantMessage = trim((string)($json['assistant_message'] ?? ''));
+
+    return [
+        'success' => true,
+        'provider' => 'pollinations',
+        'draft' => $draft,
+        'missing_fields' => array_values($missing),
+        'assistant_message' => $assistantMessage !== '' ? $assistantMessage : 'تم التحليل عبر الذكاء المفتوح.'
+    ];
+}
+
+function parseLeaveWithGemini(string $userText, array $existingDraft = []): array {
+    $apiKey = trim($_ENV['GEMINI_API_KEY'] ?? getenv('GEMINI_API_KEY') ?: '');
+    if ($apiKey === '') {
+        return ['success' => false, 'message' => 'لم يتم ضبط مفتاح GEMINI_API_KEY على الخادم.'];
+    }
+    if (!function_exists('curl_init')) {
+        return ['success' => false, 'message' => 'cURL غير متوفر على الخادم.'];
+    }
+
+    $endpoint = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=" . urlencode($apiKey);
+    $prompt = buildLeaveAiPrompt($userText, $existingDraft);
     $payload = [
         'contents' => [
             [
                 'role' => 'user',
-                'parts' => [['text' => $systemPrompt . "\n\n" . $userPrompt]]
+                'parts' => [['text' => $prompt]]
             ]
         ],
         'generationConfig' => [
@@ -470,9 +538,29 @@ function parseLeaveWithGemini(string $userText, array $existingDraft = []): arra
 
     return [
         'success' => true,
+        'provider' => 'gemini',
         'draft' => $draft,
         'missing_fields' => array_values($missing),
         'assistant_message' => $assistantMessage !== '' ? $assistantMessage : 'تم التحليل بنجاح.'
+    ];
+}
+
+function parseLeaveWithBestAvailableAi(string $userText, array $existingDraft = []): array {
+    $openResult = parseLeaveWithPollinations($userText, $existingDraft);
+    if (!empty($openResult['success'])) {
+        return $openResult;
+    }
+    $geminiResult = parseLeaveWithGemini($userText, $existingDraft);
+    if (!empty($geminiResult['success'])) {
+        return $geminiResult;
+    }
+    return [
+        'success' => false,
+        'message' => 'تعذر الاتصال بالذكاء السحابي المجاني حالياً.',
+        'errors' => [
+            'open' => $openResult['message'] ?? 'unknown',
+            'gemini' => $geminiResult['message'] ?? 'unknown'
+        ]
     ];
 }
 
@@ -727,7 +815,7 @@ if (isset($_POST['action']) && $_POST['action'] !== 'login' && $_POST['action'] 
                 break;
             }
 
-            $aiResult = parseLeaveWithGemini($rawText, $existingDraft);
+            $aiResult = parseLeaveWithBestAvailableAi($rawText, $existingDraft);
             echo json_encode($aiResult, JSON_UNESCAPED_UNICODE);
             break;
 
@@ -3898,7 +3986,7 @@ if (!in_array($uiDataViewMode, ['table','compact','cards','zebra','glass','minim
                                 <button type="button" class="btn btn-outline-primary btn-sm" id="assistParseBtn"><i class="bi bi-magic"></i> تحليل وتعبئة الحقول</button>
                                 <small class="text-muted">سيتم تعبئة النموذج تلقائياً، وإذا كانت هناك حقول ناقصة سيتم تنبيهك بها.</small>
                             </div>
-                            <small class="text-muted d-block mt-1">الوضع السحابي المجاني يعمل عند ضبط مفتاح <code>GEMINI_API_KEY</code> (مع fallback محلي تلقائي عند تعذر الخدمة).</small>
+                            <small class="text-muted d-block mt-1">الوضع السحابي يحاول أولاً ذكاء مفتوح (بدون مفتاح غالباً)، ثم Gemini إذا كان <code>GEMINI_API_KEY</code> متاحًا، ومع fallback محلي تلقائي عند التعذر.</small>
                             <div class="mt-2 small" id="assistedBotStatus" style="white-space: pre-line; color:#0d6efd;"></div>
                             <div class="mt-2">
                                 <label class="form-label">متابعة النواقص (اختياري)</label>
@@ -6075,7 +6163,8 @@ document.addEventListener('DOMContentLoaded', () => {
                 assistedDraft = { ...assistedDraft, ...aiResponse.draft };
                 parsed = assistedDraft;
                 if (aiResponse.assistant_message) {
-                    document.getElementById('assistedBotStatus').textContent = `🤖 ${aiResponse.assistant_message}`;
+                    const provider = aiResponse.provider ? ` (${aiResponse.provider})` : '';
+                    document.getElementById('assistedBotStatus').textContent = `🤖${provider} ${aiResponse.assistant_message}`;
                 }
             } else {
                 assistedDraft = { ...assistedDraft, ...parseAssistedLeaveInput(rawText) };
