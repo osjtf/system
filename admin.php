@@ -179,6 +179,8 @@ ensureIndex($pdo, 'sick_leaves', 'idx_sick_leaves_deleted_created', 'deleted_at,
 ensureIndex($pdo, 'sick_leaves', 'idx_sick_leaves_paid', 'is_paid');
 ensureIndex($pdo, 'sick_leaves', 'idx_sick_leaves_patient', 'patient_id');
 ensureIndex($pdo, 'sick_leaves', 'idx_sick_leaves_doctor', 'doctor_id');
+ensureColumn($pdo, 'sick_leaves', 'created_by_user_id', "INT NULL AFTER doctor_id");
+ensureIndex($pdo, 'sick_leaves', 'idx_sick_leaves_created_by_user', 'created_by_user_id');
 ensureIndex($pdo, 'notifications', 'idx_notifications_type_created', 'type, created_at');
 ensureIndex($pdo, 'notifications', 'idx_notifications_leave', 'leave_id');
 ensureIndex($pdo, 'leave_queries', 'idx_leave_queries_leave', 'leave_id');
@@ -334,6 +336,152 @@ function generateServiceCode($pdo, $prefix, $issueDate = null) {
     }
 
     return $prefix . $datePart . str_pad((string)$num, 5, '0', STR_PAD_LEFT);
+}
+
+function extractFirstJsonObject(string $raw): ?array {
+    $trimmed = trim($raw);
+    $decoded = json_decode($trimmed, true);
+    if (is_array($decoded)) {
+        return $decoded;
+    }
+
+    if (preg_match('/\{(?:[^{}]|(?R))*\}/s', $trimmed, $m)) {
+        $decoded = json_decode($m[0], true);
+        if (is_array($decoded)) {
+            return $decoded;
+        }
+    }
+    return null;
+}
+
+function normalizeAiDraft(array $draft): array {
+    $allowed = [
+        'patient_name', 'patient_identity', 'patient_phone', 'patient_folder_link',
+        'doctor_name', 'doctor_title', 'doctor_note',
+        'issue_date', 'start_date', 'end_date', 'days_count',
+        'service_prefix', 'service_code_manual',
+        'is_companion', 'companion_name', 'companion_relation',
+        'is_paid', 'payment_amount'
+    ];
+    $normalized = [];
+    foreach ($allowed as $key) {
+        if (array_key_exists($key, $draft)) {
+            $normalized[$key] = $draft[$key];
+        }
+    }
+    return $normalized;
+}
+
+function buildLeaveAiPrompt(string $userText, array $existingDraft = []): string {
+    $schemaHint = [
+        'draft' => [
+            'patient_name' => 'string',
+            'patient_identity' => 'string',
+            'patient_phone' => 'string',
+            'patient_folder_link' => 'string',
+            'doctor_name' => 'string',
+            'doctor_title' => 'string',
+            'doctor_note' => 'string',
+            'issue_date' => 'YYYY-MM-DD',
+            'start_date' => 'YYYY-MM-DD',
+            'end_date' => 'YYYY-MM-DD',
+            'days_count' => 'number',
+            'service_prefix' => 'GSL|PSL',
+            'service_code_manual' => 'string',
+            'is_companion' => 'true|false',
+            'companion_name' => 'string',
+            'companion_relation' => 'string',
+            'is_paid' => 'true|false',
+            'payment_amount' => 'number'
+        ],
+        'missing_fields' => ['array of arabic labels for required missing fields'],
+        'assistant_message' => 'short Arabic message'
+    ];
+
+    $systemPrompt = "أنت مساعد ذكي لاستخراج بيانات إجازة مرضية من نص عربي/إنجليزي.\n"
+        . "يجب أن تعيد JSON فقط بدون أي نص إضافي.\n"
+        . "قواعد مهمة:\n"
+        . "1) إذا الجهة مستشفى/حكومي => service_prefix=GSL. إذا مركز/عيادة/خاص => PSL.\n"
+        . "2) إذا وجدت فترة من-إلى: issue_date=start_date=أول يوم, end_date=آخر يوم, days_count شاملة.\n"
+        . "3) إذا يوم واحد: issue_date=start_date=end_date ونفس اليوم, days_count=1.\n"
+        . "4) required: patient_name, patient_identity, doctor_name, doctor_title, issue_date, start_date, end_date, days_count.\n"
+        . "5) دمج existing_draft مع النص الجديد وحدث القيم الأدق.\n"
+        . "6) تنسيق التواريخ دائماً YYYY-MM-DD.\n"
+        . "الشكل المطلوب: " . json_encode($schemaHint, JSON_UNESCAPED_UNICODE);
+
+    $userPrompt = json_encode([
+        'existing_draft' => $existingDraft,
+        'user_text' => $userText
+    ], JSON_UNESCAPED_UNICODE);
+
+    return $systemPrompt . "\n\n" . $userPrompt;
+}
+
+function parseLeaveWithGemini(string $userText, array $existingDraft = []): array {
+    $apiKey = trim($_ENV['GEMINI_API_KEY'] ?? getenv('GEMINI_API_KEY') ?: '');
+    if ($apiKey === '') {
+        return ['success' => false, 'message' => 'لم يتم ضبط مفتاح GEMINI_API_KEY على الخادم.'];
+    }
+    if (!function_exists('curl_init')) {
+        return ['success' => false, 'message' => 'cURL غير متوفر على الخادم.'];
+    }
+
+    $endpoint = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=" . urlencode($apiKey);
+    $prompt = buildLeaveAiPrompt($userText, $existingDraft);
+    $payload = [
+        'contents' => [
+            [
+                'role' => 'user',
+                'parts' => [['text' => $prompt]]
+            ]
+        ],
+        'generationConfig' => [
+            'temperature' => 0.1,
+            'maxOutputTokens' => 700
+        ]
+    ];
+
+    $ch = curl_init($endpoint);
+    curl_setopt_array($ch, [
+        CURLOPT_RETURNTRANSFER => true,
+        CURLOPT_POST => true,
+        CURLOPT_HTTPHEADER => ['Content-Type: application/json'],
+        CURLOPT_POSTFIELDS => json_encode($payload, JSON_UNESCAPED_UNICODE),
+        CURLOPT_TIMEOUT => 25
+    ]);
+    $response = curl_exec($ch);
+    $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+    $curlErr = curl_error($ch);
+    curl_close($ch);
+
+    if ($response === false || $curlErr) {
+        return ['success' => false, 'message' => 'فشل الاتصال بخدمة الذكاء: ' . $curlErr];
+    }
+    if ($httpCode < 200 || $httpCode >= 300) {
+        return ['success' => false, 'message' => 'خدمة الذكاء أعادت خطأ HTTP ' . $httpCode, 'raw' => $response];
+    }
+
+    $decoded = json_decode($response, true);
+    $textOutput = $decoded['candidates'][0]['content']['parts'][0]['text'] ?? '';
+    $json = extractFirstJsonObject((string)$textOutput);
+    if (!$json) {
+        return ['success' => false, 'message' => 'تعذر فهم استجابة الذكاء الاصطناعي.'];
+    }
+
+    $draft = normalizeAiDraft($json['draft'] ?? []);
+    $missing = $json['missing_fields'] ?? [];
+    if (!is_array($missing)) {
+        $missing = [];
+    }
+    $assistantMessage = trim((string)($json['assistant_message'] ?? ''));
+
+    return [
+        'success' => true,
+        'provider' => 'gemini',
+        'draft' => $draft,
+        'missing_fields' => array_values($missing),
+        'assistant_message' => $assistantMessage !== '' ? $assistantMessage : 'تم التحليل بنجاح.'
+    ];
 }
 
 
@@ -575,6 +723,10 @@ if (isset($_POST['action']) && $_POST['action'] !== 'login' && $_POST['action'] 
             echo json_encode($data);
             break;
 
+        case 'assist_parse_ai':
+            echo json_encode(['success' => false, 'message' => 'تم تعطيل التحليل السحابي. استخدم التحليل المحلي الذكي من الواجهة.'], JSON_UNESCAPED_UNICODE);
+            break;
+
         case 'add_leave':
             $patient_id = null;
             $doctor_id = null;
@@ -640,6 +792,7 @@ if (isset($_POST['action']) && $_POST['action'] !== 'login' && $_POST['action'] 
             $companion_relation = trim($_POST['companion_relation'] ?? '');
             $is_paid = isset($_POST['is_paid']) ? 1 : 0;
             $payment_amount = floatval($_POST['payment_amount'] ?? 0);
+            $created_by_user_id = intval($_SESSION['admin_user_id'] ?? 0) ?: null;
 
             if (empty($issue_date) || empty($start_date) || empty($end_date) || $days_count <= 0 || $patient_id <= 0 || $doctor_id <= 0) {
                 echo json_encode(['success' => false, 'message' => 'يرجى تعبئة جميع الحقول المطلوبة.']);
@@ -647,11 +800,11 @@ if (isset($_POST['action']) && $_POST['action'] !== 'login' && $_POST['action'] 
             }
 
             $stmt = $pdo->prepare("INSERT INTO sick_leaves 
-                (service_code, patient_id, doctor_id, issue_date, start_date, end_date, days_count, 
+                (service_code, patient_id, doctor_id, created_by_user_id, issue_date, start_date, end_date, days_count, 
                  is_companion, companion_name, companion_relation, is_paid, payment_amount) 
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)");
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)");
             $stmt->execute([
-                $service_code, $patient_id, $doctor_id, $issue_date, $start_date, $end_date, $days_count,
+                $service_code, $patient_id, $doctor_id, $created_by_user_id, $issue_date, $start_date, $end_date, $days_count,
                 $is_companion, $companion_name, $companion_relation, $is_paid, $payment_amount
             ]);
 
@@ -780,6 +933,7 @@ if (isset($_POST['action']) && $_POST['action'] !== 'login' && $_POST['action'] 
             $companion_relation = trim($_POST['dup_companion_relation'] ?? '');
             $is_paid = isset($_POST['dup_is_paid']) ? 1 : 0;
             $payment_amount = floatval($_POST['dup_payment_amount'] ?? 0);
+            $created_by_user_id = intval($_SESSION['admin_user_id'] ?? 0) ?: null;
 
             if (empty($issue_date) || empty($start_date) || empty($end_date) || $days_count <= 0 || $patient_id <= 0 || $doctor_id <= 0) {
                 echo json_encode(['success' => false, 'message' => 'يرجى تعبئة جميع الحقول المطلوبة.']);
@@ -787,11 +941,11 @@ if (isset($_POST['action']) && $_POST['action'] !== 'login' && $_POST['action'] 
             }
 
             $stmt = $pdo->prepare("INSERT INTO sick_leaves 
-                (service_code, patient_id, doctor_id, issue_date, start_date, end_date, days_count, 
+                (service_code, patient_id, doctor_id, created_by_user_id, issue_date, start_date, end_date, days_count, 
                  is_companion, companion_name, companion_relation, is_paid, payment_amount) 
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)");
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)");
             $stmt->execute([
-                $service_code, $patient_id, $doctor_id, $issue_date, $start_date, $end_date, $days_count,
+                $service_code, $patient_id, $doctor_id, $created_by_user_id, $issue_date, $start_date, $end_date, $days_count,
                 $is_companion, $companion_name, $companion_relation, $is_paid, $payment_amount
             ]);
 
@@ -1081,6 +1235,7 @@ if (isset($_POST['action']) && $_POST['action'] !== 'login' && $_POST['action'] 
             $rangeDays = max(1, min(365, intval($_POST['range_days'] ?? 30)));
             $fromDate = trim($_POST['from_date'] ?? '');
             $toDate = trim($_POST['to_date'] ?? '');
+            $filterUserId = max(0, intval($_POST['filter_user_id'] ?? 0));
             if (!preg_match('/^\d{4}-\d{2}-\d{2}$/', $fromDate)) {
                 $fromDate = date('Y-m-d', strtotime("-" . ($rangeDays - 1) . " days"));
             }
@@ -1104,32 +1259,76 @@ if (isset($_POST['action']) && $_POST['action'] !== 'login' && $_POST['action'] 
                 'consistency_rate' => 0,
                 'top_doctors' => [],
                 'top_patients' => [],
-                'daily' => []
+                'daily' => [],
+                'users_filter' => [],
+                'users_productivity' => [],
+                'duplicates' => [],
+                'filter_user_id' => $filterUserId
             ];
+
+            $summary['users_filter'] = $pdo->query("SELECT id, display_name, username FROM admin_users WHERE is_active = 1 ORDER BY display_name")->fetchAll();
+
+            $rangeFilter = "sl.deleted_at IS NULL AND DATE(sl.created_at) BETWEEN ? AND ? AND (? = 0 OR sl.created_by_user_id = ?)";
+            $rangeParams = [$fromDate, $toDate, $filterUserId, $filterUserId];
 
             $summary['today_total'] = (int)$pdo->query("SELECT COUNT(*) FROM sick_leaves WHERE deleted_at IS NULL AND DATE(created_at) = CURDATE()")->fetchColumn();
             $summary['today_paid'] = (int)$pdo->query("SELECT COUNT(*) FROM sick_leaves WHERE deleted_at IS NULL AND is_paid = 1 AND DATE(created_at) = CURDATE()")->fetchColumn();
             $summary['today_unpaid'] = (int)$pdo->query("SELECT COUNT(*) FROM sick_leaves WHERE deleted_at IS NULL AND is_paid = 0 AND DATE(created_at) = CURDATE()")->fetchColumn();
 
-            $avgStmt = $pdo->prepare("SELECT COALESCE(AVG(day_count),0) FROM (SELECT DATE(created_at) d, COUNT(*) day_count FROM sick_leaves WHERE deleted_at IS NULL AND DATE(created_at) BETWEEN ? AND ? GROUP BY DATE(created_at)) t");
-            $avgStmt->execute([$fromDate, $toDate]);
+            $avgStmt = $pdo->prepare("SELECT COALESCE(AVG(day_count),0) FROM (SELECT DATE(sl.created_at) d, COUNT(*) day_count FROM sick_leaves sl WHERE $rangeFilter GROUP BY DATE(sl.created_at)) t");
+            $avgStmt->execute($rangeParams);
             $summary['avg_daily'] = (float)$avgStmt->fetchColumn();
 
-            $consistencyStmt = $pdo->prepare("SELECT (COUNT(DISTINCT DATE(created_at)) * 100.0 / GREATEST(DATEDIFF(?, ?) + 1, 1)) FROM sick_leaves WHERE deleted_at IS NULL AND DATE(created_at) BETWEEN ? AND ?");
-            $consistencyStmt->execute([$toDate, $fromDate, $fromDate, $toDate]);
+            $consistencyStmt = $pdo->prepare("SELECT (COUNT(DISTINCT DATE(sl.created_at)) * 100.0 / GREATEST(DATEDIFF(?, ?) + 1, 1)) FROM sick_leaves sl WHERE $rangeFilter");
+            $consistencyStmt->execute(array_merge([$toDate, $fromDate], $rangeParams));
             $summary['consistency_rate'] = round((float)$consistencyStmt->fetchColumn(), 2);
 
-            $topDoctorsStmt = $pdo->prepare("SELECT d.name, d.title, COUNT(*) leaves_count FROM sick_leaves sl LEFT JOIN doctors d ON d.id = sl.doctor_id WHERE sl.deleted_at IS NULL AND DATE(sl.created_at) BETWEEN ? AND ? GROUP BY sl.doctor_id ORDER BY leaves_count DESC LIMIT 5");
-            $topDoctorsStmt->execute([$fromDate, $toDate]);
+            $topDoctorsStmt = $pdo->prepare("SELECT d.name, d.title, COUNT(*) leaves_count FROM sick_leaves sl LEFT JOIN doctors d ON d.id = sl.doctor_id WHERE $rangeFilter GROUP BY sl.doctor_id ORDER BY leaves_count DESC LIMIT 5");
+            $topDoctorsStmt->execute($rangeParams);
             $summary['top_doctors'] = $topDoctorsStmt->fetchAll();
 
-            $topPatientsStmt = $pdo->prepare("SELECT p.name, p.identity_number, COUNT(*) leaves_count, SUM(CASE WHEN sl.is_paid = 1 THEN sl.payment_amount ELSE 0 END) paid_amount, SUM(CASE WHEN sl.is_paid = 0 THEN sl.payment_amount ELSE 0 END) unpaid_amount FROM sick_leaves sl LEFT JOIN patients p ON p.id = sl.patient_id WHERE sl.deleted_at IS NULL AND DATE(sl.created_at) BETWEEN ? AND ? GROUP BY sl.patient_id ORDER BY leaves_count DESC LIMIT 5");
-            $topPatientsStmt->execute([$fromDate, $toDate]);
+            $topPatientsStmt = $pdo->prepare("SELECT p.name, p.identity_number, COUNT(*) leaves_count, SUM(CASE WHEN sl.is_paid = 1 THEN sl.payment_amount ELSE 0 END) paid_amount, SUM(CASE WHEN sl.is_paid = 0 THEN sl.payment_amount ELSE 0 END) unpaid_amount FROM sick_leaves sl LEFT JOIN patients p ON p.id = sl.patient_id WHERE $rangeFilter GROUP BY sl.patient_id ORDER BY leaves_count DESC LIMIT 5");
+            $topPatientsStmt->execute($rangeParams);
             $summary['top_patients'] = $topPatientsStmt->fetchAll();
 
-            $dailyStmt = $pdo->prepare("SELECT DATE(created_at) day_date, COUNT(*) total_count, SUM(CASE WHEN is_paid = 1 THEN 1 ELSE 0 END) paid_count, SUM(CASE WHEN is_paid = 0 THEN 1 ELSE 0 END) unpaid_count FROM sick_leaves WHERE deleted_at IS NULL AND DATE(created_at) BETWEEN ? AND ? GROUP BY DATE(created_at) ORDER BY day_date DESC");
-            $dailyStmt->execute([$fromDate, $toDate]);
+            $dailyStmt = $pdo->prepare("SELECT DATE(sl.created_at) day_date, COUNT(*) total_count, SUM(CASE WHEN sl.is_paid = 1 THEN 1 ELSE 0 END) paid_count, SUM(CASE WHEN sl.is_paid = 0 THEN 1 ELSE 0 END) unpaid_count FROM sick_leaves sl WHERE $rangeFilter GROUP BY DATE(sl.created_at) ORDER BY day_date DESC");
+            $dailyStmt->execute($rangeParams);
             $summary['daily'] = $dailyStmt->fetchAll();
+
+            $usersProductivityStmt = $pdo->prepare("
+                SELECT COALESCE(u.display_name, 'غير محدد') AS user_name, COALESCE(u.username, '-') AS username,
+                       COUNT(sl.id) AS leaves_count,
+                       SUM(CASE WHEN dup.dup_count > 1 THEN 1 ELSE 0 END) AS duplicate_count
+                FROM sick_leaves sl
+                LEFT JOIN admin_users u ON u.id = sl.created_by_user_id
+                LEFT JOIN (
+                    SELECT patient_id, start_date, end_date, COUNT(*) AS dup_count
+                    FROM sick_leaves
+                    WHERE deleted_at IS NULL
+                    GROUP BY patient_id, start_date, end_date
+                ) dup ON dup.patient_id = sl.patient_id AND dup.start_date = sl.start_date AND dup.end_date = sl.end_date
+                WHERE $rangeFilter
+                GROUP BY sl.created_by_user_id, u.display_name, u.username
+                ORDER BY leaves_count DESC
+            ");
+            $usersProductivityStmt->execute($rangeParams);
+            $summary['users_productivity'] = $usersProductivityStmt->fetchAll();
+
+            $duplicatesStmt = $pdo->prepare("
+                SELECT p.name AS patient_name, p.identity_number, sl.start_date, sl.end_date,
+                       COUNT(*) AS repeated_count,
+                       GROUP_CONCAT(DISTINCT COALESCE(u.display_name, 'غير محدد') SEPARATOR '، ') AS creators
+                FROM sick_leaves sl
+                LEFT JOIN patients p ON p.id = sl.patient_id
+                LEFT JOIN admin_users u ON u.id = sl.created_by_user_id
+                WHERE $rangeFilter
+                GROUP BY sl.patient_id, sl.start_date, sl.end_date, p.name, p.identity_number
+                HAVING COUNT(*) > 1
+                ORDER BY repeated_count DESC, sl.start_date DESC
+                LIMIT 50
+            ");
+            $duplicatesStmt->execute($rangeParams);
+            $summary['duplicates'] = $duplicatesStmt->fetchAll();
 
             if (!$canViewFinancial) {
                 $summary['totals']['paid_amount'] = null;
@@ -2356,6 +2555,20 @@ if (!in_array($uiDataViewMode, ['table','compact','cards','zebra','glass','minim
             background: linear-gradient(135deg, rgba(19,28,46,0.85), rgba(14,21,37,0.9));
             border-color: rgba(148,163,184,0.18);
             box-shadow: inset 0 1px 0 rgba(255,255,255,0.03);
+        }
+
+        .stats-pro-card {
+            border-radius: 14px;
+            overflow: hidden;
+            transition: transform .22s ease, box-shadow .22s ease;
+            background: linear-gradient(180deg, #ffffff, #f8fbff);
+        }
+        .stats-pro-card:hover {
+            transform: translateY(-3px);
+            box-shadow: 0 12px 24px rgba(2,6,23,0.12);
+        }
+        .dark-mode .stats-pro-card {
+            background: linear-gradient(180deg, #0f172a, #111827);
         }
 
         /* بطاقات الإحصائيات داخل صفحة الإحصائيات المتقدمة */
@@ -3709,6 +3922,43 @@ if (!in_array($uiDataViewMode, ['table','compact','cards','zebra','glass','minim
                 <h5><i class="bi bi-plus-circle-fill"></i> إضافة إجازة مرضية جديدة</h5>
                 <form id="addLeaveForm">
                     <div class="row g-3">
+                        <div class="col-12">
+                            <label class="form-label">طريقة الإدخال</label>
+                            <div class="d-flex gap-3 flex-wrap">
+                                <div class="form-check">
+                                    <input class="form-check-input" type="radio" name="add_mode" id="add_mode_assisted" value="assisted" checked>
+                                    <label class="form-check-label" for="add_mode_assisted">ذكي (تحويل البيانات تلقائياً)</label>
+                                </div>
+                                <div class="form-check">
+                                    <input class="form-check-input" type="radio" name="add_mode" id="add_mode_manual" value="manual">
+                                    <label class="form-check-label" for="add_mode_manual">يدوي (الطريقة الحالية)</label>
+                                </div>
+                            </div>
+                        </div>
+
+                        <div class="col-12" id="assistedInputCard">
+                            <label class="form-label">إدخال ذكي للبيانات</label>
+                            <textarea class="form-control" id="assisted_leave_input" rows="5" placeholder="ألصق البيانات بأي تنسيق، مثال:
+اسم المريض: أحمد علي
+الهوية: 1020304050
+الجوال: 05xxxxxxxx
+رابط الملف: https://...
+اسم الطبيب: د. سارة محمد
+المسمى: استشاري باطنية
+تاريخ الإصدار: 2026-04-22
+من: 2026-04-22
+إلى: 2026-04-25
+مدفوعة: نعم
+المبلغ: 150
+مرافق: لا"></textarea>
+                            <div class="d-flex align-items-center gap-2 mt-2 flex-wrap">
+                                <button type="button" class="btn btn-outline-primary btn-sm" id="assistParseBtn"><i class="bi bi-magic"></i> تحليل وتعبئة الحقول</button>
+                                <small class="text-muted">سيتم تعبئة النموذج تلقائياً، وإذا كانت هناك حقول ناقصة سيتم تنبيهك بها.</small>
+                            </div>
+                            <small class="text-muted d-block mt-1">التحليل يعمل محلياً بدون API وبمحرك قواعد ذكي متعدد الاحتمالات.</small>
+                            <div class="mt-2 small" id="assistedBotStatus" style="white-space: pre-line; color:#0d6efd;"></div>
+                        </div>
+
                         <!-- رمز الخدمة -->
                         <div class="col-md-4">
                             <label class="form-label">بادئة رمز الخدمة</label>
@@ -4033,6 +4283,9 @@ if (!in_array($uiDataViewMode, ['table','compact','cards','zebra','glass','minim
                         </select>
                         <input type="date" id="adminStatsFromDate" class="form-control form-control-sm" style="max-width:150px;">
                         <input type="date" id="adminStatsToDate" class="form-control form-control-sm" style="max-width:150px;">
+                        <select id="adminStatsUserFilter" class="form-select form-select-sm" style="min-width:180px;">
+                            <option value="0">كل المستخدمين</option>
+                        </select>
                         <button class="btn btn-sm btn-gradient" id="applyAdminStatsRange"><i class="bi bi-funnel"></i> تطبيق</button>
                         <button class="btn btn-sm btn-outline-secondary" id="refreshAdminStats"><i class="bi bi-arrow-repeat"></i> تحديث</button>
                     </div>
@@ -4063,6 +4316,27 @@ if (!in_array($uiDataViewMode, ['table','compact','cards','zebra','glass','minim
                         <div class="col-md-6">
                             <h6>أعلى المرضى</h6>
                             <ul class="list-group" id="adminTopPatients"></ul>
+                        </div>
+                    </div>
+
+                    <div class="row g-3 mt-1">
+                        <div class="col-lg-6">
+                            <h6>إنتاجية المستخدمين (من أنشأ الإجازات)</h6>
+                            <div class="table-responsive">
+                                <table class="table table-bordered table-sm text-center" id="adminUsersProductivityTable">
+                                    <thead><tr><th>المستخدم</th><th>الإجازات</th><th>المكرر</th><th>معدل التكرار %</th></tr></thead>
+                                    <tbody></tbody>
+                                </table>
+                            </div>
+                        </div>
+                        <div class="col-lg-6">
+                            <h6>الإجازات المكررة (نفس المريض + نفس التواريخ)</h6>
+                            <div class="table-responsive">
+                                <table class="table table-bordered table-sm text-center" id="adminDuplicatesTable">
+                                    <thead><tr><th>المريض</th><th>الهوية</th><th>من</th><th>إلى</th><th>عدد التكرار</th><th>المستخدمون</th></tr></thead>
+                                    <tbody></tbody>
+                                </table>
+                            </div>
                         </div>
                     </div>
                 </div>
@@ -5210,14 +5484,19 @@ function renderAdminStats(data) {
     const dailyTbody = document.querySelector('#adminDailyStatsTable tbody');
     const topDoctors = document.getElementById('adminTopDoctors');
     const topPatients = document.getElementById('adminTopPatients');
-    if (!cards || !dailyTbody || !topDoctors || !topPatients || !data) return;
+    const usersProductivityTbody = document.querySelector('#adminUsersProductivityTable tbody');
+    const duplicatesTbody = document.querySelector('#adminDuplicatesTable tbody');
+    const userFilter = document.getElementById('adminStatsUserFilter');
+    if (!cards || !dailyTbody || !topDoctors || !topPatients || !usersProductivityTbody || !duplicatesTbody || !data) return;
 
     const t = data.totals || {};
     const canViewFinancial = !!data.can_view_financial;
+    const totalDuplicates = (data.duplicates || []).reduce((sum, d) => sum + (parseInt(d.repeated_count || 0, 10) - 1), 0);
     const cardItems = [
         ['إجمالي الإجازات النشطة', t.total || 0, 'primary'],
         ['المدفوعة', t.paid || 0, 'success'],
         ['غير المدفوعة', t.unpaid || 0, 'danger'],
+        ['الحالات المكررة', totalDuplicates, 'warning'],
         ['إجازات اليوم', data.today_total || 0, 'info'],
         ['مدفوعة اليوم', data.today_paid || 0, 'success'],
         ['غير مدفوعة اليوم', data.today_unpaid || 0, 'warning'],
@@ -5233,7 +5512,7 @@ function renderAdminStats(data) {
 
     cards.innerHTML = cardItems.map(([label,val,color]) => `
         <div class="col-md-4 col-lg-3">
-            <div class="card border-${color} h-100 shadow-sm">
+            <div class="card border-${color} h-100 shadow-sm stats-pro-card">
                 <div class="card-body py-2">
                     <div class="small text-muted">${label}</div>
                     <div class="h5 mb-0">${val}</div>
@@ -5252,6 +5531,30 @@ function renderAdminStats(data) {
     topPatients.innerHTML = (data.top_patients || []).map(p => `
         <li class="list-group-item"><div class="d-flex justify-content-between"><span>${htmlspecialchars(p.name || 'غير محدد')} (${htmlspecialchars(p.identity_number || '-')})</span><strong>${p.leaves_count || 0}</strong></div>${canViewFinancial ? `<small class="text-success">مدفوع: ${parseFloat(p.paid_amount || 0).toFixed(2)}</small> - <small class="text-danger">مستحق: ${parseFloat(p.unpaid_amount || 0).toFixed(2)}</small>` : '<small class="text-muted">البيانات المالية للمشرف فقط</small>'}</li>
     `).join('') || '<li class="list-group-item text-muted">لا توجد بيانات</li>';
+
+    usersProductivityTbody.innerHTML = (data.users_productivity || []).map(u => {
+        const total = parseInt(u.leaves_count || 0, 10);
+        const dup = parseInt(u.duplicate_count || 0, 10);
+        const ratio = total > 0 ? ((dup / total) * 100).toFixed(1) : '0.0';
+        return `<tr><td>${htmlspecialchars(u.user_name || 'غير محدد')}</td><td>${total}</td><td>${dup}</td><td>${ratio}%</td></tr>`;
+    }).join('') || '<tr><td colspan="4" class="text-muted">لا توجد بيانات</td></tr>';
+
+    duplicatesTbody.innerHTML = (data.duplicates || []).map(d => `
+        <tr>
+            <td>${htmlspecialchars(d.patient_name || 'غير محدد')}</td>
+            <td>${htmlspecialchars(d.identity_number || '-')}</td>
+            <td>${htmlspecialchars(d.start_date || '-')}</td>
+            <td>${htmlspecialchars(d.end_date || '-')}</td>
+            <td><span class="badge bg-danger">${d.repeated_count || 0}</span></td>
+            <td>${htmlspecialchars(d.creators || '-')}</td>
+        </tr>
+    `).join('') || '<tr><td colspan="6" class="text-muted">لا توجد حالات تكرار</td></tr>';
+
+    if (userFilter && Array.isArray(data.users_filter)) {
+        const selectedVal = String(data.filter_user_id || userFilter.value || '0');
+        userFilter.innerHTML = `<option value="0">كل المستخدمين</option>` + data.users_filter.map(u => `<option value="${u.id}">${htmlspecialchars(u.display_name || u.username || ('مستخدم #' + u.id))}</option>`).join('');
+        userFilter.value = selectedVal;
+    }
 
     drawAdminStatsChart(data.daily || []);
 }
@@ -5277,6 +5580,9 @@ async function fetchAdminStats() {
         if (fromEl) fromEl.value = fromVal;
         if (toEl) toEl.value = toVal;
     }
+
+    const userFilterVal = document.getElementById('adminStatsUserFilter')?.value || '0';
+    payload.filter_user_id = parseInt(userFilterVal, 10) || 0;
 
     const result = await sendAjaxRequest('fetch_admin_statistics', payload);
     if (result.success) renderAdminStats(result.data);
@@ -5590,6 +5896,405 @@ document.addEventListener('DOMContentLoaded', () => {
     document.getElementById('dup_start_date').addEventListener('change', () => calcDays('dup_start_date', 'dup_end_date', 'dup_days_count'));
     document.getElementById('dup_end_date').addEventListener('change', () => calcDays('dup_start_date', 'dup_end_date', 'dup_days_count'));
 
+    let assistedDraft = {};
+
+    function normalizeArabicText(value) {
+        return (value || '')
+            .toString()
+            .replace(/[\u064B-\u065F]/g, '')
+            .replace(/أ|إ|آ/g, 'ا')
+            .replace(/ى/g, 'ي')
+            .replace(/ة/g, 'ه')
+            .trim()
+            .toLowerCase();
+    }
+
+    function parseFlexibleDate(rawValue) {
+        const monthMap = {
+            'يناير': 1, 'jan': 1, 'january': 1,
+            'فبراير': 2, 'feb': 2, 'february': 2,
+            'مارس': 3, 'march': 3, 'mar': 3,
+            'ابريل': 4, 'أبريل': 4, 'april': 4, 'apr': 4,
+            'مايو': 5, 'may': 5,
+            'يونيو': 6, 'june': 6, 'jun': 6,
+            'يوليو': 7, 'july': 7, 'jul': 7,
+            'اغسطس': 8, 'أغسطس': 8, 'august': 8, 'aug': 8,
+            'سبتمبر': 9, 'september': 9, 'sep': 9,
+            'اكتوبر': 10, 'أكتوبر': 10, 'october': 10, 'oct': 10,
+            'نوفمبر': 11, 'november': 11, 'nov': 11,
+            'ديسمبر': 12, 'december': 12, 'dec': 12
+        };
+
+        const value = (rawValue || '')
+            .toString()
+            .replace(/[٠-٩]/g, d => '٠١٢٣٤٥٦٧٨٩'.indexOf(d))
+            .trim();
+        if (!value) return '';
+        if (/^\d{4}-\d{2}-\d{2}$/.test(value)) return value;
+
+        const monthTextMatch = value.match(/^(\d{1,2})\s+([^\s]+)\s+(\d{4})$/i);
+        if (monthTextMatch) {
+            const dayText = parseInt(monthTextMatch[1], 10);
+            const monthText = normalizeArabicText(monthTextMatch[2]);
+            const yearText = parseInt(monthTextMatch[3], 10);
+            const monthNum = monthMap[monthText];
+            if (monthNum) {
+                return `${yearText}-${String(monthNum).padStart(2, '0')}-${String(dayText).padStart(2, '0')}`;
+            }
+        }
+
+        const slashMatch = value.match(/^(\d{1,4})[\/\-](\d{1,2})[\/\-](\d{1,4})$/);
+        if (!slashMatch) return '';
+
+        let first = parseInt(slashMatch[1], 10);
+        let second = parseInt(slashMatch[2], 10);
+        let third = parseInt(slashMatch[3], 10);
+
+        let year, month, day;
+        if (first > 1900) {
+            year = first; month = second; day = third;
+        } else if (third > 1900) {
+            year = third; month = second; day = first;
+        } else {
+            return '';
+        }
+
+        const mm = String(month).padStart(2, '0');
+        const dd = String(day).padStart(2, '0');
+        if (month >= 1 && month <= 12 && day >= 1 && day <= 31) return `${year}-${mm}-${dd}`;
+        return '';
+    }
+
+    function daysInclusive(startDate, endDate) {
+        if (!startDate || !endDate) return '';
+        const diff = Math.ceil((new Date(endDate) - new Date(startDate)) / (1000 * 60 * 60 * 24)) + 1;
+        return diff > 0 ? diff : '';
+    }
+
+    function inferDatesFromRawText(rawText, payload) {
+        const text = (rawText || '').replace(/\s+/g, ' ').trim();
+        const rangeMatch = text.match(/(\d{1,4}[\/\-]\d{1,2}[\/\-]\d{1,4})\s*(?:الى|إلى|to|\-)\s*(\d{1,4}[\/\-]\d{1,2}[\/\-]\d{1,4})/i);
+        if (rangeMatch) {
+            const start = parseFlexibleDate(rangeMatch[1]);
+            const end = parseFlexibleDate(rangeMatch[2]);
+            if (start && end) {
+                payload.start_date = payload.start_date || start;
+                payload.end_date = payload.end_date || end;
+                payload.issue_date = payload.issue_date || start;
+                payload.days_count = payload.days_count || daysInclusive(start, end);
+                return;
+            }
+        }
+
+        const allDates = Array.from(text.matchAll(/\d{1,4}[\/\-]\d{1,2}[\/\-]\d{1,4}/g)).map(m => parseFlexibleDate(m[0])).filter(Boolean);
+        const uniqueDates = [...new Set(allDates)];
+        if (uniqueDates.length === 1) {
+            payload.issue_date = payload.issue_date || uniqueDates[0];
+            payload.start_date = payload.start_date || uniqueDates[0];
+            payload.end_date = payload.end_date || uniqueDates[0];
+            payload.days_count = payload.days_count || 1;
+        } else if (uniqueDates.length >= 2) {
+            const ordered = uniqueDates.sort();
+            payload.start_date = payload.start_date || ordered[0];
+            payload.end_date = payload.end_date || ordered[ordered.length - 1];
+            payload.issue_date = payload.issue_date || payload.start_date;
+            payload.days_count = payload.days_count || daysInclusive(payload.start_date, payload.end_date);
+        }
+    }
+
+    function inferServicePrefix(rawText, payload) {
+        if (payload.service_prefix) return;
+        const normalized = normalizeArabicText(rawText);
+        if (normalized.includes('مستشفي') || normalized.includes('hospital') || normalized.includes('حكومي') || normalized.includes('government')) {
+            payload.service_prefix = 'GSL';
+            return;
+        }
+        if (normalized.includes('مركز') || normalized.includes('مجمع') || normalized.includes('عياده') || normalized.includes('clinic') || normalized.includes('private')) {
+            payload.service_prefix = 'PSL';
+        }
+    }
+
+    function inferFacilityNote(rawText, payload) {
+        const text = (rawText || '').trim();
+        if (!text) return;
+
+        const facilityNameMatch = text.match(/(?:الجهة|المرفق|facility|hospital|clinic|center)\s*(?:هو|:)?\s*([^\n،]{2,80})/i);
+        if (facilityNameMatch) {
+            payload.facility_note = facilityNameMatch[1].trim();
+            return;
+        }
+
+        const normalized = normalizeArabicText(text);
+        if (normalized.includes('مستشفي') || normalized.includes('hospital')) {
+            payload.facility_note = 'مستشفى';
+            return;
+        }
+        if (normalized.includes('مركز') || normalized.includes('clinic') || normalized.includes('center') || normalized.includes('مجمع') || normalized.includes('عياده')) {
+            payload.facility_note = 'مركز';
+        }
+    }
+
+    function parseAssistedLeaveInput(rawText) {
+        const payload = {};
+        const fullText = (rawText || '').trim();
+        const lines = (rawText || '')
+            .split(/\n+/)
+            .map(l => l.trim())
+            .filter(Boolean);
+
+        const fieldMap = {
+            patient_name: ['اسم المريض', 'المريض', 'patient name'],
+            patient_identity: ['الهوية', 'رقم الهوية', 'identity', 'id number'],
+            patient_phone: ['الجوال', 'الهاتف', 'phone', 'mobile'],
+            patient_folder_link: ['رابط الملف', 'رابط المجلد', 'folder link', 'file link'],
+            doctor_name: ['اسم الطبيب', 'الطبيب', 'doctor name'],
+            doctor_title: ['المسمى', 'المسمى الوظيفي', 'الاختصاص', 'title', 'specialty'],
+            doctor_note: ['ملاحظة الطبيب', 'ملاحظة', 'note'],
+            issue_date: ['تاريخ الاصدار', 'تاريخ الإصدار', 'issue date'],
+            start_date: ['بداية الاجازة', 'بداية الإجازة', 'من', 'start date', 'from'],
+            end_date: ['نهاية الاجازة', 'نهاية الإجازة', 'الى', 'إلى', 'end date', 'to'],
+            days_count: ['عدد الايام', 'عدد الأيام', 'days', 'days count'],
+            service_code_manual: ['رمز الخدمة', 'service code'],
+            service_prefix: ['نوع الرمز', 'بادئة الرمز', 'prefix', 'service prefix'],
+            is_companion: ['مرافق', 'اجازة مرافق', 'إجازة مرافق', 'companion'],
+            companion_name: ['اسم المرافق', 'companion name'],
+            companion_relation: ['صلة القرابة', 'العلاقة', 'companion relation'],
+            is_paid: ['مدفوعة', 'دفع', 'paid'],
+            payment_amount: ['المبلغ', 'amount'],
+            facility_note: ['الجهة', 'المرفق', 'facility', 'hospital', 'clinic', 'center']
+        };
+
+        function findFieldByKey(rawKey) {
+            const normalizedKey = normalizeArabicText(rawKey);
+            for (const [fieldName, aliases] of Object.entries(fieldMap)) {
+                if (aliases.some(alias => normalizedKey.includes(normalizeArabicText(alias)))) {
+                    return fieldName;
+                }
+            }
+            return null;
+        }
+
+        lines.forEach(line => {
+            const match = line.match(/^([^:=\-]+)\s*[:=\-]\s*(.+)$/);
+            if (!match) return;
+            const key = match[1].trim();
+            const value = match[2].trim();
+            const fieldName = findFieldByKey(key);
+            if (!fieldName) return;
+
+            if (['issue_date', 'start_date', 'end_date'].includes(fieldName)) {
+                payload[fieldName] = parseFlexibleDate(value) || value;
+                return;
+            }
+            payload[fieldName] = value;
+        });
+
+        // استخراج ذكي من نص حر بدون صيغة "حقل: قيمة"
+        const urlMatch = fullText.match(/https?:\/\/[^\s]+/i);
+        if (!payload.patient_folder_link && urlMatch) payload.patient_folder_link = urlMatch[0];
+
+        const idMatch = fullText.match(/\b\d{10}\b/);
+        if (!payload.patient_identity && idMatch) payload.patient_identity = idMatch[0];
+
+        const phoneMatch = fullText.match(/(?:\+966|00966|966|0)?5\d{8}\b/);
+        if (!payload.patient_phone && phoneMatch) payload.patient_phone = phoneMatch[0];
+
+        if (!payload.patient_name) {
+            const pNameMatch = fullText.match(/(?:المريض|اسم المريض|patient)\s*(?:هو|:)?\s*([^\n،,.]{3,60})/i);
+            if (pNameMatch) payload.patient_name = pNameMatch[1].trim();
+        }
+
+        if (!payload.doctor_name) {
+            const dNameMatch = fullText.match(/(?:الطبيب|اسم الطبيب|doctor)\s*(?:هو|:)?\s*([^\n،,.]{3,60})/i);
+            if (dNameMatch) payload.doctor_name = dNameMatch[1].trim();
+        }
+
+        if (!payload.doctor_title) {
+            const titleMatch = fullText.match(/(?:المسمى|الاختصاص|التخصص|title|specialty)\s*(?:هو|:)?\s*([^\n،,.]{2,60})/i);
+            if (titleMatch) payload.doctor_title = titleMatch[1].trim();
+        }
+
+        if (payload.is_paid === undefined) {
+            if (/(غير\s*مدفوع|غير\s*مدفوعة|unpaid)/i.test(fullText)) payload.is_paid = 'لا';
+            if (/(مدفوع|مدفوعة|paid)/i.test(fullText)) payload.is_paid = 'نعم';
+        }
+
+        if (!payload.payment_amount) {
+            const amountMatch = fullText.match(/(?:المبلغ|amount|رسوم|قيمة)\s*(?:هو|:)?\s*([0-9]+(?:\.[0-9]+)?)/i);
+            if (amountMatch) payload.payment_amount = amountMatch[1];
+        }
+
+        if (payload.is_companion === undefined) {
+            if (/(بدون\s*مرافق|لا\s*يوجد\s*مرافق|ليس\s*مرافق|no\s*companion)/i.test(fullText)) payload.is_companion = 'لا';
+            else if (/(مرافق|companion)/i.test(fullText)) payload.is_companion = 'نعم';
+        }
+
+        if (!payload.days_count) {
+            const daysMatch = fullText.match(/(?:لمدة|عدد\s*الايام|عدد\s*الأيام|days?)\s*(?:هو|:)?\s*(\d{1,3})/i);
+            if (daysMatch) payload.days_count = daysMatch[1];
+        }
+
+        inferServicePrefix(rawText, payload);
+        inferFacilityNote(rawText, payload);
+        inferDatesFromRawText(rawText, payload);
+
+        if (payload.start_date && payload.end_date) {
+            payload.issue_date = payload.issue_date || payload.start_date;
+            payload.days_count = payload.days_count || daysInclusive(payload.start_date, payload.end_date);
+        }
+
+        return payload;
+    }
+
+    function parseBooleanValue(value) {
+        const normalized = normalizeArabicText(value);
+        return ['1', 'yes', 'true', 'نعم', 'ايوه', 'اي', 'صح', 'مدفوعه', 'مدفوعة'].includes(normalized);
+    }
+
+    function applyAssistedDataToAddForm(data) {
+        const patientSelect = document.getElementById('patient_select');
+        const doctorSelect = document.getElementById('doctor_select');
+
+        if (data.service_code_manual) document.getElementById('service_code_manual').value = data.service_code_manual.toUpperCase();
+        if (data.service_prefix) {
+            const normalizedPrefix = data.service_prefix.toUpperCase().includes('P') ? 'PSL' : 'GSL';
+            document.getElementById('service_prefix').value = normalizedPrefix;
+        }
+        if (data.issue_date) document.getElementById('issue_date').value = data.issue_date;
+        if (data.start_date) document.getElementById('start_date').value = data.start_date;
+        if (data.end_date) document.getElementById('end_date').value = data.end_date;
+        if (data.days_count) document.getElementById('days_count').value = parseInt(data.days_count, 10) || '';
+
+        if (data.patient_name || data.patient_identity || data.patient_phone || data.patient_folder_link) {
+            const patientOptions = Array.from(patientSelect.options || []).filter(o => o.value && o.value !== 'manual');
+            const matchedPatient = patientOptions.find(opt => {
+                const text = normalizeArabicText(opt.textContent || '');
+                const byIdentity = data.patient_identity && text.includes(normalizeArabicText(data.patient_identity));
+                const byName = data.patient_name && text.includes(normalizeArabicText(data.patient_name));
+                return byIdentity || byName;
+            });
+
+            if (matchedPatient) {
+                patientSelect.value = matchedPatient.value;
+                togglePatientManualFields();
+            } else {
+                patientSelect.value = 'manual';
+                togglePatientManualFields();
+                if (data.patient_name) document.getElementById('patient_manual_name').value = data.patient_name;
+                if (data.patient_identity) document.getElementById('patient_manual_id').value = data.patient_identity;
+                if (data.patient_phone) document.getElementById('patient_manual_phone').value = data.patient_phone;
+                if (data.patient_folder_link) document.getElementById('patient_manual_folder_link').value = data.patient_folder_link;
+            }
+        }
+
+        if (data.doctor_name || data.doctor_title || data.doctor_note) {
+            const doctorOptions = Array.from(doctorSelect.options || []).filter(o => o.value && o.value !== 'manual');
+            const matchedDoctor = doctorOptions.find(opt => {
+                const text = normalizeArabicText(opt.textContent || '');
+                const byName = data.doctor_name && text.includes(normalizeArabicText(data.doctor_name));
+                const byTitle = data.doctor_title && text.includes(normalizeArabicText(data.doctor_title));
+                return byName || byTitle;
+            });
+
+            if (matchedDoctor) {
+                doctorSelect.value = matchedDoctor.value;
+                toggleDoctorManualFields();
+            } else {
+                doctorSelect.value = 'manual';
+                toggleDoctorManualFields();
+                if (data.doctor_name) document.getElementById('doctor_manual_name').value = data.doctor_name;
+                if (data.doctor_title) document.getElementById('doctor_manual_title').value = data.doctor_title;
+                if (data.doctor_note) document.getElementById('doctor_manual_note').value = data.doctor_note;
+                if (data.facility_note && !document.getElementById('doctor_manual_note').value.trim()) {
+                    document.getElementById('doctor_manual_note').value = data.facility_note;
+                }
+            }
+        }
+
+        if (data.is_companion !== undefined) {
+            const checked = parseBooleanValue(data.is_companion);
+            document.getElementById('is_companion').checked = checked;
+            companionFields.forEach(f => checked ? f.classList.remove('hidden-field') : f.classList.add('hidden-field'));
+        }
+        if (data.companion_name) document.getElementById('companion_name').value = data.companion_name;
+        if (data.companion_relation) document.getElementById('companion_relation').value = data.companion_relation;
+
+        if (data.is_paid !== undefined) document.getElementById('is_paid').checked = parseBooleanValue(data.is_paid);
+        if (data.payment_amount) document.getElementById('payment_amount').value = parseFloat(data.payment_amount) || 0;
+
+        if (document.getElementById('start_date').value && document.getElementById('end_date').value) {
+            document.getElementById('days_count').value = daysInclusive(
+                document.getElementById('start_date').value,
+                document.getElementById('end_date').value
+            ) || document.getElementById('days_count').value;
+        }
+    }
+
+    function renderAssistedBotStatus(message) {
+        const statusBox = document.getElementById('assistedBotStatus');
+        statusBox.textContent = message || '';
+    }
+
+    function getSmartMissingSummary() {
+        const missing = [];
+        const patientSelect = document.getElementById('patient_select').value;
+        const doctorSelect = document.getElementById('doctor_select').value;
+
+        if (!document.getElementById('issue_date').value) missing.push('تاريخ الإصدار');
+        if (!document.getElementById('start_date').value) missing.push('بداية الإجازة');
+        if (!document.getElementById('end_date').value) missing.push('نهاية الإجازة');
+        if (!document.getElementById('days_count').value) missing.push('عدد الأيام');
+
+        if (!patientSelect) missing.push('المريض');
+        if (!doctorSelect) missing.push('الطبيب');
+
+        if (patientSelect === 'manual') {
+            if (!document.getElementById('patient_manual_name').value.trim()) missing.push('اسم المريض');
+            if (!document.getElementById('patient_manual_id').value.trim()) missing.push('رقم الهوية');
+        }
+        if (doctorSelect === 'manual') {
+            if (!document.getElementById('doctor_manual_name').value.trim()) missing.push('اسم الطبيب');
+            if (!document.getElementById('doctor_manual_title').value.trim()) missing.push('المسمى الوظيفي');
+        }
+
+        return missing;
+    }
+
+    function toggleAddInputMode() {
+        const assistedMode = document.getElementById('add_mode_assisted').checked;
+        const assistedCard = document.getElementById('assistedInputCard');
+        assistedCard.classList.toggle('hidden-field', !assistedMode);
+    }
+
+    document.getElementById('add_mode_assisted').addEventListener('change', toggleAddInputMode);
+    document.getElementById('add_mode_manual').addEventListener('change', toggleAddInputMode);
+    toggleAddInputMode();
+
+    document.getElementById('assistParseBtn').addEventListener('click', () => {
+        const rawText = document.getElementById('assisted_leave_input').value;
+        if (!rawText.trim()) {
+            showToast('يرجى إدخال بيانات الإجازة أولاً.', 'warning');
+            return;
+        }
+
+        const parsed = parseAssistedLeaveInput(rawText);
+        assistedDraft = { ...assistedDraft, ...parsed };
+
+        if (!Object.keys(assistedDraft).length) {
+            showToast('لم يتم التعرف على الحقول. استخدم الصيغة: اسم الحقل: القيمة', 'warning');
+            return;
+        }
+        applyAssistedDataToAddForm(assistedDraft);
+        const missing = getSmartMissingSummary();
+        if (missing.length) {
+            renderAssistedBotStatus(`🤖 تم التحليل المحلي الذكي. البيانات الناقصة: ${missing.join(' - ')}`);
+            showToast('تم التحليل لكن توجد حقول ناقصة، راجع الرسالة الزرقاء.', 'warning');
+        } else {
+            renderAssistedBotStatus('✅ تم التحليل المحلي الذكي واكتمال البيانات. جاهز للحفظ.');
+            showToast('تم تحليل البيانات وتعبئة النموذج بنجاح.', 'success');
+        }
+    });
+
     // ====== إضافة إجازة ======
     document.getElementById('addLeaveForm').addEventListener('submit', async (e) => {
         e.preventDefault();
@@ -5604,6 +6309,8 @@ document.addEventListener('DOMContentLoaded', () => {
             if (result.success) {
                 showToast(result.message, 'success');
                 e.target.reset();
+                assistedDraft = {};
+                document.getElementById('assistedBotStatus').textContent = '';
                 togglePatientManualFields();
                 toggleDoctorManualFields();
                 companionFields.forEach(f => f.classList.add('hidden-field'));
@@ -7216,6 +7923,9 @@ document.addEventListener('DOMContentLoaded', () => {
         fetchAdminStats();
     });
     document.getElementById('applyAdminStatsRange')?.addEventListener('click', () => {
+        fetchAdminStats();
+    });
+    document.getElementById('adminStatsUserFilter')?.addEventListener('change', () => {
         fetchAdminStats();
     });
     document.getElementById('adminStatsRangePreset')?.addEventListener('change', (e) => {
