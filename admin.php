@@ -7424,32 +7424,32 @@ document.addEventListener('DOMContentLoaded', () => {
     document.getElementById('searchLeaves').addEventListener('input', debounce(function() {
         filtersState.leaves.search = this.value;
         applyLeavesFilters();
-    }));
+    }, 80));
 
     document.getElementById('searchArchived').addEventListener('input', debounce(function() {
         filtersState.archived.search = this.value;
         applyArchivedFilters();
-    }));
+    }, 80));
 
     document.getElementById('searchQueries').addEventListener('input', debounce(function() {
         filtersState.queries.search = this.value;
         applyQueriesFilters();
-    }));
+    }, 80));
 
     document.getElementById('searchDoctors').addEventListener('input', debounce(function() {
         filtersState.doctors.search = this.value;
         applyDoctorsFilters();
-    }));
+    }, 80));
 
     document.getElementById('searchPatients').addEventListener('input', debounce(function() {
         filtersState.patients.search = this.value;
         applyPatientsFilters();
-    }));
+    }, 80));
 
     document.getElementById('searchPayments').addEventListener('input', debounce(function() {
         filtersState.payments.search = this.value;
         applyPaymentsFilters();
-    }));
+    }, 80));
 
     document.getElementById('showPaidLeaves').addEventListener('click', () => { filtersState.leaves.typeFilter = 'paid'; applyLeavesFilters(); });
     document.getElementById('showUnpaidLeaves').addEventListener('click', () => { filtersState.leaves.typeFilter = 'unpaid'; applyLeavesFilters(); });
@@ -7564,7 +7564,18 @@ document.addEventListener('DOMContentLoaded', () => {
     document.getElementById('searchNotifs').addEventListener('input', debounce(function() {
         filtersState.notifications.search = this.value;
         applyNotificationsFilters();
-    }));
+    }, 80));
+
+    ['searchLeaves','searchArchived','searchQueries','searchDoctors','searchPatients','searchPayments','searchNotifs'].forEach((id) => {
+        const input = document.getElementById(id);
+        if (!input) return;
+        input.addEventListener('keydown', (e) => {
+            if (e.key === 'Escape') {
+                input.value = '';
+                input.dispatchEvent(new Event('input', { bubbles: true }));
+            }
+        });
+    });
     document.getElementById('sortNotifsNewest').addEventListener('click', () => { filtersState.notifications.sortMode = 'newest'; applyNotificationsFilters(); });
     document.getElementById('sortNotifsOldest').addEventListener('click', () => { filtersState.notifications.sortMode = 'oldest'; applyNotificationsFilters(); });
     document.getElementById('sortNotifsMostRepeated').addEventListener('click', () => { filtersState.notifications.sortMode = 'mostRepeated'; applyNotificationsFilters(); });
