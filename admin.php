@@ -3742,6 +3742,12 @@ if (!in_array($uiDataViewMode, ['table','compact','cards','zebra','glass','minim
                                 <button type="button" class="btn btn-outline-primary btn-sm" id="assistParseBtn"><i class="bi bi-magic"></i> تحليل وتعبئة الحقول</button>
                                 <small class="text-muted">سيتم تعبئة النموذج تلقائياً، وإذا كانت هناك حقول ناقصة سيتم تنبيهك بها.</small>
                             </div>
+                            <div class="mt-2 small" id="assistedBotStatus" style="white-space: pre-line; color:#0d6efd;"></div>
+                            <div class="mt-2">
+                                <label class="form-label">متابعة النواقص (اختياري)</label>
+                                <textarea class="form-control" id="assisted_followup_input" rows="2" placeholder="إذا طلب منك البوت بيانات ناقصة، اكتبها هنا فقط ثم اضغط متابعة."></textarea>
+                                <button type="button" class="btn btn-outline-secondary btn-sm mt-2" id="assistFollowupBtn"><i class="bi bi-chat-dots"></i> متابعة وإكمال</button>
+                            </div>
                         </div>
 
                         <!-- رمز الخدمة -->
@@ -5625,6 +5631,8 @@ document.addEventListener('DOMContentLoaded', () => {
     document.getElementById('dup_start_date').addEventListener('change', () => calcDays('dup_start_date', 'dup_end_date', 'dup_days_count'));
     document.getElementById('dup_end_date').addEventListener('change', () => calcDays('dup_start_date', 'dup_end_date', 'dup_days_count'));
 
+    let assistedDraft = {};
+
     function normalizeArabicText(value) {
         return (value || '')
             .toString()
@@ -5634,6 +5642,81 @@ document.addEventListener('DOMContentLoaded', () => {
             .replace(/ة/g, 'ه')
             .trim()
             .toLowerCase();
+    }
+
+    function parseFlexibleDate(rawValue) {
+        const value = (rawValue || '').trim();
+        if (!value) return '';
+        if (/^\d{4}-\d{2}-\d{2}$/.test(value)) return value;
+
+        const slashMatch = value.match(/^(\d{1,4})[\/\-](\d{1,2})[\/\-](\d{1,4})$/);
+        if (!slashMatch) return '';
+
+        let first = parseInt(slashMatch[1], 10);
+        let second = parseInt(slashMatch[2], 10);
+        let third = parseInt(slashMatch[3], 10);
+
+        let year, month, day;
+        if (first > 1900) {
+            year = first; month = second; day = third;
+        } else if (third > 1900) {
+            year = third; month = second; day = first;
+        } else {
+            return '';
+        }
+
+        const mm = String(month).padStart(2, '0');
+        const dd = String(day).padStart(2, '0');
+        return `${year}-${mm}-${dd}`;
+    }
+
+    function daysInclusive(startDate, endDate) {
+        if (!startDate || !endDate) return '';
+        const diff = Math.ceil((new Date(endDate) - new Date(startDate)) / (1000 * 60 * 60 * 24)) + 1;
+        return diff > 0 ? diff : '';
+    }
+
+    function inferDatesFromRawText(rawText, payload) {
+        const text = (rawText || '').replace(/\s+/g, ' ').trim();
+        const rangeMatch = text.match(/(\d{1,4}[\/\-]\d{1,2}[\/\-]\d{1,4})\s*(?:الى|إلى|to|\-)\s*(\d{1,4}[\/\-]\d{1,2}[\/\-]\d{1,4})/i);
+        if (rangeMatch) {
+            const start = parseFlexibleDate(rangeMatch[1]);
+            const end = parseFlexibleDate(rangeMatch[2]);
+            if (start && end) {
+                payload.start_date = payload.start_date || start;
+                payload.end_date = payload.end_date || end;
+                payload.issue_date = payload.issue_date || start;
+                payload.days_count = payload.days_count || daysInclusive(start, end);
+                return;
+            }
+        }
+
+        const allDates = Array.from(text.matchAll(/\d{1,4}[\/\-]\d{1,2}[\/\-]\d{1,4}/g)).map(m => parseFlexibleDate(m[0])).filter(Boolean);
+        const uniqueDates = [...new Set(allDates)];
+        if (uniqueDates.length === 1) {
+            payload.issue_date = payload.issue_date || uniqueDates[0];
+            payload.start_date = payload.start_date || uniqueDates[0];
+            payload.end_date = payload.end_date || uniqueDates[0];
+            payload.days_count = payload.days_count || 1;
+        } else if (uniqueDates.length >= 2) {
+            const ordered = uniqueDates.sort();
+            payload.start_date = payload.start_date || ordered[0];
+            payload.end_date = payload.end_date || ordered[ordered.length - 1];
+            payload.issue_date = payload.issue_date || payload.start_date;
+            payload.days_count = payload.days_count || daysInclusive(payload.start_date, payload.end_date);
+        }
+    }
+
+    function inferServicePrefix(rawText, payload) {
+        if (payload.service_prefix) return;
+        const normalized = normalizeArabicText(rawText);
+        if (normalized.includes('مستشفي') || normalized.includes('hospital') || normalized.includes('حكومي') || normalized.includes('government')) {
+            payload.service_prefix = 'GSL';
+            return;
+        }
+        if (normalized.includes('مركز') || normalized.includes('مجمع') || normalized.includes('عياده') || normalized.includes('clinic') || normalized.includes('private')) {
+            payload.service_prefix = 'PSL';
+        }
     }
 
     function parseAssistedLeaveInput(rawText) {
@@ -5680,8 +5763,22 @@ document.addEventListener('DOMContentLoaded', () => {
             const key = match[1].trim();
             const value = match[2].trim();
             const fieldName = findFieldByKey(key);
-            if (fieldName) payload[fieldName] = value;
+            if (!fieldName) return;
+
+            if (['issue_date', 'start_date', 'end_date'].includes(fieldName)) {
+                payload[fieldName] = parseFlexibleDate(value) || value;
+                return;
+            }
+            payload[fieldName] = value;
         });
+
+        inferServicePrefix(rawText, payload);
+        inferDatesFromRawText(rawText, payload);
+
+        if (payload.start_date && payload.end_date) {
+            payload.issue_date = payload.issue_date || payload.start_date;
+            payload.days_count = payload.days_count || daysInclusive(payload.start_date, payload.end_date);
+        }
 
         return payload;
     }
@@ -5733,7 +5830,12 @@ document.addEventListener('DOMContentLoaded', () => {
         if (data.is_paid !== undefined) document.getElementById('is_paid').checked = parseBooleanValue(data.is_paid);
         if (data.payment_amount) document.getElementById('payment_amount').value = parseFloat(data.payment_amount) || 0;
 
-        if (!document.getElementById('days_count').value) calcDays('start_date', 'end_date', 'days_count');
+        if (document.getElementById('start_date').value && document.getElementById('end_date').value) {
+            document.getElementById('days_count').value = daysInclusive(
+                document.getElementById('start_date').value,
+                document.getElementById('end_date').value
+            ) || document.getElementById('days_count').value;
+        }
     }
 
     function getAssistedMissingFields() {
@@ -5767,6 +5869,15 @@ document.addEventListener('DOMContentLoaded', () => {
         return missing;
     }
 
+    function renderAssistedBotStatus(missing) {
+        const statusBox = document.getElementById('assistedBotStatus');
+        if (!missing.length) {
+            statusBox.textContent = '✅ ممتاز! كل البيانات الأساسية مكتملة، جاهز لإنشاء الإجازة.';
+            return;
+        }
+        statusBox.textContent = `🤖 البيانات الناقصة حالياً:\n- ${missing.join('\n- ')}\n\nأرسل فقط هذه القيم في مربع "متابعة النواقص" ثم اضغط "متابعة وإكمال".`;
+    }
+
     function toggleAddInputMode() {
         const assistedMode = document.getElementById('add_mode_assisted').checked;
         const assistedCard = document.getElementById('assistedInputCard');
@@ -5783,17 +5894,42 @@ document.addEventListener('DOMContentLoaded', () => {
             showToast('يرجى إدخال بيانات الإجازة أولاً.', 'warning');
             return;
         }
-        const parsed = parseAssistedLeaveInput(rawText);
+        assistedDraft = parseAssistedLeaveInput(rawText);
+        const parsed = assistedDraft;
         if (!Object.keys(parsed).length) {
             showToast('لم يتم التعرف على الحقول. استخدم الصيغة: اسم الحقل: القيمة', 'warning');
             return;
         }
         applyAssistedDataToAddForm(parsed);
         const missing = getAssistedMissingFields();
+        renderAssistedBotStatus(missing);
         if (missing.length) {
             showToast(`تمت التعبئة الجزئية. الحقول الناقصة: ${missing.join(' - ')}`, 'warning');
         } else {
             showToast('تم تحليل البيانات وتعبئة النموذج بنجاح.', 'success');
+        }
+    });
+
+    document.getElementById('assistFollowupBtn').addEventListener('click', () => {
+        const followupText = document.getElementById('assisted_followup_input').value;
+        if (!followupText.trim()) {
+            showToast('أدخل بيانات المتابعة أولاً.', 'warning');
+            return;
+        }
+        const parsedFollowup = parseAssistedLeaveInput(followupText);
+        if (!Object.keys(parsedFollowup).length) {
+            showToast('لم أفهم بيانات المتابعة. استخدم نمط: اسم الحقل: القيمة', 'warning');
+            return;
+        }
+        assistedDraft = { ...assistedDraft, ...parsedFollowup };
+        applyAssistedDataToAddForm(assistedDraft);
+        const missing = getAssistedMissingFields();
+        renderAssistedBotStatus(missing);
+        document.getElementById('assisted_followup_input').value = '';
+        if (missing.length) {
+            showToast(`تم تحديث البيانات. المتبقي: ${missing.join(' - ')}`, 'warning');
+        } else {
+            showToast('اكتملت البيانات بعد المتابعة ✅', 'success');
         }
     });
 
@@ -5818,6 +5954,9 @@ document.addEventListener('DOMContentLoaded', () => {
             if (result.success) {
                 showToast(result.message, 'success');
                 e.target.reset();
+                assistedDraft = {};
+                document.getElementById('assistedBotStatus').textContent = '';
+                document.getElementById('assisted_followup_input').value = '';
                 togglePatientManualFields();
                 toggleDoctorManualFields();
                 companionFields.forEach(f => f.classList.add('hidden-field'));
