@@ -179,6 +179,8 @@ ensureIndex($pdo, 'sick_leaves', 'idx_sick_leaves_deleted_created', 'deleted_at,
 ensureIndex($pdo, 'sick_leaves', 'idx_sick_leaves_paid', 'is_paid');
 ensureIndex($pdo, 'sick_leaves', 'idx_sick_leaves_patient', 'patient_id');
 ensureIndex($pdo, 'sick_leaves', 'idx_sick_leaves_doctor', 'doctor_id');
+ensureColumn($pdo, 'sick_leaves', 'created_by_user_id', "INT NULL AFTER doctor_id");
+ensureIndex($pdo, 'sick_leaves', 'idx_sick_leaves_created_by_user', 'created_by_user_id');
 ensureIndex($pdo, 'notifications', 'idx_notifications_type_created', 'type, created_at');
 ensureIndex($pdo, 'notifications', 'idx_notifications_leave', 'leave_id');
 ensureIndex($pdo, 'leave_queries', 'idx_leave_queries_leave', 'leave_id');
@@ -790,6 +792,7 @@ if (isset($_POST['action']) && $_POST['action'] !== 'login' && $_POST['action'] 
             $companion_relation = trim($_POST['companion_relation'] ?? '');
             $is_paid = isset($_POST['is_paid']) ? 1 : 0;
             $payment_amount = floatval($_POST['payment_amount'] ?? 0);
+            $created_by_user_id = intval($_SESSION['admin_user_id'] ?? 0) ?: null;
 
             if (empty($issue_date) || empty($start_date) || empty($end_date) || $days_count <= 0 || $patient_id <= 0 || $doctor_id <= 0) {
                 echo json_encode(['success' => false, 'message' => 'يرجى تعبئة جميع الحقول المطلوبة.']);
@@ -797,11 +800,11 @@ if (isset($_POST['action']) && $_POST['action'] !== 'login' && $_POST['action'] 
             }
 
             $stmt = $pdo->prepare("INSERT INTO sick_leaves 
-                (service_code, patient_id, doctor_id, issue_date, start_date, end_date, days_count, 
+                (service_code, patient_id, doctor_id, created_by_user_id, issue_date, start_date, end_date, days_count, 
                  is_companion, companion_name, companion_relation, is_paid, payment_amount) 
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)");
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)");
             $stmt->execute([
-                $service_code, $patient_id, $doctor_id, $issue_date, $start_date, $end_date, $days_count,
+                $service_code, $patient_id, $doctor_id, $created_by_user_id, $issue_date, $start_date, $end_date, $days_count,
                 $is_companion, $companion_name, $companion_relation, $is_paid, $payment_amount
             ]);
 
@@ -930,6 +933,7 @@ if (isset($_POST['action']) && $_POST['action'] !== 'login' && $_POST['action'] 
             $companion_relation = trim($_POST['dup_companion_relation'] ?? '');
             $is_paid = isset($_POST['dup_is_paid']) ? 1 : 0;
             $payment_amount = floatval($_POST['dup_payment_amount'] ?? 0);
+            $created_by_user_id = intval($_SESSION['admin_user_id'] ?? 0) ?: null;
 
             if (empty($issue_date) || empty($start_date) || empty($end_date) || $days_count <= 0 || $patient_id <= 0 || $doctor_id <= 0) {
                 echo json_encode(['success' => false, 'message' => 'يرجى تعبئة جميع الحقول المطلوبة.']);
@@ -937,11 +941,11 @@ if (isset($_POST['action']) && $_POST['action'] !== 'login' && $_POST['action'] 
             }
 
             $stmt = $pdo->prepare("INSERT INTO sick_leaves 
-                (service_code, patient_id, doctor_id, issue_date, start_date, end_date, days_count, 
+                (service_code, patient_id, doctor_id, created_by_user_id, issue_date, start_date, end_date, days_count, 
                  is_companion, companion_name, companion_relation, is_paid, payment_amount) 
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)");
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)");
             $stmt->execute([
-                $service_code, $patient_id, $doctor_id, $issue_date, $start_date, $end_date, $days_count,
+                $service_code, $patient_id, $doctor_id, $created_by_user_id, $issue_date, $start_date, $end_date, $days_count,
                 $is_companion, $companion_name, $companion_relation, $is_paid, $payment_amount
             ]);
 
@@ -1231,6 +1235,7 @@ if (isset($_POST['action']) && $_POST['action'] !== 'login' && $_POST['action'] 
             $rangeDays = max(1, min(365, intval($_POST['range_days'] ?? 30)));
             $fromDate = trim($_POST['from_date'] ?? '');
             $toDate = trim($_POST['to_date'] ?? '');
+            $filterUserId = max(0, intval($_POST['filter_user_id'] ?? 0));
             if (!preg_match('/^\d{4}-\d{2}-\d{2}$/', $fromDate)) {
                 $fromDate = date('Y-m-d', strtotime("-" . ($rangeDays - 1) . " days"));
             }
@@ -1254,32 +1259,76 @@ if (isset($_POST['action']) && $_POST['action'] !== 'login' && $_POST['action'] 
                 'consistency_rate' => 0,
                 'top_doctors' => [],
                 'top_patients' => [],
-                'daily' => []
+                'daily' => [],
+                'users_filter' => [],
+                'users_productivity' => [],
+                'duplicates' => [],
+                'filter_user_id' => $filterUserId
             ];
+
+            $summary['users_filter'] = $pdo->query("SELECT id, display_name, username FROM admin_users WHERE is_active = 1 ORDER BY display_name")->fetchAll();
+
+            $rangeFilter = "sl.deleted_at IS NULL AND DATE(sl.created_at) BETWEEN ? AND ? AND (? = 0 OR sl.created_by_user_id = ?)";
+            $rangeParams = [$fromDate, $toDate, $filterUserId, $filterUserId];
 
             $summary['today_total'] = (int)$pdo->query("SELECT COUNT(*) FROM sick_leaves WHERE deleted_at IS NULL AND DATE(created_at) = CURDATE()")->fetchColumn();
             $summary['today_paid'] = (int)$pdo->query("SELECT COUNT(*) FROM sick_leaves WHERE deleted_at IS NULL AND is_paid = 1 AND DATE(created_at) = CURDATE()")->fetchColumn();
             $summary['today_unpaid'] = (int)$pdo->query("SELECT COUNT(*) FROM sick_leaves WHERE deleted_at IS NULL AND is_paid = 0 AND DATE(created_at) = CURDATE()")->fetchColumn();
 
-            $avgStmt = $pdo->prepare("SELECT COALESCE(AVG(day_count),0) FROM (SELECT DATE(created_at) d, COUNT(*) day_count FROM sick_leaves WHERE deleted_at IS NULL AND DATE(created_at) BETWEEN ? AND ? GROUP BY DATE(created_at)) t");
-            $avgStmt->execute([$fromDate, $toDate]);
+            $avgStmt = $pdo->prepare("SELECT COALESCE(AVG(day_count),0) FROM (SELECT DATE(sl.created_at) d, COUNT(*) day_count FROM sick_leaves sl WHERE $rangeFilter GROUP BY DATE(sl.created_at)) t");
+            $avgStmt->execute($rangeParams);
             $summary['avg_daily'] = (float)$avgStmt->fetchColumn();
 
-            $consistencyStmt = $pdo->prepare("SELECT (COUNT(DISTINCT DATE(created_at)) * 100.0 / GREATEST(DATEDIFF(?, ?) + 1, 1)) FROM sick_leaves WHERE deleted_at IS NULL AND DATE(created_at) BETWEEN ? AND ?");
-            $consistencyStmt->execute([$toDate, $fromDate, $fromDate, $toDate]);
+            $consistencyStmt = $pdo->prepare("SELECT (COUNT(DISTINCT DATE(sl.created_at)) * 100.0 / GREATEST(DATEDIFF(?, ?) + 1, 1)) FROM sick_leaves sl WHERE $rangeFilter");
+            $consistencyStmt->execute(array_merge([$toDate, $fromDate], $rangeParams));
             $summary['consistency_rate'] = round((float)$consistencyStmt->fetchColumn(), 2);
 
-            $topDoctorsStmt = $pdo->prepare("SELECT d.name, d.title, COUNT(*) leaves_count FROM sick_leaves sl LEFT JOIN doctors d ON d.id = sl.doctor_id WHERE sl.deleted_at IS NULL AND DATE(sl.created_at) BETWEEN ? AND ? GROUP BY sl.doctor_id ORDER BY leaves_count DESC LIMIT 5");
-            $topDoctorsStmt->execute([$fromDate, $toDate]);
+            $topDoctorsStmt = $pdo->prepare("SELECT d.name, d.title, COUNT(*) leaves_count FROM sick_leaves sl LEFT JOIN doctors d ON d.id = sl.doctor_id WHERE $rangeFilter GROUP BY sl.doctor_id ORDER BY leaves_count DESC LIMIT 5");
+            $topDoctorsStmt->execute($rangeParams);
             $summary['top_doctors'] = $topDoctorsStmt->fetchAll();
 
-            $topPatientsStmt = $pdo->prepare("SELECT p.name, p.identity_number, COUNT(*) leaves_count, SUM(CASE WHEN sl.is_paid = 1 THEN sl.payment_amount ELSE 0 END) paid_amount, SUM(CASE WHEN sl.is_paid = 0 THEN sl.payment_amount ELSE 0 END) unpaid_amount FROM sick_leaves sl LEFT JOIN patients p ON p.id = sl.patient_id WHERE sl.deleted_at IS NULL AND DATE(sl.created_at) BETWEEN ? AND ? GROUP BY sl.patient_id ORDER BY leaves_count DESC LIMIT 5");
-            $topPatientsStmt->execute([$fromDate, $toDate]);
+            $topPatientsStmt = $pdo->prepare("SELECT p.name, p.identity_number, COUNT(*) leaves_count, SUM(CASE WHEN sl.is_paid = 1 THEN sl.payment_amount ELSE 0 END) paid_amount, SUM(CASE WHEN sl.is_paid = 0 THEN sl.payment_amount ELSE 0 END) unpaid_amount FROM sick_leaves sl LEFT JOIN patients p ON p.id = sl.patient_id WHERE $rangeFilter GROUP BY sl.patient_id ORDER BY leaves_count DESC LIMIT 5");
+            $topPatientsStmt->execute($rangeParams);
             $summary['top_patients'] = $topPatientsStmt->fetchAll();
 
-            $dailyStmt = $pdo->prepare("SELECT DATE(created_at) day_date, COUNT(*) total_count, SUM(CASE WHEN is_paid = 1 THEN 1 ELSE 0 END) paid_count, SUM(CASE WHEN is_paid = 0 THEN 1 ELSE 0 END) unpaid_count FROM sick_leaves WHERE deleted_at IS NULL AND DATE(created_at) BETWEEN ? AND ? GROUP BY DATE(created_at) ORDER BY day_date DESC");
-            $dailyStmt->execute([$fromDate, $toDate]);
+            $dailyStmt = $pdo->prepare("SELECT DATE(sl.created_at) day_date, COUNT(*) total_count, SUM(CASE WHEN sl.is_paid = 1 THEN 1 ELSE 0 END) paid_count, SUM(CASE WHEN sl.is_paid = 0 THEN 1 ELSE 0 END) unpaid_count FROM sick_leaves sl WHERE $rangeFilter GROUP BY DATE(sl.created_at) ORDER BY day_date DESC");
+            $dailyStmt->execute($rangeParams);
             $summary['daily'] = $dailyStmt->fetchAll();
+
+            $usersProductivityStmt = $pdo->prepare("
+                SELECT COALESCE(u.display_name, 'غير محدد') AS user_name, COALESCE(u.username, '-') AS username,
+                       COUNT(sl.id) AS leaves_count,
+                       SUM(CASE WHEN dup.dup_count > 1 THEN 1 ELSE 0 END) AS duplicate_count
+                FROM sick_leaves sl
+                LEFT JOIN admin_users u ON u.id = sl.created_by_user_id
+                LEFT JOIN (
+                    SELECT patient_id, start_date, end_date, COUNT(*) AS dup_count
+                    FROM sick_leaves
+                    WHERE deleted_at IS NULL
+                    GROUP BY patient_id, start_date, end_date
+                ) dup ON dup.patient_id = sl.patient_id AND dup.start_date = sl.start_date AND dup.end_date = sl.end_date
+                WHERE $rangeFilter
+                GROUP BY sl.created_by_user_id, u.display_name, u.username
+                ORDER BY leaves_count DESC
+            ");
+            $usersProductivityStmt->execute($rangeParams);
+            $summary['users_productivity'] = $usersProductivityStmt->fetchAll();
+
+            $duplicatesStmt = $pdo->prepare("
+                SELECT p.name AS patient_name, p.identity_number, sl.start_date, sl.end_date,
+                       COUNT(*) AS repeated_count,
+                       GROUP_CONCAT(DISTINCT COALESCE(u.display_name, 'غير محدد') SEPARATOR '، ') AS creators
+                FROM sick_leaves sl
+                LEFT JOIN patients p ON p.id = sl.patient_id
+                LEFT JOIN admin_users u ON u.id = sl.created_by_user_id
+                WHERE $rangeFilter
+                GROUP BY sl.patient_id, sl.start_date, sl.end_date, p.name, p.identity_number
+                HAVING COUNT(*) > 1
+                ORDER BY repeated_count DESC, sl.start_date DESC
+                LIMIT 50
+            ");
+            $duplicatesStmt->execute($rangeParams);
+            $summary['duplicates'] = $duplicatesStmt->fetchAll();
 
             if (!$canViewFinancial) {
                 $summary['totals']['paid_amount'] = null;
@@ -2506,6 +2555,20 @@ if (!in_array($uiDataViewMode, ['table','compact','cards','zebra','glass','minim
             background: linear-gradient(135deg, rgba(19,28,46,0.85), rgba(14,21,37,0.9));
             border-color: rgba(148,163,184,0.18);
             box-shadow: inset 0 1px 0 rgba(255,255,255,0.03);
+        }
+
+        .stats-pro-card {
+            border-radius: 14px;
+            overflow: hidden;
+            transition: transform .22s ease, box-shadow .22s ease;
+            background: linear-gradient(180deg, #ffffff, #f8fbff);
+        }
+        .stats-pro-card:hover {
+            transform: translateY(-3px);
+            box-shadow: 0 12px 24px rgba(2,6,23,0.12);
+        }
+        .dark-mode .stats-pro-card {
+            background: linear-gradient(180deg, #0f172a, #111827);
         }
 
         /* بطاقات الإحصائيات داخل صفحة الإحصائيات المتقدمة */
@@ -4220,6 +4283,9 @@ if (!in_array($uiDataViewMode, ['table','compact','cards','zebra','glass','minim
                         </select>
                         <input type="date" id="adminStatsFromDate" class="form-control form-control-sm" style="max-width:150px;">
                         <input type="date" id="adminStatsToDate" class="form-control form-control-sm" style="max-width:150px;">
+                        <select id="adminStatsUserFilter" class="form-select form-select-sm" style="min-width:180px;">
+                            <option value="0">كل المستخدمين</option>
+                        </select>
                         <button class="btn btn-sm btn-gradient" id="applyAdminStatsRange"><i class="bi bi-funnel"></i> تطبيق</button>
                         <button class="btn btn-sm btn-outline-secondary" id="refreshAdminStats"><i class="bi bi-arrow-repeat"></i> تحديث</button>
                     </div>
@@ -4250,6 +4316,27 @@ if (!in_array($uiDataViewMode, ['table','compact','cards','zebra','glass','minim
                         <div class="col-md-6">
                             <h6>أعلى المرضى</h6>
                             <ul class="list-group" id="adminTopPatients"></ul>
+                        </div>
+                    </div>
+
+                    <div class="row g-3 mt-1">
+                        <div class="col-lg-6">
+                            <h6>إنتاجية المستخدمين (من أنشأ الإجازات)</h6>
+                            <div class="table-responsive">
+                                <table class="table table-bordered table-sm text-center" id="adminUsersProductivityTable">
+                                    <thead><tr><th>المستخدم</th><th>الإجازات</th><th>المكرر</th><th>معدل التكرار %</th></tr></thead>
+                                    <tbody></tbody>
+                                </table>
+                            </div>
+                        </div>
+                        <div class="col-lg-6">
+                            <h6>الإجازات المكررة (نفس المريض + نفس التواريخ)</h6>
+                            <div class="table-responsive">
+                                <table class="table table-bordered table-sm text-center" id="adminDuplicatesTable">
+                                    <thead><tr><th>المريض</th><th>الهوية</th><th>من</th><th>إلى</th><th>عدد التكرار</th><th>المستخدمون</th></tr></thead>
+                                    <tbody></tbody>
+                                </table>
+                            </div>
                         </div>
                     </div>
                 </div>
@@ -5397,14 +5484,19 @@ function renderAdminStats(data) {
     const dailyTbody = document.querySelector('#adminDailyStatsTable tbody');
     const topDoctors = document.getElementById('adminTopDoctors');
     const topPatients = document.getElementById('adminTopPatients');
-    if (!cards || !dailyTbody || !topDoctors || !topPatients || !data) return;
+    const usersProductivityTbody = document.querySelector('#adminUsersProductivityTable tbody');
+    const duplicatesTbody = document.querySelector('#adminDuplicatesTable tbody');
+    const userFilter = document.getElementById('adminStatsUserFilter');
+    if (!cards || !dailyTbody || !topDoctors || !topPatients || !usersProductivityTbody || !duplicatesTbody || !data) return;
 
     const t = data.totals || {};
     const canViewFinancial = !!data.can_view_financial;
+    const totalDuplicates = (data.duplicates || []).reduce((sum, d) => sum + (parseInt(d.repeated_count || 0, 10) - 1), 0);
     const cardItems = [
         ['إجمالي الإجازات النشطة', t.total || 0, 'primary'],
         ['المدفوعة', t.paid || 0, 'success'],
         ['غير المدفوعة', t.unpaid || 0, 'danger'],
+        ['الحالات المكررة', totalDuplicates, 'warning'],
         ['إجازات اليوم', data.today_total || 0, 'info'],
         ['مدفوعة اليوم', data.today_paid || 0, 'success'],
         ['غير مدفوعة اليوم', data.today_unpaid || 0, 'warning'],
@@ -5420,7 +5512,7 @@ function renderAdminStats(data) {
 
     cards.innerHTML = cardItems.map(([label,val,color]) => `
         <div class="col-md-4 col-lg-3">
-            <div class="card border-${color} h-100 shadow-sm">
+            <div class="card border-${color} h-100 shadow-sm stats-pro-card">
                 <div class="card-body py-2">
                     <div class="small text-muted">${label}</div>
                     <div class="h5 mb-0">${val}</div>
@@ -5439,6 +5531,30 @@ function renderAdminStats(data) {
     topPatients.innerHTML = (data.top_patients || []).map(p => `
         <li class="list-group-item"><div class="d-flex justify-content-between"><span>${htmlspecialchars(p.name || 'غير محدد')} (${htmlspecialchars(p.identity_number || '-')})</span><strong>${p.leaves_count || 0}</strong></div>${canViewFinancial ? `<small class="text-success">مدفوع: ${parseFloat(p.paid_amount || 0).toFixed(2)}</small> - <small class="text-danger">مستحق: ${parseFloat(p.unpaid_amount || 0).toFixed(2)}</small>` : '<small class="text-muted">البيانات المالية للمشرف فقط</small>'}</li>
     `).join('') || '<li class="list-group-item text-muted">لا توجد بيانات</li>';
+
+    usersProductivityTbody.innerHTML = (data.users_productivity || []).map(u => {
+        const total = parseInt(u.leaves_count || 0, 10);
+        const dup = parseInt(u.duplicate_count || 0, 10);
+        const ratio = total > 0 ? ((dup / total) * 100).toFixed(1) : '0.0';
+        return `<tr><td>${htmlspecialchars(u.user_name || 'غير محدد')}</td><td>${total}</td><td>${dup}</td><td>${ratio}%</td></tr>`;
+    }).join('') || '<tr><td colspan="4" class="text-muted">لا توجد بيانات</td></tr>';
+
+    duplicatesTbody.innerHTML = (data.duplicates || []).map(d => `
+        <tr>
+            <td>${htmlspecialchars(d.patient_name || 'غير محدد')}</td>
+            <td>${htmlspecialchars(d.identity_number || '-')}</td>
+            <td>${htmlspecialchars(d.start_date || '-')}</td>
+            <td>${htmlspecialchars(d.end_date || '-')}</td>
+            <td><span class="badge bg-danger">${d.repeated_count || 0}</span></td>
+            <td>${htmlspecialchars(d.creators || '-')}</td>
+        </tr>
+    `).join('') || '<tr><td colspan="6" class="text-muted">لا توجد حالات تكرار</td></tr>';
+
+    if (userFilter && Array.isArray(data.users_filter)) {
+        const selectedVal = String(data.filter_user_id || userFilter.value || '0');
+        userFilter.innerHTML = `<option value="0">كل المستخدمين</option>` + data.users_filter.map(u => `<option value="${u.id}">${htmlspecialchars(u.display_name || u.username || ('مستخدم #' + u.id))}</option>`).join('');
+        userFilter.value = selectedVal;
+    }
 
     drawAdminStatsChart(data.daily || []);
 }
@@ -5464,6 +5580,9 @@ async function fetchAdminStats() {
         if (fromEl) fromEl.value = fromVal;
         if (toEl) toEl.value = toVal;
     }
+
+    const userFilterVal = document.getElementById('adminStatsUserFilter')?.value || '0';
+    payload.filter_user_id = parseInt(userFilterVal, 10) || 0;
 
     const result = await sendAjaxRequest('fetch_admin_statistics', payload);
     if (result.success) renderAdminStats(result.data);
@@ -7804,6 +7923,9 @@ document.addEventListener('DOMContentLoaded', () => {
         fetchAdminStats();
     });
     document.getElementById('applyAdminStatsRange')?.addEventListener('click', () => {
+        fetchAdminStats();
+    });
+    document.getElementById('adminStatsUserFilter')?.addEventListener('change', () => {
         fetchAdminStats();
     });
     document.getElementById('adminStatsRangePreset')?.addEventListener('change', (e) => {
