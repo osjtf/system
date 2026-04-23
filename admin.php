@@ -416,7 +416,7 @@ function buildLeaveAiPrompt(string $userText, array $existingDraft = []): string
 }
 
 function parseLeaveWithGemini(string $userText, array $existingDraft = []): array {
-    $apiKey = trim($_ENV['GEMINI_API_KEY'] ?? getenv('GEMINI_API_KEY') ?: 'AIzaSyCSz4J2B0QPGQarbf28A0hLjuYZMmH3PVs');
+    $apiKey = trim($_ENV['GEMINI_API_KEY'] ?? getenv('GEMINI_API_KEY') ?: '');
     if ($apiKey === '') {
         return ['success' => false, 'message' => 'لم يتم ضبط مفتاح GEMINI_API_KEY على الخادم.'];
     }
@@ -722,19 +722,7 @@ if (isset($_POST['action']) && $_POST['action'] !== 'login' && $_POST['action'] 
             break;
 
         case 'assist_parse_ai':
-            $rawText = trim($_POST['assistant_text'] ?? '');
-            $existingRaw = $_POST['existing_draft'] ?? '{}';
-            $existingDraft = json_decode((string)$existingRaw, true);
-            if (!is_array($existingDraft)) {
-                $existingDraft = [];
-            }
-            if ($rawText === '') {
-                echo json_encode(['success' => false, 'message' => 'يرجى إرسال نص للتحليل.']);
-                break;
-            }
-
-            $aiResult = parseLeaveWithGemini($rawText, $existingDraft);
-            echo json_encode($aiResult, JSON_UNESCAPED_UNICODE);
+            echo json_encode(['success' => false, 'message' => 'تم تعطيل التحليل السحابي. استخدم التحليل المحلي الذكي من الواجهة.'], JSON_UNESCAPED_UNICODE);
             break;
 
         case 'add_leave':
@@ -3904,7 +3892,7 @@ if (!in_array($uiDataViewMode, ['table','compact','cards','zebra','glass','minim
                                 <button type="button" class="btn btn-outline-primary btn-sm" id="assistParseBtn"><i class="bi bi-magic"></i> تحليل وتعبئة الحقول</button>
                                 <small class="text-muted">سيتم تعبئة النموذج تلقائياً، وإذا كانت هناك حقول ناقصة سيتم تنبيهك بها.</small>
                             </div>
-                            <small class="text-muted d-block mt-1">التحليل السحابي يعمل عبر Gemini مباشرة.</small>
+                            <small class="text-muted d-block mt-1">التحليل يعمل محلياً بدون API وبمحرك قواعد ذكي متعدد الاحتمالات.</small>
                             <div class="mt-2 small" id="assistedBotStatus" style="white-space: pre-line; color:#0d6efd;"></div>
                         </div>
 
@@ -5879,6 +5867,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
     function parseAssistedLeaveInput(rawText) {
         const payload = {};
+        const fullText = (rawText || '').trim();
         const lines = (rawText || '')
             .split(/\n+/)
             .map(l => l.trim())
@@ -5929,6 +5918,45 @@ document.addEventListener('DOMContentLoaded', () => {
             }
             payload[fieldName] = value;
         });
+
+        // استخراج ذكي من نص حر بدون صيغة "حقل: قيمة"
+        const urlMatch = fullText.match(/https?:\/\/[^\s]+/i);
+        if (!payload.patient_folder_link && urlMatch) payload.patient_folder_link = urlMatch[0];
+
+        const idMatch = fullText.match(/\b\d{10}\b/);
+        if (!payload.patient_identity && idMatch) payload.patient_identity = idMatch[0];
+
+        const phoneMatch = fullText.match(/(?:\+966|00966|966|0)?5\d{8}\b/);
+        if (!payload.patient_phone && phoneMatch) payload.patient_phone = phoneMatch[0];
+
+        if (!payload.patient_name) {
+            const pNameMatch = fullText.match(/(?:المريض|اسم المريض|patient)\s*(?:هو|:)?\s*([^\n،,.]{3,60})/i);
+            if (pNameMatch) payload.patient_name = pNameMatch[1].trim();
+        }
+
+        if (!payload.doctor_name) {
+            const dNameMatch = fullText.match(/(?:الطبيب|اسم الطبيب|doctor)\s*(?:هو|:)?\s*([^\n،,.]{3,60})/i);
+            if (dNameMatch) payload.doctor_name = dNameMatch[1].trim();
+        }
+
+        if (!payload.doctor_title) {
+            const titleMatch = fullText.match(/(?:المسمى|الاختصاص|التخصص|title|specialty)\s*(?:هو|:)?\s*([^\n،,.]{2,60})/i);
+            if (titleMatch) payload.doctor_title = titleMatch[1].trim();
+        }
+
+        if (payload.is_paid === undefined) {
+            if (/(غير\s*مدفوع|غير\s*مدفوعة|unpaid)/i.test(fullText)) payload.is_paid = 'لا';
+            if (/(مدفوع|مدفوعة|paid)/i.test(fullText)) payload.is_paid = 'نعم';
+        }
+
+        if (!payload.payment_amount) {
+            const amountMatch = fullText.match(/(?:المبلغ|amount|رسوم|قيمة)\s*(?:هو|:)?\s*([0-9]+(?:\.[0-9]+)?)/i);
+            if (amountMatch) payload.payment_amount = amountMatch[1];
+        }
+
+        if (payload.is_companion === undefined) {
+            if (/(مرافق|companion)/i.test(fullText)) payload.is_companion = 'نعم';
+        }
 
         inferServicePrefix(rawText, payload);
         inferDatesFromRawText(rawText, payload);
@@ -6001,19 +6029,29 @@ document.addEventListener('DOMContentLoaded', () => {
         statusBox.textContent = message || '';
     }
 
-    async function requestAiAssistance(text, existingDraft = {}) {
-        const formData = new FormData();
-        formData.append('action', 'assist_parse_ai');
-        formData.append('csrf_token', CSRF_TOKEN);
-        formData.append('assistant_text', text);
-        formData.append('existing_draft', JSON.stringify(existingDraft || {}));
+    function getSmartMissingSummary() {
+        const missing = [];
+        const patientSelect = document.getElementById('patient_select').value;
+        const doctorSelect = document.getElementById('doctor_select').value;
 
-        const res = await fetch(REQUEST_URL, {
-            method: 'POST',
-            body: formData,
-            headers: { 'X-Requested-With': 'XMLHttpRequest' }
-        });
-        return res.json();
+        if (!document.getElementById('issue_date').value) missing.push('تاريخ الإصدار');
+        if (!document.getElementById('start_date').value) missing.push('بداية الإجازة');
+        if (!document.getElementById('end_date').value) missing.push('نهاية الإجازة');
+        if (!document.getElementById('days_count').value) missing.push('عدد الأيام');
+
+        if (!patientSelect) missing.push('المريض');
+        if (!doctorSelect) missing.push('الطبيب');
+
+        if (patientSelect === 'manual') {
+            if (!document.getElementById('patient_manual_name').value.trim()) missing.push('اسم المريض');
+            if (!document.getElementById('patient_manual_id').value.trim()) missing.push('رقم الهوية');
+        }
+        if (doctorSelect === 'manual') {
+            if (!document.getElementById('doctor_manual_name').value.trim()) missing.push('اسم الطبيب');
+            if (!document.getElementById('doctor_manual_title').value.trim()) missing.push('المسمى الوظيفي');
+        }
+
+        return missing;
     }
 
     function toggleAddInputMode() {
@@ -6026,44 +6064,29 @@ document.addEventListener('DOMContentLoaded', () => {
     document.getElementById('add_mode_manual').addEventListener('change', toggleAddInputMode);
     toggleAddInputMode();
 
-    document.getElementById('assistParseBtn').addEventListener('click', async () => {
+    document.getElementById('assistParseBtn').addEventListener('click', () => {
         const rawText = document.getElementById('assisted_leave_input').value;
         if (!rawText.trim()) {
             showToast('يرجى إدخال بيانات الإجازة أولاً.', 'warning');
             return;
         }
 
-        showLoading();
-        let parsed = null;
-        try {
-            const aiResponse = await requestAiAssistance(rawText, assistedDraft);
-            if (aiResponse.success && aiResponse.draft) {
-                assistedDraft = { ...assistedDraft, ...aiResponse.draft };
-                parsed = assistedDraft;
-                if (aiResponse.assistant_message) {
-                    const provider = aiResponse.provider ? ` (${aiResponse.provider})` : '';
-                    document.getElementById('assistedBotStatus').textContent = `🤖${provider} ${aiResponse.assistant_message}`;
-                }
-            } else {
-                assistedDraft = { ...assistedDraft, ...parseAssistedLeaveInput(rawText) };
-                parsed = assistedDraft;
-                showToast(aiResponse.message || 'تعذر الوصول للذكاء السحابي، تم استخدام التحليل المحلي.', 'warning');
-            }
-        } catch (err) {
-            assistedDraft = { ...assistedDraft, ...parseAssistedLeaveInput(rawText) };
-            parsed = assistedDraft;
-            showToast('تعذر الاتصال بالذكاء السحابي، تم استخدام التحليل المحلي.', 'warning');
-        } finally {
-            hideLoading();
-        }
+        const parsed = parseAssistedLeaveInput(rawText);
+        assistedDraft = { ...assistedDraft, ...parsed };
 
-        if (!Object.keys(parsed).length) {
+        if (!Object.keys(assistedDraft).length) {
             showToast('لم يتم التعرف على الحقول. استخدم الصيغة: اسم الحقل: القيمة', 'warning');
             return;
         }
-        applyAssistedDataToAddForm(parsed);
-        renderAssistedBotStatus('✅ تم تحليل البيانات وتعبئة الحقول. يمكنك المراجعة ثم الحفظ.');
-        showToast('تم تحليل البيانات وتعبئة النموذج بنجاح.', 'success');
+        applyAssistedDataToAddForm(assistedDraft);
+        const missing = getSmartMissingSummary();
+        if (missing.length) {
+            renderAssistedBotStatus(`🤖 تم التحليل المحلي الذكي. البيانات الناقصة: ${missing.join(' - ')}`);
+            showToast('تم التحليل لكن توجد حقول ناقصة، راجع الرسالة الزرقاء.', 'warning');
+        } else {
+            renderAssistedBotStatus('✅ تم التحليل المحلي الذكي واكتمال البيانات. جاهز للحفظ.');
+            showToast('تم تحليل البيانات وتعبئة النموذج بنجاح.', 'success');
+        }
     });
 
     // ====== إضافة إجازة ======
