@@ -5895,6 +5895,26 @@ document.addEventListener('DOMContentLoaded', () => {
         }
     }
 
+    function inferFacilityNote(rawText, payload) {
+        const text = (rawText || '').trim();
+        if (!text) return;
+
+        const facilityNameMatch = text.match(/(?:الجهة|المرفق|facility|hospital|clinic|center)\s*(?:هو|:)?\s*([^\n،]{2,80})/i);
+        if (facilityNameMatch) {
+            payload.facility_note = facilityNameMatch[1].trim();
+            return;
+        }
+
+        const normalized = normalizeArabicText(text);
+        if (normalized.includes('مستشفي') || normalized.includes('hospital')) {
+            payload.facility_note = 'مستشفى';
+            return;
+        }
+        if (normalized.includes('مركز') || normalized.includes('clinic') || normalized.includes('center') || normalized.includes('مجمع') || normalized.includes('عياده')) {
+            payload.facility_note = 'مركز';
+        }
+    }
+
     function parseAssistedLeaveInput(rawText) {
         const payload = {};
         const fullText = (rawText || '').trim();
@@ -5921,7 +5941,8 @@ document.addEventListener('DOMContentLoaded', () => {
             companion_name: ['اسم المرافق', 'companion name'],
             companion_relation: ['صلة القرابة', 'العلاقة', 'companion relation'],
             is_paid: ['مدفوعة', 'دفع', 'paid'],
-            payment_amount: ['المبلغ', 'amount']
+            payment_amount: ['المبلغ', 'amount'],
+            facility_note: ['الجهة', 'المرفق', 'facility', 'hospital', 'clinic', 'center']
         };
 
         function findFieldByKey(rawKey) {
@@ -5995,6 +6016,7 @@ document.addEventListener('DOMContentLoaded', () => {
         }
 
         inferServicePrefix(rawText, payload);
+        inferFacilityNote(rawText, payload);
         inferDatesFromRawText(rawText, payload);
 
         if (payload.start_date && payload.end_date) {
@@ -6064,6 +6086,9 @@ document.addEventListener('DOMContentLoaded', () => {
                 if (data.doctor_name) document.getElementById('doctor_manual_name').value = data.doctor_name;
                 if (data.doctor_title) document.getElementById('doctor_manual_title').value = data.doctor_title;
                 if (data.doctor_note) document.getElementById('doctor_manual_note').value = data.doctor_note;
+                if (data.facility_note && !document.getElementById('doctor_manual_note').value.trim()) {
+                    document.getElementById('doctor_manual_note').value = data.facility_note;
+                }
             }
         }
 
