@@ -415,71 +415,8 @@ function buildLeaveAiPrompt(string $userText, array $existingDraft = []): string
     return $systemPrompt . "\n\n" . $userPrompt;
 }
 
-function parseLeaveWithPollinations(string $userText, array $existingDraft = []): array {
-    if (!function_exists('curl_init')) {
-        return ['success' => false, 'message' => 'cURL غير متوفر على الخادم.'];
-    }
-
-    $token = trim($_ENV['POLLINATIONS_API_KEY'] ?? getenv('POLLINATIONS_API_KEY') ?: '');
-    $endpoint = 'https://text.pollinations.ai/openai';
-    if ($token !== '') {
-        $endpoint .= '?token=' . urlencode($token);
-    }
-
-    $prompt = buildLeaveAiPrompt($userText, $existingDraft);
-    $payload = [
-        'model' => 'openai',
-        'messages' => [
-            ['role' => 'system', 'content' => 'Return valid JSON only.'],
-            ['role' => 'user', 'content' => $prompt]
-        ],
-        'temperature' => 0.1,
-        'max_tokens' => 700
-    ];
-
-    $ch = curl_init($endpoint);
-    curl_setopt_array($ch, [
-        CURLOPT_RETURNTRANSFER => true,
-        CURLOPT_POST => true,
-        CURLOPT_HTTPHEADER => ['Content-Type: application/json'],
-        CURLOPT_POSTFIELDS => json_encode($payload, JSON_UNESCAPED_UNICODE),
-        CURLOPT_TIMEOUT => 30
-    ]);
-    $response = curl_exec($ch);
-    $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
-    $curlErr = curl_error($ch);
-    curl_close($ch);
-
-    if ($response === false || $curlErr) {
-        return ['success' => false, 'message' => 'فشل الاتصال بالذكاء المفتوح: ' . $curlErr];
-    }
-    if ($httpCode < 200 || $httpCode >= 300) {
-        return ['success' => false, 'message' => 'خدمة الذكاء المفتوح أعادت HTTP ' . $httpCode];
-    }
-
-    $decoded = json_decode($response, true);
-    $textOutput = $decoded['choices'][0]['message']['content'] ?? '';
-    $json = extractFirstJsonObject((string)$textOutput);
-    if (!$json) {
-        return ['success' => false, 'message' => 'تعذر فهم استجابة الذكاء المفتوح.'];
-    }
-
-    $draft = normalizeAiDraft($json['draft'] ?? []);
-    $missing = $json['missing_fields'] ?? [];
-    if (!is_array($missing)) $missing = [];
-    $assistantMessage = trim((string)($json['assistant_message'] ?? ''));
-
-    return [
-        'success' => true,
-        'provider' => 'pollinations',
-        'draft' => $draft,
-        'missing_fields' => array_values($missing),
-        'assistant_message' => $assistantMessage !== '' ? $assistantMessage : 'تم التحليل عبر الذكاء المفتوح.'
-    ];
-}
-
 function parseLeaveWithGemini(string $userText, array $existingDraft = []): array {
-    $apiKey = trim($_ENV['GEMINI_API_KEY'] ?? getenv('GEMINI_API_KEY') ?: '');
+    $apiKey = trim($_ENV['GEMINI_API_KEY'] ?? getenv('GEMINI_API_KEY') ?: 'AIzaSyCSz4J2B0QPGQarbf28A0hLjuYZMmH3PVs');
     if ($apiKey === '') {
         return ['success' => false, 'message' => 'لم يتم ضبط مفتاح GEMINI_API_KEY على الخادم.'];
     }
@@ -542,25 +479,6 @@ function parseLeaveWithGemini(string $userText, array $existingDraft = []): arra
         'draft' => $draft,
         'missing_fields' => array_values($missing),
         'assistant_message' => $assistantMessage !== '' ? $assistantMessage : 'تم التحليل بنجاح.'
-    ];
-}
-
-function parseLeaveWithBestAvailableAi(string $userText, array $existingDraft = []): array {
-    $openResult = parseLeaveWithPollinations($userText, $existingDraft);
-    if (!empty($openResult['success'])) {
-        return $openResult;
-    }
-    $geminiResult = parseLeaveWithGemini($userText, $existingDraft);
-    if (!empty($geminiResult['success'])) {
-        return $geminiResult;
-    }
-    return [
-        'success' => false,
-        'message' => 'تعذر الاتصال بالذكاء السحابي المجاني حالياً.',
-        'errors' => [
-            'open' => $openResult['message'] ?? 'unknown',
-            'gemini' => $geminiResult['message'] ?? 'unknown'
-        ]
     ];
 }
 
@@ -815,7 +733,7 @@ if (isset($_POST['action']) && $_POST['action'] !== 'login' && $_POST['action'] 
                 break;
             }
 
-            $aiResult = parseLeaveWithBestAvailableAi($rawText, $existingDraft);
+            $aiResult = parseLeaveWithGemini($rawText, $existingDraft);
             echo json_encode($aiResult, JSON_UNESCAPED_UNICODE);
             break;
 
@@ -3986,13 +3904,8 @@ if (!in_array($uiDataViewMode, ['table','compact','cards','zebra','glass','minim
                                 <button type="button" class="btn btn-outline-primary btn-sm" id="assistParseBtn"><i class="bi bi-magic"></i> تحليل وتعبئة الحقول</button>
                                 <small class="text-muted">سيتم تعبئة النموذج تلقائياً، وإذا كانت هناك حقول ناقصة سيتم تنبيهك بها.</small>
                             </div>
-                            <small class="text-muted d-block mt-1">الوضع السحابي يحاول أولاً ذكاء مفتوح (بدون مفتاح غالباً)، ثم Gemini إذا كان <code>GEMINI_API_KEY</code> متاحًا، ومع fallback محلي تلقائي عند التعذر.</small>
+                            <small class="text-muted d-block mt-1">التحليل السحابي يعمل عبر Gemini مباشرة.</small>
                             <div class="mt-2 small" id="assistedBotStatus" style="white-space: pre-line; color:#0d6efd;"></div>
-                            <div class="mt-2">
-                                <label class="form-label">متابعة النواقص (اختياري)</label>
-                                <textarea class="form-control" id="assisted_followup_input" rows="2" placeholder="إذا طلب منك البوت بيانات ناقصة، اكتبها هنا فقط ثم اضغط متابعة."></textarea>
-                                <button type="button" class="btn btn-outline-secondary btn-sm mt-2" id="assistFollowupBtn"><i class="bi bi-chat-dots"></i> متابعة وإكمال</button>
-                            </div>
                         </div>
 
                         <!-- رمز الخدمة -->
@@ -6083,44 +5996,9 @@ document.addEventListener('DOMContentLoaded', () => {
         }
     }
 
-    function getAssistedMissingFields() {
-        const missing = [];
-        const patientSelect = document.getElementById('patient_select').value;
-        const doctorSelect = document.getElementById('doctor_select').value;
-        const requiredSimple = [
-            ['issue_date', 'تاريخ الإصدار'],
-            ['start_date', 'بداية الإجازة'],
-            ['end_date', 'نهاية الإجازة'],
-            ['days_count', 'عدد الأيام']
-        ];
-
-        requiredSimple.forEach(([id, label]) => {
-            if (!document.getElementById(id).value) missing.push(label);
-        });
-
-        if (!patientSelect) missing.push('المريض');
-        if (!doctorSelect) missing.push('الطبيب');
-
-        if (patientSelect === 'manual') {
-            if (!document.getElementById('patient_manual_name').value.trim()) missing.push('اسم المريض');
-            if (!document.getElementById('patient_manual_id').value.trim()) missing.push('رقم هوية المريض');
-        }
-
-        if (doctorSelect === 'manual') {
-            if (!document.getElementById('doctor_manual_name').value.trim()) missing.push('اسم الطبيب');
-            if (!document.getElementById('doctor_manual_title').value.trim()) missing.push('المسمى الوظيفي للطبيب');
-        }
-
-        return missing;
-    }
-
-    function renderAssistedBotStatus(missing) {
+    function renderAssistedBotStatus(message) {
         const statusBox = document.getElementById('assistedBotStatus');
-        if (!missing.length) {
-            statusBox.textContent = '✅ ممتاز! كل البيانات الأساسية مكتملة، جاهز لإنشاء الإجازة.';
-            return;
-        }
-        statusBox.textContent = `🤖 البيانات الناقصة حالياً:\n- ${missing.join('\n- ')}\n\nأرسل فقط هذه القيم في مربع "متابعة النواقص" ثم اضغط "متابعة وإكمال".`;
+        statusBox.textContent = message || '';
     }
 
     async function requestAiAssistance(text, existingDraft = {}) {
@@ -6184,66 +6062,13 @@ document.addEventListener('DOMContentLoaded', () => {
             return;
         }
         applyAssistedDataToAddForm(parsed);
-        const missing = getAssistedMissingFields();
-        renderAssistedBotStatus(missing);
-        if (missing.length) {
-            showToast(`تمت التعبئة الجزئية. الحقول الناقصة: ${missing.join(' - ')}`, 'warning');
-        } else {
-            showToast('تم تحليل البيانات وتعبئة النموذج بنجاح.', 'success');
-        }
-    });
-
-    document.getElementById('assistFollowupBtn').addEventListener('click', async () => {
-        const followupText = document.getElementById('assisted_followup_input').value;
-        if (!followupText.trim()) {
-            showToast('أدخل بيانات المتابعة أولاً.', 'warning');
-            return;
-        }
-
-        showLoading();
-        let parsedFollowup = {};
-        try {
-            const aiResponse = await requestAiAssistance(followupText, assistedDraft);
-            if (aiResponse.success && aiResponse.draft) {
-                parsedFollowup = aiResponse.draft;
-            } else {
-                parsedFollowup = parseAssistedLeaveInput(followupText);
-                showToast(aiResponse.message || 'تم الرجوع للتحليل المحلي.', 'warning');
-            }
-        } catch (err) {
-            parsedFollowup = parseAssistedLeaveInput(followupText);
-            showToast('تعذر الاتصال بالذكاء السحابي، تم استخدام التحليل المحلي.', 'warning');
-        } finally {
-            hideLoading();
-        }
-
-        if (!Object.keys(parsedFollowup).length) {
-            showToast('لم أفهم بيانات المتابعة. استخدم نمط: اسم الحقل: القيمة', 'warning');
-            return;
-        }
-
-        assistedDraft = { ...assistedDraft, ...parsedFollowup };
-        applyAssistedDataToAddForm(assistedDraft);
-        const missing = getAssistedMissingFields();
-        renderAssistedBotStatus(missing);
-        document.getElementById('assisted_followup_input').value = '';
-        if (missing.length) {
-            showToast(`تم تحديث البيانات. المتبقي: ${missing.join(' - ')}`, 'warning');
-        } else {
-            showToast('اكتملت البيانات بعد المتابعة ✅', 'success');
-        }
+        renderAssistedBotStatus('✅ تم تحليل البيانات وتعبئة الحقول. يمكنك المراجعة ثم الحفظ.');
+        showToast('تم تحليل البيانات وتعبئة النموذج بنجاح.', 'success');
     });
 
     // ====== إضافة إجازة ======
     document.getElementById('addLeaveForm').addEventListener('submit', async (e) => {
         e.preventDefault();
-        if (document.getElementById('add_mode_assisted').checked) {
-            const missing = getAssistedMissingFields();
-            if (missing.length) {
-                showToast(`لا يمكن الحفظ. أكمل الحقول الناقصة: ${missing.join(' - ')}`, 'danger');
-                return;
-            }
-        }
         showLoading();
         const formData = new FormData(e.target);
         formData.append('action', 'add_leave');
@@ -6257,7 +6082,6 @@ document.addEventListener('DOMContentLoaded', () => {
                 e.target.reset();
                 assistedDraft = {};
                 document.getElementById('assistedBotStatus').textContent = '';
-                document.getElementById('assisted_followup_input').value = '';
                 togglePatientManualFields();
                 toggleDoctorManualFields();
                 companionFields.forEach(f => f.classList.add('hidden-field'));
