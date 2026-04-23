@@ -336,6 +336,152 @@ function generateServiceCode($pdo, $prefix, $issueDate = null) {
     return $prefix . $datePart . str_pad((string)$num, 5, '0', STR_PAD_LEFT);
 }
 
+function extractFirstJsonObject(string $raw): ?array {
+    $trimmed = trim($raw);
+    $decoded = json_decode($trimmed, true);
+    if (is_array($decoded)) {
+        return $decoded;
+    }
+
+    if (preg_match('/\{(?:[^{}]|(?R))*\}/s', $trimmed, $m)) {
+        $decoded = json_decode($m[0], true);
+        if (is_array($decoded)) {
+            return $decoded;
+        }
+    }
+    return null;
+}
+
+function normalizeAiDraft(array $draft): array {
+    $allowed = [
+        'patient_name', 'patient_identity', 'patient_phone', 'patient_folder_link',
+        'doctor_name', 'doctor_title', 'doctor_note',
+        'issue_date', 'start_date', 'end_date', 'days_count',
+        'service_prefix', 'service_code_manual',
+        'is_companion', 'companion_name', 'companion_relation',
+        'is_paid', 'payment_amount'
+    ];
+    $normalized = [];
+    foreach ($allowed as $key) {
+        if (array_key_exists($key, $draft)) {
+            $normalized[$key] = $draft[$key];
+        }
+    }
+    return $normalized;
+}
+
+function buildLeaveAiPrompt(string $userText, array $existingDraft = []): string {
+    $schemaHint = [
+        'draft' => [
+            'patient_name' => 'string',
+            'patient_identity' => 'string',
+            'patient_phone' => 'string',
+            'patient_folder_link' => 'string',
+            'doctor_name' => 'string',
+            'doctor_title' => 'string',
+            'doctor_note' => 'string',
+            'issue_date' => 'YYYY-MM-DD',
+            'start_date' => 'YYYY-MM-DD',
+            'end_date' => 'YYYY-MM-DD',
+            'days_count' => 'number',
+            'service_prefix' => 'GSL|PSL',
+            'service_code_manual' => 'string',
+            'is_companion' => 'true|false',
+            'companion_name' => 'string',
+            'companion_relation' => 'string',
+            'is_paid' => 'true|false',
+            'payment_amount' => 'number'
+        ],
+        'missing_fields' => ['array of arabic labels for required missing fields'],
+        'assistant_message' => 'short Arabic message'
+    ];
+
+    $systemPrompt = "أنت مساعد ذكي لاستخراج بيانات إجازة مرضية من نص عربي/إنجليزي.\n"
+        . "يجب أن تعيد JSON فقط بدون أي نص إضافي.\n"
+        . "قواعد مهمة:\n"
+        . "1) إذا الجهة مستشفى/حكومي => service_prefix=GSL. إذا مركز/عيادة/خاص => PSL.\n"
+        . "2) إذا وجدت فترة من-إلى: issue_date=start_date=أول يوم, end_date=آخر يوم, days_count شاملة.\n"
+        . "3) إذا يوم واحد: issue_date=start_date=end_date ونفس اليوم, days_count=1.\n"
+        . "4) required: patient_name, patient_identity, doctor_name, doctor_title, issue_date, start_date, end_date, days_count.\n"
+        . "5) دمج existing_draft مع النص الجديد وحدث القيم الأدق.\n"
+        . "6) تنسيق التواريخ دائماً YYYY-MM-DD.\n"
+        . "الشكل المطلوب: " . json_encode($schemaHint, JSON_UNESCAPED_UNICODE);
+
+    $userPrompt = json_encode([
+        'existing_draft' => $existingDraft,
+        'user_text' => $userText
+    ], JSON_UNESCAPED_UNICODE);
+
+    return $systemPrompt . "\n\n" . $userPrompt;
+}
+
+function parseLeaveWithGemini(string $userText, array $existingDraft = []): array {
+    $apiKey = trim($_ENV['GEMINI_API_KEY'] ?? getenv('GEMINI_API_KEY') ?: 'AIzaSyCSz4J2B0QPGQarbf28A0hLjuYZMmH3PVs');
+    if ($apiKey === '') {
+        return ['success' => false, 'message' => 'لم يتم ضبط مفتاح GEMINI_API_KEY على الخادم.'];
+    }
+    if (!function_exists('curl_init')) {
+        return ['success' => false, 'message' => 'cURL غير متوفر على الخادم.'];
+    }
+
+    $endpoint = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=" . urlencode($apiKey);
+    $prompt = buildLeaveAiPrompt($userText, $existingDraft);
+    $payload = [
+        'contents' => [
+            [
+                'role' => 'user',
+                'parts' => [['text' => $prompt]]
+            ]
+        ],
+        'generationConfig' => [
+            'temperature' => 0.1,
+            'maxOutputTokens' => 700
+        ]
+    ];
+
+    $ch = curl_init($endpoint);
+    curl_setopt_array($ch, [
+        CURLOPT_RETURNTRANSFER => true,
+        CURLOPT_POST => true,
+        CURLOPT_HTTPHEADER => ['Content-Type: application/json'],
+        CURLOPT_POSTFIELDS => json_encode($payload, JSON_UNESCAPED_UNICODE),
+        CURLOPT_TIMEOUT => 25
+    ]);
+    $response = curl_exec($ch);
+    $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+    $curlErr = curl_error($ch);
+    curl_close($ch);
+
+    if ($response === false || $curlErr) {
+        return ['success' => false, 'message' => 'فشل الاتصال بخدمة الذكاء: ' . $curlErr];
+    }
+    if ($httpCode < 200 || $httpCode >= 300) {
+        return ['success' => false, 'message' => 'خدمة الذكاء أعادت خطأ HTTP ' . $httpCode, 'raw' => $response];
+    }
+
+    $decoded = json_decode($response, true);
+    $textOutput = $decoded['candidates'][0]['content']['parts'][0]['text'] ?? '';
+    $json = extractFirstJsonObject((string)$textOutput);
+    if (!$json) {
+        return ['success' => false, 'message' => 'تعذر فهم استجابة الذكاء الاصطناعي.'];
+    }
+
+    $draft = normalizeAiDraft($json['draft'] ?? []);
+    $missing = $json['missing_fields'] ?? [];
+    if (!is_array($missing)) {
+        $missing = [];
+    }
+    $assistantMessage = trim((string)($json['assistant_message'] ?? ''));
+
+    return [
+        'success' => true,
+        'provider' => 'gemini',
+        'draft' => $draft,
+        'missing_fields' => array_values($missing),
+        'assistant_message' => $assistantMessage !== '' ? $assistantMessage : 'تم التحليل بنجاح.'
+    ];
+}
+
 
 function fetchAllData($pdo) {
     ensureDelayedUnpaidNotifications($pdo);
@@ -573,6 +719,22 @@ if (isset($_POST['action']) && $_POST['action'] !== 'login' && $_POST['action'] 
             $data['unread_messages_count'] = getUnreadMessagesCount($pdo, intval($_SESSION['admin_user_id'] ?? 0));
             $data['success'] = true;
             echo json_encode($data);
+            break;
+
+        case 'assist_parse_ai':
+            $rawText = trim($_POST['assistant_text'] ?? '');
+            $existingRaw = $_POST['existing_draft'] ?? '{}';
+            $existingDraft = json_decode((string)$existingRaw, true);
+            if (!is_array($existingDraft)) {
+                $existingDraft = [];
+            }
+            if ($rawText === '') {
+                echo json_encode(['success' => false, 'message' => 'يرجى إرسال نص للتحليل.']);
+                break;
+            }
+
+            $aiResult = parseLeaveWithGemini($rawText, $existingDraft);
+            echo json_encode($aiResult, JSON_UNESCAPED_UNICODE);
             break;
 
         case 'add_leave':
@@ -3709,6 +3871,43 @@ if (!in_array($uiDataViewMode, ['table','compact','cards','zebra','glass','minim
                 <h5><i class="bi bi-plus-circle-fill"></i> إضافة إجازة مرضية جديدة</h5>
                 <form id="addLeaveForm">
                     <div class="row g-3">
+                        <div class="col-12">
+                            <label class="form-label">طريقة الإدخال</label>
+                            <div class="d-flex gap-3 flex-wrap">
+                                <div class="form-check">
+                                    <input class="form-check-input" type="radio" name="add_mode" id="add_mode_assisted" value="assisted" checked>
+                                    <label class="form-check-label" for="add_mode_assisted">ذكي (تحويل البيانات تلقائياً)</label>
+                                </div>
+                                <div class="form-check">
+                                    <input class="form-check-input" type="radio" name="add_mode" id="add_mode_manual" value="manual">
+                                    <label class="form-check-label" for="add_mode_manual">يدوي (الطريقة الحالية)</label>
+                                </div>
+                            </div>
+                        </div>
+
+                        <div class="col-12" id="assistedInputCard">
+                            <label class="form-label">إدخال ذكي للبيانات</label>
+                            <textarea class="form-control" id="assisted_leave_input" rows="5" placeholder="ألصق البيانات بأي تنسيق، مثال:
+اسم المريض: أحمد علي
+الهوية: 1020304050
+الجوال: 05xxxxxxxx
+رابط الملف: https://...
+اسم الطبيب: د. سارة محمد
+المسمى: استشاري باطنية
+تاريخ الإصدار: 2026-04-22
+من: 2026-04-22
+إلى: 2026-04-25
+مدفوعة: نعم
+المبلغ: 150
+مرافق: لا"></textarea>
+                            <div class="d-flex align-items-center gap-2 mt-2 flex-wrap">
+                                <button type="button" class="btn btn-outline-primary btn-sm" id="assistParseBtn"><i class="bi bi-magic"></i> تحليل وتعبئة الحقول</button>
+                                <small class="text-muted">سيتم تعبئة النموذج تلقائياً، وإذا كانت هناك حقول ناقصة سيتم تنبيهك بها.</small>
+                            </div>
+                            <small class="text-muted d-block mt-1">التحليل السحابي يعمل عبر Gemini مباشرة.</small>
+                            <div class="mt-2 small" id="assistedBotStatus" style="white-space: pre-line; color:#0d6efd;"></div>
+                        </div>
+
                         <!-- رمز الخدمة -->
                         <div class="col-md-4">
                             <label class="form-label">بادئة رمز الخدمة</label>
@@ -5590,6 +5789,283 @@ document.addEventListener('DOMContentLoaded', () => {
     document.getElementById('dup_start_date').addEventListener('change', () => calcDays('dup_start_date', 'dup_end_date', 'dup_days_count'));
     document.getElementById('dup_end_date').addEventListener('change', () => calcDays('dup_start_date', 'dup_end_date', 'dup_days_count'));
 
+    let assistedDraft = {};
+
+    function normalizeArabicText(value) {
+        return (value || '')
+            .toString()
+            .replace(/[\u064B-\u065F]/g, '')
+            .replace(/أ|إ|آ/g, 'ا')
+            .replace(/ى/g, 'ي')
+            .replace(/ة/g, 'ه')
+            .trim()
+            .toLowerCase();
+    }
+
+    function parseFlexibleDate(rawValue) {
+        const value = (rawValue || '').trim();
+        if (!value) return '';
+        if (/^\d{4}-\d{2}-\d{2}$/.test(value)) return value;
+
+        const slashMatch = value.match(/^(\d{1,4})[\/\-](\d{1,2})[\/\-](\d{1,4})$/);
+        if (!slashMatch) return '';
+
+        let first = parseInt(slashMatch[1], 10);
+        let second = parseInt(slashMatch[2], 10);
+        let third = parseInt(slashMatch[3], 10);
+
+        let year, month, day;
+        if (first > 1900) {
+            year = first; month = second; day = third;
+        } else if (third > 1900) {
+            year = third; month = second; day = first;
+        } else {
+            return '';
+        }
+
+        const mm = String(month).padStart(2, '0');
+        const dd = String(day).padStart(2, '0');
+        return `${year}-${mm}-${dd}`;
+    }
+
+    function daysInclusive(startDate, endDate) {
+        if (!startDate || !endDate) return '';
+        const diff = Math.ceil((new Date(endDate) - new Date(startDate)) / (1000 * 60 * 60 * 24)) + 1;
+        return diff > 0 ? diff : '';
+    }
+
+    function inferDatesFromRawText(rawText, payload) {
+        const text = (rawText || '').replace(/\s+/g, ' ').trim();
+        const rangeMatch = text.match(/(\d{1,4}[\/\-]\d{1,2}[\/\-]\d{1,4})\s*(?:الى|إلى|to|\-)\s*(\d{1,4}[\/\-]\d{1,2}[\/\-]\d{1,4})/i);
+        if (rangeMatch) {
+            const start = parseFlexibleDate(rangeMatch[1]);
+            const end = parseFlexibleDate(rangeMatch[2]);
+            if (start && end) {
+                payload.start_date = payload.start_date || start;
+                payload.end_date = payload.end_date || end;
+                payload.issue_date = payload.issue_date || start;
+                payload.days_count = payload.days_count || daysInclusive(start, end);
+                return;
+            }
+        }
+
+        const allDates = Array.from(text.matchAll(/\d{1,4}[\/\-]\d{1,2}[\/\-]\d{1,4}/g)).map(m => parseFlexibleDate(m[0])).filter(Boolean);
+        const uniqueDates = [...new Set(allDates)];
+        if (uniqueDates.length === 1) {
+            payload.issue_date = payload.issue_date || uniqueDates[0];
+            payload.start_date = payload.start_date || uniqueDates[0];
+            payload.end_date = payload.end_date || uniqueDates[0];
+            payload.days_count = payload.days_count || 1;
+        } else if (uniqueDates.length >= 2) {
+            const ordered = uniqueDates.sort();
+            payload.start_date = payload.start_date || ordered[0];
+            payload.end_date = payload.end_date || ordered[ordered.length - 1];
+            payload.issue_date = payload.issue_date || payload.start_date;
+            payload.days_count = payload.days_count || daysInclusive(payload.start_date, payload.end_date);
+        }
+    }
+
+    function inferServicePrefix(rawText, payload) {
+        if (payload.service_prefix) return;
+        const normalized = normalizeArabicText(rawText);
+        if (normalized.includes('مستشفي') || normalized.includes('hospital') || normalized.includes('حكومي') || normalized.includes('government')) {
+            payload.service_prefix = 'GSL';
+            return;
+        }
+        if (normalized.includes('مركز') || normalized.includes('مجمع') || normalized.includes('عياده') || normalized.includes('clinic') || normalized.includes('private')) {
+            payload.service_prefix = 'PSL';
+        }
+    }
+
+    function parseAssistedLeaveInput(rawText) {
+        const payload = {};
+        const lines = (rawText || '')
+            .split(/\n+/)
+            .map(l => l.trim())
+            .filter(Boolean);
+
+        const fieldMap = {
+            patient_name: ['اسم المريض', 'المريض', 'patient name'],
+            patient_identity: ['الهوية', 'رقم الهوية', 'identity', 'id number'],
+            patient_phone: ['الجوال', 'الهاتف', 'phone', 'mobile'],
+            patient_folder_link: ['رابط الملف', 'رابط المجلد', 'folder link', 'file link'],
+            doctor_name: ['اسم الطبيب', 'الطبيب', 'doctor name'],
+            doctor_title: ['المسمى', 'المسمى الوظيفي', 'الاختصاص', 'title', 'specialty'],
+            doctor_note: ['ملاحظة الطبيب', 'ملاحظة', 'note'],
+            issue_date: ['تاريخ الاصدار', 'تاريخ الإصدار', 'issue date'],
+            start_date: ['بداية الاجازة', 'بداية الإجازة', 'من', 'start date', 'from'],
+            end_date: ['نهاية الاجازة', 'نهاية الإجازة', 'الى', 'إلى', 'end date', 'to'],
+            days_count: ['عدد الايام', 'عدد الأيام', 'days', 'days count'],
+            service_code_manual: ['رمز الخدمة', 'service code'],
+            service_prefix: ['نوع الرمز', 'بادئة الرمز', 'prefix', 'service prefix'],
+            is_companion: ['مرافق', 'اجازة مرافق', 'إجازة مرافق', 'companion'],
+            companion_name: ['اسم المرافق', 'companion name'],
+            companion_relation: ['صلة القرابة', 'العلاقة', 'companion relation'],
+            is_paid: ['مدفوعة', 'دفع', 'paid'],
+            payment_amount: ['المبلغ', 'amount']
+        };
+
+        function findFieldByKey(rawKey) {
+            const normalizedKey = normalizeArabicText(rawKey);
+            for (const [fieldName, aliases] of Object.entries(fieldMap)) {
+                if (aliases.some(alias => normalizedKey.includes(normalizeArabicText(alias)))) {
+                    return fieldName;
+                }
+            }
+            return null;
+        }
+
+        lines.forEach(line => {
+            const match = line.match(/^([^:=\-]+)\s*[:=\-]\s*(.+)$/);
+            if (!match) return;
+            const key = match[1].trim();
+            const value = match[2].trim();
+            const fieldName = findFieldByKey(key);
+            if (!fieldName) return;
+
+            if (['issue_date', 'start_date', 'end_date'].includes(fieldName)) {
+                payload[fieldName] = parseFlexibleDate(value) || value;
+                return;
+            }
+            payload[fieldName] = value;
+        });
+
+        inferServicePrefix(rawText, payload);
+        inferDatesFromRawText(rawText, payload);
+
+        if (payload.start_date && payload.end_date) {
+            payload.issue_date = payload.issue_date || payload.start_date;
+            payload.days_count = payload.days_count || daysInclusive(payload.start_date, payload.end_date);
+        }
+
+        return payload;
+    }
+
+    function parseBooleanValue(value) {
+        const normalized = normalizeArabicText(value);
+        return ['1', 'yes', 'true', 'نعم', 'ايوه', 'اي', 'صح', 'مدفوعه', 'مدفوعة'].includes(normalized);
+    }
+
+    function applyAssistedDataToAddForm(data) {
+        const patientSelect = document.getElementById('patient_select');
+        const doctorSelect = document.getElementById('doctor_select');
+
+        if (data.service_code_manual) document.getElementById('service_code_manual').value = data.service_code_manual.toUpperCase();
+        if (data.service_prefix) {
+            const normalizedPrefix = data.service_prefix.toUpperCase().includes('P') ? 'PSL' : 'GSL';
+            document.getElementById('service_prefix').value = normalizedPrefix;
+        }
+        if (data.issue_date) document.getElementById('issue_date').value = data.issue_date;
+        if (data.start_date) document.getElementById('start_date').value = data.start_date;
+        if (data.end_date) document.getElementById('end_date').value = data.end_date;
+        if (data.days_count) document.getElementById('days_count').value = parseInt(data.days_count, 10) || '';
+
+        if (data.patient_name || data.patient_identity || data.patient_phone || data.patient_folder_link) {
+            patientSelect.value = 'manual';
+            togglePatientManualFields();
+            if (data.patient_name) document.getElementById('patient_manual_name').value = data.patient_name;
+            if (data.patient_identity) document.getElementById('patient_manual_id').value = data.patient_identity;
+            if (data.patient_phone) document.getElementById('patient_manual_phone').value = data.patient_phone;
+            if (data.patient_folder_link) document.getElementById('patient_manual_folder_link').value = data.patient_folder_link;
+        }
+
+        if (data.doctor_name || data.doctor_title || data.doctor_note) {
+            doctorSelect.value = 'manual';
+            toggleDoctorManualFields();
+            if (data.doctor_name) document.getElementById('doctor_manual_name').value = data.doctor_name;
+            if (data.doctor_title) document.getElementById('doctor_manual_title').value = data.doctor_title;
+            if (data.doctor_note) document.getElementById('doctor_manual_note').value = data.doctor_note;
+        }
+
+        if (data.is_companion !== undefined) {
+            const checked = parseBooleanValue(data.is_companion);
+            document.getElementById('is_companion').checked = checked;
+            companionFields.forEach(f => checked ? f.classList.remove('hidden-field') : f.classList.add('hidden-field'));
+        }
+        if (data.companion_name) document.getElementById('companion_name').value = data.companion_name;
+        if (data.companion_relation) document.getElementById('companion_relation').value = data.companion_relation;
+
+        if (data.is_paid !== undefined) document.getElementById('is_paid').checked = parseBooleanValue(data.is_paid);
+        if (data.payment_amount) document.getElementById('payment_amount').value = parseFloat(data.payment_amount) || 0;
+
+        if (document.getElementById('start_date').value && document.getElementById('end_date').value) {
+            document.getElementById('days_count').value = daysInclusive(
+                document.getElementById('start_date').value,
+                document.getElementById('end_date').value
+            ) || document.getElementById('days_count').value;
+        }
+    }
+
+    function renderAssistedBotStatus(message) {
+        const statusBox = document.getElementById('assistedBotStatus');
+        statusBox.textContent = message || '';
+    }
+
+    async function requestAiAssistance(text, existingDraft = {}) {
+        const formData = new FormData();
+        formData.append('action', 'assist_parse_ai');
+        formData.append('csrf_token', CSRF_TOKEN);
+        formData.append('assistant_text', text);
+        formData.append('existing_draft', JSON.stringify(existingDraft || {}));
+
+        const res = await fetch(REQUEST_URL, {
+            method: 'POST',
+            body: formData,
+            headers: { 'X-Requested-With': 'XMLHttpRequest' }
+        });
+        return res.json();
+    }
+
+    function toggleAddInputMode() {
+        const assistedMode = document.getElementById('add_mode_assisted').checked;
+        const assistedCard = document.getElementById('assistedInputCard');
+        assistedCard.classList.toggle('hidden-field', !assistedMode);
+    }
+
+    document.getElementById('add_mode_assisted').addEventListener('change', toggleAddInputMode);
+    document.getElementById('add_mode_manual').addEventListener('change', toggleAddInputMode);
+    toggleAddInputMode();
+
+    document.getElementById('assistParseBtn').addEventListener('click', async () => {
+        const rawText = document.getElementById('assisted_leave_input').value;
+        if (!rawText.trim()) {
+            showToast('يرجى إدخال بيانات الإجازة أولاً.', 'warning');
+            return;
+        }
+
+        showLoading();
+        let parsed = null;
+        try {
+            const aiResponse = await requestAiAssistance(rawText, assistedDraft);
+            if (aiResponse.success && aiResponse.draft) {
+                assistedDraft = { ...assistedDraft, ...aiResponse.draft };
+                parsed = assistedDraft;
+                if (aiResponse.assistant_message) {
+                    const provider = aiResponse.provider ? ` (${aiResponse.provider})` : '';
+                    document.getElementById('assistedBotStatus').textContent = `🤖${provider} ${aiResponse.assistant_message}`;
+                }
+            } else {
+                assistedDraft = { ...assistedDraft, ...parseAssistedLeaveInput(rawText) };
+                parsed = assistedDraft;
+                showToast(aiResponse.message || 'تعذر الوصول للذكاء السحابي، تم استخدام التحليل المحلي.', 'warning');
+            }
+        } catch (err) {
+            assistedDraft = { ...assistedDraft, ...parseAssistedLeaveInput(rawText) };
+            parsed = assistedDraft;
+            showToast('تعذر الاتصال بالذكاء السحابي، تم استخدام التحليل المحلي.', 'warning');
+        } finally {
+            hideLoading();
+        }
+
+        if (!Object.keys(parsed).length) {
+            showToast('لم يتم التعرف على الحقول. استخدم الصيغة: اسم الحقل: القيمة', 'warning');
+            return;
+        }
+        applyAssistedDataToAddForm(parsed);
+        renderAssistedBotStatus('✅ تم تحليل البيانات وتعبئة الحقول. يمكنك المراجعة ثم الحفظ.');
+        showToast('تم تحليل البيانات وتعبئة النموذج بنجاح.', 'success');
+    });
+
     // ====== إضافة إجازة ======
     document.getElementById('addLeaveForm').addEventListener('submit', async (e) => {
         e.preventDefault();
@@ -5604,6 +6080,8 @@ document.addEventListener('DOMContentLoaded', () => {
             if (result.success) {
                 showToast(result.message, 'success');
                 e.target.reset();
+                assistedDraft = {};
+                document.getElementById('assistedBotStatus').textContent = '';
                 togglePatientManualFields();
                 toggleDoctorManualFields();
                 companionFields.forEach(f => f.classList.add('hidden-field'));
