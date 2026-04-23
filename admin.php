@@ -5791,9 +5791,38 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     function parseFlexibleDate(rawValue) {
-        const value = (rawValue || '').trim();
+        const monthMap = {
+            'يناير': 1, 'jan': 1, 'january': 1,
+            'فبراير': 2, 'feb': 2, 'february': 2,
+            'مارس': 3, 'march': 3, 'mar': 3,
+            'ابريل': 4, 'أبريل': 4, 'april': 4, 'apr': 4,
+            'مايو': 5, 'may': 5,
+            'يونيو': 6, 'june': 6, 'jun': 6,
+            'يوليو': 7, 'july': 7, 'jul': 7,
+            'اغسطس': 8, 'أغسطس': 8, 'august': 8, 'aug': 8,
+            'سبتمبر': 9, 'september': 9, 'sep': 9,
+            'اكتوبر': 10, 'أكتوبر': 10, 'october': 10, 'oct': 10,
+            'نوفمبر': 11, 'november': 11, 'nov': 11,
+            'ديسمبر': 12, 'december': 12, 'dec': 12
+        };
+
+        const value = (rawValue || '')
+            .toString()
+            .replace(/[٠-٩]/g, d => '٠١٢٣٤٥٦٧٨٩'.indexOf(d))
+            .trim();
         if (!value) return '';
         if (/^\d{4}-\d{2}-\d{2}$/.test(value)) return value;
+
+        const monthTextMatch = value.match(/^(\d{1,2})\s+([^\s]+)\s+(\d{4})$/i);
+        if (monthTextMatch) {
+            const dayText = parseInt(monthTextMatch[1], 10);
+            const monthText = normalizeArabicText(monthTextMatch[2]);
+            const yearText = parseInt(monthTextMatch[3], 10);
+            const monthNum = monthMap[monthText];
+            if (monthNum) {
+                return `${yearText}-${String(monthNum).padStart(2, '0')}-${String(dayText).padStart(2, '0')}`;
+            }
+        }
 
         const slashMatch = value.match(/^(\d{1,4})[\/\-](\d{1,2})[\/\-](\d{1,4})$/);
         if (!slashMatch) return '';
@@ -5813,7 +5842,8 @@ document.addEventListener('DOMContentLoaded', () => {
 
         const mm = String(month).padStart(2, '0');
         const dd = String(day).padStart(2, '0');
-        return `${year}-${mm}-${dd}`;
+        if (month >= 1 && month <= 12 && day >= 1 && day <= 31) return `${year}-${mm}-${dd}`;
+        return '';
     }
 
     function daysInclusive(startDate, endDate) {
@@ -5955,7 +5985,13 @@ document.addEventListener('DOMContentLoaded', () => {
         }
 
         if (payload.is_companion === undefined) {
-            if (/(مرافق|companion)/i.test(fullText)) payload.is_companion = 'نعم';
+            if (/(بدون\s*مرافق|لا\s*يوجد\s*مرافق|ليس\s*مرافق|no\s*companion)/i.test(fullText)) payload.is_companion = 'لا';
+            else if (/(مرافق|companion)/i.test(fullText)) payload.is_companion = 'نعم';
+        }
+
+        if (!payload.days_count) {
+            const daysMatch = fullText.match(/(?:لمدة|عدد\s*الايام|عدد\s*الأيام|days?)\s*(?:هو|:)?\s*(\d{1,3})/i);
+            if (daysMatch) payload.days_count = daysMatch[1];
         }
 
         inferServicePrefix(rawText, payload);
@@ -5989,20 +6025,46 @@ document.addEventListener('DOMContentLoaded', () => {
         if (data.days_count) document.getElementById('days_count').value = parseInt(data.days_count, 10) || '';
 
         if (data.patient_name || data.patient_identity || data.patient_phone || data.patient_folder_link) {
-            patientSelect.value = 'manual';
-            togglePatientManualFields();
-            if (data.patient_name) document.getElementById('patient_manual_name').value = data.patient_name;
-            if (data.patient_identity) document.getElementById('patient_manual_id').value = data.patient_identity;
-            if (data.patient_phone) document.getElementById('patient_manual_phone').value = data.patient_phone;
-            if (data.patient_folder_link) document.getElementById('patient_manual_folder_link').value = data.patient_folder_link;
+            const patientOptions = Array.from(patientSelect.options || []).filter(o => o.value && o.value !== 'manual');
+            const matchedPatient = patientOptions.find(opt => {
+                const text = normalizeArabicText(opt.textContent || '');
+                const byIdentity = data.patient_identity && text.includes(normalizeArabicText(data.patient_identity));
+                const byName = data.patient_name && text.includes(normalizeArabicText(data.patient_name));
+                return byIdentity || byName;
+            });
+
+            if (matchedPatient) {
+                patientSelect.value = matchedPatient.value;
+                togglePatientManualFields();
+            } else {
+                patientSelect.value = 'manual';
+                togglePatientManualFields();
+                if (data.patient_name) document.getElementById('patient_manual_name').value = data.patient_name;
+                if (data.patient_identity) document.getElementById('patient_manual_id').value = data.patient_identity;
+                if (data.patient_phone) document.getElementById('patient_manual_phone').value = data.patient_phone;
+                if (data.patient_folder_link) document.getElementById('patient_manual_folder_link').value = data.patient_folder_link;
+            }
         }
 
         if (data.doctor_name || data.doctor_title || data.doctor_note) {
-            doctorSelect.value = 'manual';
-            toggleDoctorManualFields();
-            if (data.doctor_name) document.getElementById('doctor_manual_name').value = data.doctor_name;
-            if (data.doctor_title) document.getElementById('doctor_manual_title').value = data.doctor_title;
-            if (data.doctor_note) document.getElementById('doctor_manual_note').value = data.doctor_note;
+            const doctorOptions = Array.from(doctorSelect.options || []).filter(o => o.value && o.value !== 'manual');
+            const matchedDoctor = doctorOptions.find(opt => {
+                const text = normalizeArabicText(opt.textContent || '');
+                const byName = data.doctor_name && text.includes(normalizeArabicText(data.doctor_name));
+                const byTitle = data.doctor_title && text.includes(normalizeArabicText(data.doctor_title));
+                return byName || byTitle;
+            });
+
+            if (matchedDoctor) {
+                doctorSelect.value = matchedDoctor.value;
+                toggleDoctorManualFields();
+            } else {
+                doctorSelect.value = 'manual';
+                toggleDoctorManualFields();
+                if (data.doctor_name) document.getElementById('doctor_manual_name').value = data.doctor_name;
+                if (data.doctor_title) document.getElementById('doctor_manual_title').value = data.doctor_title;
+                if (data.doctor_note) document.getElementById('doctor_manual_note').value = data.doctor_note;
+            }
         }
 
         if (data.is_companion !== undefined) {
