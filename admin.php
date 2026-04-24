@@ -484,6 +484,43 @@ function parseLeaveWithGemini(string $userText, array $existingDraft = []): arra
     ];
 }
 
+function normalizeDoctorBatchLine(string $line): string {
+    $line = trim($line);
+    $line = preg_replace('/^\s*(?:[\-\*\•]+|\d+[\)\.\-])\s*/u', '', $line);
+    return trim($line);
+}
+
+function parseDoctorsBatchInput(string $rawInput): array {
+    $rawInput = trim($rawInput);
+    if ($rawInput === '') return [];
+
+    $lines = preg_split('/\r\n|\r|\n/u', $rawInput);
+    $parsed = [];
+    foreach ($lines as $line) {
+        $line = normalizeDoctorBatchLine((string)$line);
+        if ($line === '') continue;
+
+        $parts = preg_split('/\s*(?:\||;|،|,|(?:\s*-\s*)|(?:\s*—\s*)|(?:\s*:\s*))\s*/u', $line);
+        $parts = array_values(array_filter(array_map('trim', $parts), static fn($p) => $p !== ''));
+        if (count($parts) < 2) {
+            $parts = preg_split('/\s{2,}/u', $line);
+            $parts = array_values(array_filter(array_map('trim', $parts), static fn($p) => $p !== ''));
+        }
+        if (count($parts) < 2) {
+            continue;
+        }
+
+        $name = $parts[0] ?? '';
+        $title = $parts[1] ?? '';
+        $note = '';
+        if (count($parts) >= 3) {
+            $note = implode(' - ', array_slice($parts, 2));
+        }
+        $parsed[] = ['name' => $name, 'title' => $title, 'note' => $note];
+    }
+    return $parsed;
+}
+
 
 function fetchAllData($pdo) {
     ensureDelayedUnpaidNotifications($pdo);
@@ -1039,7 +1076,6 @@ if (isset($_POST['action']) && $_POST['action'] !== 'login' && $_POST['action'] 
             $stmt = $pdo->prepare("INSERT INTO doctors (name, title, note) VALUES (?, ?, ?)");
             $stmt->execute([$name, $title, $note]);
             $doctorId = $pdo->lastInsertId();
-            $doctor = $pdo->prepare("SELECT * FROM doctors WHERE id = ?")->execute([$doctorId]);
             $doctor = $pdo->prepare("SELECT * FROM doctors WHERE id = ?");
             $doctor->execute([$doctorId]);
             $doctorData = $doctor->fetch();
@@ -1048,6 +1084,72 @@ if (isset($_POST['action']) && $_POST['action'] !== 'login' && $_POST['action'] 
                 'success' => true,
                 'message' => 'تمت إضافة الطبيب بنجاح.',
                 'doctor' => $doctorData,
+                'doctors' => $doctors,
+                'stats' => getStats($pdo)
+            ]);
+            break;
+
+        case 'add_doctors_batch':
+            $batchText = trim($_POST['doctors_batch_text'] ?? '');
+            $parsedDoctors = parseDoctorsBatchInput($batchText);
+            if (empty($parsedDoctors)) {
+                echo json_encode([
+                    'success' => false,
+                    'message' => 'لم يتم التعرّف على أي طبيب. استخدم صيغة: اسم الطبيب | المسمى الوظيفي | الملاحظة (اختياري) في كل سطر.'
+                ]);
+                exit;
+            }
+
+            $checkStmt = $pdo->prepare("SELECT id, note FROM doctors WHERE name = ? AND title = ? LIMIT 1");
+            $insertStmt = $pdo->prepare("INSERT INTO doctors (name, title, note) VALUES (?, ?, ?)");
+            $updateNoteStmt = $pdo->prepare("UPDATE doctors SET note = ? WHERE id = ?");
+
+            $inserted = 0;
+            $updated = 0;
+            $duplicates = 0;
+            $errors = [];
+
+            foreach ($parsedDoctors as $index => $doctorRow) {
+                $name = trim((string)($doctorRow['name'] ?? ''));
+                $title = trim((string)($doctorRow['title'] ?? ''));
+                $note = trim((string)($doctorRow['note'] ?? ''));
+                if ($name === '' || $title === '') {
+                    $errors[] = "السطر " . ($index + 1) . " ناقص البيانات الأساسية.";
+                    continue;
+                }
+
+                $checkStmt->execute([$name, $title]);
+                $existing = $checkStmt->fetch();
+                if ($existing) {
+                    if ($note !== '' && trim((string)($existing['note'] ?? '')) !== $note) {
+                        $updateNoteStmt->execute([$note, intval($existing['id'])]);
+                        $updated++;
+                    } else {
+                        $duplicates++;
+                    }
+                    continue;
+                }
+
+                $insertStmt->execute([$name, $title, $note]);
+                $inserted++;
+            }
+
+            $doctors = $pdo->query("SELECT * FROM doctors ORDER BY name")->fetchAll();
+            $summaryMessage = "تمت معالجة الدفعة بنجاح: أضيف {$inserted}، تحدّث {$updated}، مكرّر {$duplicates}.";
+            if (!empty($errors)) {
+                $summaryMessage .= " أخطاء: " . implode(' | ', array_slice($errors, 0, 3));
+                if (count($errors) > 3) {
+                    $summaryMessage .= " ...";
+                }
+            }
+
+            echo json_encode([
+                'success' => true,
+                'message' => $summaryMessage,
+                'inserted' => $inserted,
+                'updated' => $updated,
+                'duplicates' => $duplicates,
+                'errors' => $errors,
                 'doctors' => $doctors,
                 'stats' => getStats($pdo)
             ]);
@@ -4141,6 +4243,22 @@ if (!in_array($uiDataViewMode, ['table','compact','cards','zebra','glass','minim
                         <div class="col-md-3"><input type="text" class="form-control" name="doctor_note" placeholder="ملاحظة (اختياري)"></div>
                         <div class="col-md-3"><button type="submit" class="btn btn-gradient w-100"><i class="bi bi-plus"></i> إضافة طبيب</button></div>
                     </form>
+                    <div class="alert alert-light border mb-3">
+                        <div class="d-flex flex-wrap justify-content-between align-items-center gap-2 mb-2">
+                            <strong><i class="bi bi-stars text-primary"></i> إضافة دفعة أطباء ذكية</strong>
+                            <small class="text-muted">كل سطر = اسم | مسمى | ملاحظة (اختياري)</small>
+                        </div>
+                        <form id="addDoctorsBatchForm" class="row g-2">
+                            <div class="col-md-10">
+                                <textarea class="form-control" id="doctors_batch_text" name="doctors_batch_text" rows="4" placeholder="د. أحمد علي | استشاري باطنية | دوام مسائي&#10;د. نورة خالد | أخصائي أطفال&#10;د. سامي محمد - نائب أول جراحة - متعاون"></textarea>
+                            </div>
+                            <div class="col-md-2 d-grid">
+                                <button type="submit" class="btn btn-outline-primary">
+                                    <i class="bi bi-magic"></i> إضافة الدفعة
+                                </button>
+                            </div>
+                        </form>
+                    </div>
                     <div class="table-responsive">
                         <table class="table table-bordered table-hover table-striped text-center mobile-readable" id="doctorsTable">
                             <thead><tr><th>#</th><th>الاسم</th><th>المسمى</th><th>ملاحظة</th><th>التحكم</th></tr></thead>
@@ -6850,6 +6968,30 @@ document.addEventListener('DOMContentLoaded', () => {
             updateDoctorSelects(currentTableData.doctors);
             if (result.stats) updateStats(result.stats);
         } else { showToast(result.message, 'danger'); }
+    });
+
+    document.getElementById('addDoctorsBatchForm')?.addEventListener('submit', async (e) => {
+        e.preventDefault();
+        const batchInput = document.getElementById('doctors_batch_text');
+        const raw = (batchInput?.value || '').trim();
+        if (!raw) {
+            showToast('يرجى كتابة الدفعة أولاً.', 'warning');
+            return;
+        }
+        showLoading();
+        const result = await sendAjaxRequest('add_doctors_batch', { doctors_batch_text: raw });
+        hideLoading();
+        if (result.success) {
+            showToast(result.message, 'success');
+            if (batchInput) batchInput.value = '';
+            currentTableData.doctors = result.doctors || [];
+            document.getElementById('searchDoctors').value = '';
+            applyDoctorsFilters();
+            updateDoctorSelects(currentTableData.doctors);
+            if (result.stats) updateStats(result.stats);
+        } else {
+            showToast(result.message || 'تعذّر معالجة الدفعة.', 'danger');
+        }
     });
 
     doctorsTable.addEventListener('click', (e) => {
