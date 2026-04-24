@@ -180,6 +180,12 @@ ensureIndex($pdo, 'sick_leaves', 'idx_sick_leaves_paid', 'is_paid');
 ensureIndex($pdo, 'sick_leaves', 'idx_sick_leaves_patient', 'patient_id');
 ensureIndex($pdo, 'sick_leaves', 'idx_sick_leaves_doctor', 'doctor_id');
 ensureColumn($pdo, 'sick_leaves', 'created_by_user_id', "INT NULL AFTER doctor_id");
+ensureColumn($pdo, 'sick_leaves', 'patient_name_en', "VARCHAR(200) NULL AFTER days_count");
+ensureColumn($pdo, 'sick_leaves', 'doctor_name_en', "VARCHAR(200) NULL AFTER patient_name_en");
+ensureColumn($pdo, 'sick_leaves', 'doctor_title_en', "VARCHAR(200) NULL AFTER doctor_name_en");
+ensureColumn($pdo, 'sick_leaves', 'hospital_name_ar', "VARCHAR(255) NULL AFTER doctor_title_en");
+ensureColumn($pdo, 'sick_leaves', 'hospital_name_en', "VARCHAR(255) NULL AFTER hospital_name_ar");
+ensureColumn($pdo, 'sick_leaves', 'logo_path', "VARCHAR(500) NULL AFTER hospital_name_en");
 ensureIndex($pdo, 'sick_leaves', 'idx_sick_leaves_created_by_user', 'created_by_user_id');
 ensureIndex($pdo, 'notifications', 'idx_notifications_type_created', 'type, created_at');
 ensureIndex($pdo, 'notifications', 'idx_notifications_leave', 'leave_id');
@@ -314,6 +320,41 @@ function purgeExpiredMessages(PDO $pdo): void {
         }
     }
     $pdo->prepare("UPDATE user_messages SET deleted_at = ? WHERE deleted_at IS NULL AND created_at <= ?")->execute([nowSaudi(), $threshold]);
+}
+
+function uploadLeaveLogo(array $file): ?string {
+    if (empty($file) || ($file['error'] ?? UPLOAD_ERR_NO_FILE) === UPLOAD_ERR_NO_FILE) {
+        return null;
+    }
+    if (($file['error'] ?? UPLOAD_ERR_OK) !== UPLOAD_ERR_OK) {
+        return null;
+    }
+    $tmp = $file['tmp_name'] ?? '';
+    if (!$tmp || !is_uploaded_file($tmp)) {
+        return null;
+    }
+    $finfo = new finfo(FILEINFO_MIME_TYPE);
+    $mime = (string)$finfo->file($tmp);
+    $allowed = [
+        'image/png' => 'png',
+        'image/jpeg' => 'jpg',
+        'image/webp' => 'webp',
+        'image/gif' => 'gif',
+        'image/svg+xml' => 'svg'
+    ];
+    if (!isset($allowed[$mime])) {
+        return null;
+    }
+    $dir = __DIR__ . '/uploads/sickleave-logos';
+    if (!is_dir($dir)) {
+        @mkdir($dir, 0755, true);
+    }
+    $fileName = 'logo_' . date('Ymd_His') . '_' . bin2hex(random_bytes(4)) . '.' . $allowed[$mime];
+    $dest = $dir . '/' . $fileName;
+    if (!move_uploaded_file($tmp, $dest)) {
+        return null;
+    }
+    return 'uploads/sickleave-logos/' . $fileName;
 }
 
 function generateServiceCode($pdo, $prefix, $issueDate = null) {
@@ -829,6 +870,12 @@ if (isset($_POST['action']) && $_POST['action'] !== 'login' && $_POST['action'] 
             $companion_relation = trim($_POST['companion_relation'] ?? '');
             $is_paid = isset($_POST['is_paid']) ? 1 : 0;
             $payment_amount = floatval($_POST['payment_amount'] ?? 0);
+            $patient_name_en = trim($_POST['patient_name_en'] ?? '');
+            $doctor_name_en = trim($_POST['doctor_name_en'] ?? '');
+            $doctor_title_en = trim($_POST['doctor_title_en'] ?? '');
+            $hospital_name_ar = trim($_POST['hospital_name_ar'] ?? '');
+            $hospital_name_en = trim($_POST['hospital_name_en'] ?? '');
+            $logo_path = uploadLeaveLogo($_FILES['leave_logo'] ?? []);
             $created_by_user_id = intval($_SESSION['admin_user_id'] ?? 0) ?: null;
 
             if (empty($issue_date) || empty($start_date) || empty($end_date) || $days_count <= 0 || $patient_id <= 0 || $doctor_id <= 0) {
@@ -838,10 +885,12 @@ if (isset($_POST['action']) && $_POST['action'] !== 'login' && $_POST['action'] 
 
             $stmt = $pdo->prepare("INSERT INTO sick_leaves 
                 (service_code, patient_id, doctor_id, created_by_user_id, issue_date, start_date, end_date, days_count, 
+                 patient_name_en, doctor_name_en, doctor_title_en, hospital_name_ar, hospital_name_en, logo_path,
                  is_companion, companion_name, companion_relation, is_paid, payment_amount) 
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)");
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)");
             $stmt->execute([
                 $service_code, $patient_id, $doctor_id, $created_by_user_id, $issue_date, $start_date, $end_date, $days_count,
+                $patient_name_en, $doctor_name_en, $doctor_title_en, $hospital_name_ar, $hospital_name_en, $logo_path,
                 $is_companion, $companion_name, $companion_relation, $is_paid, $payment_amount
             ]);
 
@@ -858,6 +907,7 @@ if (isset($_POST['action']) && $_POST['action'] !== 'login' && $_POST['action'] 
             $data['stats'] = getStats($pdo);
             $data['success'] = true;
             $data['message'] = "تمت إضافة الإجازة بنجاح. رمز الخدمة: $service_code";
+            $data['new_service_code'] = $service_code;
             echo json_encode($data);
             break;
 
@@ -970,6 +1020,16 @@ if (isset($_POST['action']) && $_POST['action'] !== 'login' && $_POST['action'] 
             $companion_relation = trim($_POST['dup_companion_relation'] ?? '');
             $is_paid = isset($_POST['dup_is_paid']) ? 1 : 0;
             $payment_amount = floatval($_POST['dup_payment_amount'] ?? 0);
+            $patient_name_en = trim($_POST['dup_patient_name_en'] ?? '');
+            $doctor_name_en = trim($_POST['dup_doctor_name_en'] ?? '');
+            $doctor_title_en = trim($_POST['dup_doctor_title_en'] ?? '');
+            $hospital_name_ar = trim($_POST['dup_hospital_name_ar'] ?? '');
+            $hospital_name_en = trim($_POST['dup_hospital_name_en'] ?? '');
+            $existing_logo_path = trim($_POST['dup_existing_logo_path'] ?? '');
+            $logo_path = uploadLeaveLogo($_FILES['dup_leave_logo'] ?? []);
+            if (!$logo_path && $existing_logo_path !== '') {
+                $logo_path = $existing_logo_path;
+            }
             $created_by_user_id = intval($_SESSION['admin_user_id'] ?? 0) ?: null;
 
             if (empty($issue_date) || empty($start_date) || empty($end_date) || $days_count <= 0 || $patient_id <= 0 || $doctor_id <= 0) {
@@ -979,10 +1039,12 @@ if (isset($_POST['action']) && $_POST['action'] !== 'login' && $_POST['action'] 
 
             $stmt = $pdo->prepare("INSERT INTO sick_leaves 
                 (service_code, patient_id, doctor_id, created_by_user_id, issue_date, start_date, end_date, days_count, 
+                 patient_name_en, doctor_name_en, doctor_title_en, hospital_name_ar, hospital_name_en, logo_path,
                  is_companion, companion_name, companion_relation, is_paid, payment_amount) 
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)");
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)");
             $stmt->execute([
                 $service_code, $patient_id, $doctor_id, $created_by_user_id, $issue_date, $start_date, $end_date, $days_count,
+                $patient_name_en, $doctor_name_en, $doctor_title_en, $hospital_name_ar, $hospital_name_en, $logo_path,
                 $is_companion, $companion_name, $companion_relation, $is_paid, $payment_amount
             ]);
 
@@ -998,6 +1060,7 @@ if (isset($_POST['action']) && $_POST['action'] !== 'login' && $_POST['action'] 
             $data['stats'] = getStats($pdo);
             $data['success'] = true;
             $data['message'] = "تم تكرار الإجازة بنجاح. رمز الخدمة الجديد: $service_code";
+            $data['new_service_code'] = $service_code;
             echo json_encode($data);
             break;
 
@@ -2033,6 +2096,7 @@ if (!in_array($uiDataViewMode, ['table','compact','cards','zebra','glass','minim
     <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf-autotable/3.5.25/jspdf.plugin.autotable.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/html2pdf.js/0.10.1/html2pdf.bundle.min.js"></script>
 
     <style>
         /* ╔══════════════════════════════════════════════════════════════════╗
@@ -4115,6 +4179,30 @@ if (!in_array($uiDataViewMode, ['table','compact','cards','zebra','glass','minim
                                 <div class="col-6"><label class="form-label">ملاحظة</label><input type="text" class="form-control" name="doctor_manual_note" id="doctor_manual_note"></div>
                             </div>
                         </div>
+                        <div class="col-md-6">
+                            <label class="form-label">اسم المريض (English)</label>
+                            <input type="text" class="form-control" name="patient_name_en" id="patient_name_en">
+                        </div>
+                        <div class="col-md-6">
+                            <label class="form-label">اسم الطبيب (English)</label>
+                            <input type="text" class="form-control" name="doctor_name_en" id="doctor_name_en">
+                        </div>
+                        <div class="col-md-6">
+                            <label class="form-label">المسمى الوظيفي (English)</label>
+                            <input type="text" class="form-control" name="doctor_title_en" id="doctor_title_en">
+                        </div>
+                        <div class="col-md-6">
+                            <label class="form-label">اسم المستشفى (عربي)</label>
+                            <input type="text" class="form-control" name="hospital_name_ar" id="hospital_name_ar" placeholder="الافتراضي من التصميم إذا تُرك فارغاً">
+                        </div>
+                        <div class="col-md-6">
+                            <label class="form-label">Hospital Name (English)</label>
+                            <input type="text" class="form-control" name="hospital_name_en" id="hospital_name_en" placeholder="Default from template if empty">
+                        </div>
+                        <div class="col-md-6">
+                            <label class="form-label">شعار أعلى النموذج (اختياري)</label>
+                            <input type="file" class="form-control" name="leave_logo" id="leave_logo" accept="image/*">
+                        </div>
 
                         <!-- التواريخ -->
                         <div class="col-md-3">
@@ -4672,6 +4760,31 @@ if (!in_array($uiDataViewMode, ['table','compact','cards','zebra','glass','minim
                         <div class="col-md-6 hidden-field" id="dupCompanionRelField">
                             <label class="form-label">صلة القرابة</label>
                             <input type="text" class="form-control" name="dup_companion_relation" id="dup_companion_relation">
+                        </div>
+                        <input type="hidden" name="dup_existing_logo_path" id="dup_existing_logo_path">
+                        <div class="col-md-6">
+                            <label class="form-label">اسم المريض (English)</label>
+                            <input type="text" class="form-control" name="dup_patient_name_en" id="dup_patient_name_en">
+                        </div>
+                        <div class="col-md-6">
+                            <label class="form-label">اسم الطبيب (English)</label>
+                            <input type="text" class="form-control" name="dup_doctor_name_en" id="dup_doctor_name_en">
+                        </div>
+                        <div class="col-md-6">
+                            <label class="form-label">المسمى الوظيفي (English)</label>
+                            <input type="text" class="form-control" name="dup_doctor_title_en" id="dup_doctor_title_en">
+                        </div>
+                        <div class="col-md-6">
+                            <label class="form-label">اسم المستشفى (عربي)</label>
+                            <input type="text" class="form-control" name="dup_hospital_name_ar" id="dup_hospital_name_ar">
+                        </div>
+                        <div class="col-md-6">
+                            <label class="form-label">Hospital Name (English)</label>
+                            <input type="text" class="form-control" name="dup_hospital_name_en" id="dup_hospital_name_en">
+                        </div>
+                        <div class="col-md-6">
+                            <label class="form-label">تغيير الشعار (اختياري)</label>
+                            <input type="file" class="form-control" name="dup_leave_logo" id="dup_leave_logo" accept="image/*">
                         </div>
                     </div>
                 </form>
@@ -5332,6 +5445,117 @@ function printTableContent(tableEl, title) {
     </style></head><body><h2>${title}</h2>${tableEl.outerHTML}</body></html>`);
     win.document.close();
     win.print();
+}
+
+let sickLeaveTemplateHtml = '';
+async function getSickLeaveTemplateHtml() {
+    if (sickLeaveTemplateHtml) return sickLeaveTemplateHtml;
+    const res = await fetch('sickleavepdf.html', { cache: 'no-store' });
+    sickLeaveTemplateHtml = await res.text();
+    return sickLeaveTemplateHtml;
+}
+
+function formatDateDMY(dateValue) {
+    if (!dateValue) return '';
+    const d = new Date(dateValue);
+    if (Number.isNaN(d.getTime())) return String(dateValue);
+    const dd = String(d.getDate()).padStart(2, '0');
+    const mm = String(d.getMonth() + 1).padStart(2, '0');
+    const yyyy = d.getFullYear();
+    return `${dd}-${mm}-${yyyy}`;
+}
+
+function formatIssueStamp(dateValue) {
+    const d = dateValue ? new Date(dateValue) : new Date();
+    if (Number.isNaN(d.getTime())) return '';
+    return d.toLocaleString('en-US', {
+        weekday: 'long',
+        day: '2-digit',
+        month: 'long',
+        year: 'numeric',
+        hour: '2-digit',
+        minute: '2-digit',
+        hour12: true
+    });
+}
+
+function setTemplateText(doc, id, value) {
+    if (value === undefined || value === null || value === '') return;
+    const el = doc.getElementById(id);
+    if (!el) return;
+    const textNode = el.querySelector('span, p, a') || el;
+    textNode.textContent = String(value);
+}
+
+async function generateSickLeavePdf(leave) {
+    if (!leave || !window.html2pdf) return;
+    let wrapper = null;
+    try {
+        const html = await getSickLeaveTemplateHtml();
+        const parser = new DOMParser();
+        const parsed = parser.parseFromString(`<div id="sickLeaveTemplateRoot">${html}</div>`, 'text/html');
+
+        const issueDate = formatDateDMY(leave.issue_date);
+        const startDate = formatDateDMY(leave.start_date);
+        const endDate = formatDateDMY(leave.end_date);
+        const days = parseInt(leave.days_count || 0, 10) || 0;
+        const durationEn = `${days} day${days > 1 ? 's' : ''} ( ${startDate} to ${endDate} )`;
+        const durationAr = `${days}`;
+        const hospitalAr = leave.hospital_name_ar || 'مستشفى محمد بن عبدالعزيز الرياض';
+        const hospitalEn = leave.hospital_name_en || 'MOHAMMAD BIN ABDULAZIZ HOSPITAL - RIYADH';
+
+        setTemplateText(parsed, 'LBcb92w9MQTj2lPK', leave.service_code || '');
+        setTemplateText(parsed, 'LBpRd7S7kf6GBWDr', leave.identity_number || '');
+        setTemplateText(parsed, 'LBZbggbn1d1XGrLf', startDate);
+        setTemplateText(parsed, 'LB3tb7XTz7JKLDWF', endDate);
+        setTemplateText(parsed, 'LBSD00R9Jmnrrkmv', issueDate);
+        setTemplateText(parsed, 'LBRvsQhYglGV9Ywn', durationEn);
+        setTemplateText(parsed, 'LBJjqbLVpPHSBJb2', durationAr);
+        setTemplateText(parsed, 'LBC1V8YHvRRcY9C1', leave.patient_name_en || leave.patient_name || '');
+        setTemplateText(parsed, 'LB8NvhnLGb7KYJ6g', leave.patient_name || '');
+        setTemplateText(parsed, 'LBBcZ92DShVM4tp7', leave.doctor_name_en || leave.doctor_name || '');
+        setTemplateText(parsed, 'LB23Tvx8c39xMT8B', leave.doctor_name || '');
+        setTemplateText(parsed, 'LB9gBwbMt5MHwZ6Z', leave.doctor_title || '');
+        setTemplateText(parsed, 'LBztDwxWtzH9FjLR', leave.doctor_title_en || leave.doctor_title || '');
+        setTemplateText(parsed, 'LBCWCy8FFdQcFBJJ', formatIssueStamp(leave.issue_date));
+        if (leave.nationality_en) setTemplateText(parsed, 'LB9kZPlRH8K47pZP', leave.nationality_en);
+        if (leave.nationality_ar) setTemplateText(parsed, 'LB5XY6T97Q0q8SHH', leave.nationality_ar);
+
+        const hospitalBlock = parsed.getElementById('LBlGSHF9s4ZPNzTq');
+        if (hospitalBlock) {
+            const spans = hospitalBlock.querySelectorAll('span');
+            if (spans[0]) spans[0].textContent = hospitalAr;
+            if (spans[1]) spans[1].textContent = hospitalEn;
+        }
+
+        if (leave.logo_path) {
+            const logoContainer = parsed.getElementById('LBj8YtPxRzcJlJHK');
+            const logoImg = logoContainer ? logoContainer.querySelector('img') : null;
+            if (logoImg) logoImg.setAttribute('src', leave.logo_path);
+        }
+
+        wrapper = document.createElement('div');
+        wrapper.style.display = 'inline-block';
+        wrapper.style.background = '#fff';
+        wrapper.style.direction = 'rtl';
+        wrapper.style.lineHeight = 'normal';
+        wrapper.innerHTML = parsed.getElementById('sickLeaveTemplateRoot')?.innerHTML || html;
+        document.body.appendChild(wrapper);
+
+        await window.html2pdf().set({
+            margin: 0,
+            filename: 'sickleave.pdf',
+            image: { type: 'jpeg', quality: 0.98 },
+            html2canvas: { scale: 2, useCORS: true, backgroundColor: '#ffffff' },
+            pagebreak: { mode: ['avoid-all', 'css', 'legacy'] },
+            jsPDF: { unit: 'pt', format: 'a4', orientation: 'portrait', compress: true }
+        }).from(wrapper).save();
+
+    } catch (e) {
+        showToast('تمت الإضافة لكن فشل تنزيل PDF: ' + e.message, 'warning');
+    } finally {
+        if (wrapper && wrapper.parentNode) wrapper.parentNode.removeChild(wrapper);
+    }
 }
 
 // ======================== دوال توليد الصفوف ========================
@@ -6426,6 +6650,8 @@ document.addEventListener('DOMContentLoaded', () => {
             hideLoading();
             if (result.success) {
                 showToast(result.message, 'success');
+                const createdLeave = (result.leaves || []).find(l => l.service_code === (result.new_service_code || ''));
+                if (createdLeave) await generateSickLeavePdf(createdLeave);
                 e.target.reset();
                 assistedDraft = {};
                 document.getElementById('assistedBotStatus').textContent = '';
@@ -6561,6 +6787,12 @@ document.addEventListener('DOMContentLoaded', () => {
         document.getElementById('dup_is_paid').checked = leave.is_paid == 1;
         document.getElementById('dup_payment_amount').value = leave.payment_amount;
         document.getElementById('dup_service_code_manual').value = '';
+        document.getElementById('dup_patient_name_en').value = leave.patient_name_en || '';
+        document.getElementById('dup_doctor_name_en').value = leave.doctor_name_en || '';
+        document.getElementById('dup_doctor_title_en').value = leave.doctor_title_en || '';
+        document.getElementById('dup_hospital_name_ar').value = leave.hospital_name_ar || '';
+        document.getElementById('dup_hospital_name_en').value = leave.hospital_name_en || '';
+        document.getElementById('dup_existing_logo_path').value = leave.logo_path || '';
 
         // إظهار/إخفاء حقول المرافق
         const dupCompFields = document.getElementById('dupCompanionFields');
@@ -6611,6 +6843,8 @@ document.addEventListener('DOMContentLoaded', () => {
             hideLoading();
             if (result.success) {
                 showToast(result.message, 'success');
+                const createdLeave = (result.leaves || []).find(l => l.service_code === (result.new_service_code || ''));
+                if (createdLeave) await generateSickLeavePdf(createdLeave);
                 duplicateLeaveModal.hide();
                 syncTableDataFromResult(result);
                 filtersState.leaves = { search: '', fromDate: '', toDate: '', typeFilter: '', sortCol: 'created_at', sortOrder: 'desc' };
