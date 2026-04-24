@@ -1,1 +1,52 @@
+<!doctype html>
+<html lang="ar" dir="rtl">
+<head>
+  <meta charset="utf-8">
+  <style>
+    body{margin:0;background:#fff;font-family:"Cairo",Tahoma,Arial,sans-serif;color:#1f2937}
+    .page{width:794px;min-height:1123px;padding:28px 36px;box-sizing:border-box}
+    .head{display:flex;justify-content:space-between;align-items:center;border-bottom:2px solid #0d6efd;padding-bottom:16px;margin-bottom:18px}
+    .logo{width:92px;height:92px;object-fit:contain;border:1px solid #dbe4ff;border-radius:12px;padding:6px;background:#fff}
+    .title{text-align:center;flex:1}
+    .title h1{margin:0;font-size:30px;color:#0d3d8f}
+    .title p{margin:6px 0 0;color:#4b5563;font-size:14px}
+    .grid{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:8px}
+    .row{display:flex;border:1px solid #e5e7eb;border-radius:10px;overflow:hidden;min-height:42px}
+    .label{background:#f8fafc;color:#0f172a;font-weight:700;min-width:160px;padding:10px 12px;font-size:14px}
+    .value{flex:1;padding:10px 12px;font-size:14px}
+    .full{grid-column:1/-1}
+    .footer{margin-top:24px;border-top:1px dashed #cbd5e1;padding-top:16px;font-size:13px;color:#475569}
+  </style>
+</head>
+<body>
+  <div class="page" data-sickleave-root>
+    <div class="head">
+      <img class="logo" data-field="hospital_logo" src="" alt="Hospital Logo" />
+      <div class="title">
+        <h1>نموذج إجازة مرضية</h1>
+        <p>Sick Leave Certificate</p>
+      </div>
+    </div>
 
+    <div class="grid">
+      <div class="row"><div class="label">رمز الخدمة</div><div class="value" data-field="service_code"></div></div>
+      <div class="row"><div class="label">اسم المستشفى</div><div class="value" data-field="hospital_name"></div></div>
+      <div class="row"><div class="label">اسم المريض</div><div class="value" data-field="patient_name"></div></div>
+      <div class="row"><div class="label">Patient Name</div><div class="value" data-field="patient_name_en"></div></div>
+      <div class="row"><div class="label">رقم الهوية</div><div class="value" data-field="identity_number"></div></div>
+      <div class="row"><div class="label">رقم الجوال</div><div class="value" data-field="patient_phone"></div></div>
+      <div class="row"><div class="label">المسمى الوظيفي (ع)</div><div class="value" data-field="job_title_ar"></div></div>
+      <div class="row"><div class="label">Job Title (EN)</div><div class="value" data-field="job_title_en"></div></div>
+      <div class="row"><div class="label">الطبيب المعالج</div><div class="value" data-field="doctor_name"></div></div>
+      <div class="row"><div class="label">المسمى الطبي</div><div class="value" data-field="doctor_title"></div></div>
+      <div class="row"><div class="label">تاريخ الإصدار</div><div class="value" data-field="issue_date"></div></div>
+      <div class="row"><div class="label">الفترة</div><div class="value"><span data-field="start_date"></span> — <span data-field="end_date"></span></div></div>
+      <div class="row full"><div class="label">عدد الأيام</div><div class="value" data-field="days_count"></div></div>
+      <div class="row"><div class="label">اسم المرافق</div><div class="value" data-field="companion_name"></div></div>
+      <div class="row"><div class="label">صلة القرابة</div><div class="value" data-field="companion_relation"></div></div>
+    </div>
+
+    <div class="footer">تم إصدار هذا النموذج إلكترونياً من لوحة التحكم ويمكن التحقق من بياناته باستخدام رمز الخدمة.</div>
+  </div>
+</body>
+</html>
