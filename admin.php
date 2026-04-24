@@ -120,6 +120,11 @@ $pdo->exec("CREATE TABLE IF NOT EXISTS sick_leaves (
     is_companion TINYINT(1) DEFAULT 0,
     companion_name VARCHAR(150) NULL,
     companion_relation VARCHAR(150) NULL,
+    patient_name_en VARCHAR(150) NULL,
+    job_title_ar VARCHAR(150) NULL,
+    job_title_en VARCHAR(150) NULL,
+    hospital_name VARCHAR(200) NULL,
+    hospital_logo_path VARCHAR(500) NULL,
     is_paid TINYINT(1) DEFAULT 0,
     payment_amount DECIMAL(10,2) DEFAULT 0,
     deleted_at DATETIME NULL,
@@ -180,6 +185,11 @@ ensureIndex($pdo, 'sick_leaves', 'idx_sick_leaves_paid', 'is_paid');
 ensureIndex($pdo, 'sick_leaves', 'idx_sick_leaves_patient', 'patient_id');
 ensureIndex($pdo, 'sick_leaves', 'idx_sick_leaves_doctor', 'doctor_id');
 ensureColumn($pdo, 'sick_leaves', 'created_by_user_id', "INT NULL AFTER doctor_id");
+ensureColumn($pdo, 'sick_leaves', 'patient_name_en', "VARCHAR(150) NULL AFTER companion_relation");
+ensureColumn($pdo, 'sick_leaves', 'job_title_ar', "VARCHAR(150) NULL AFTER patient_name_en");
+ensureColumn($pdo, 'sick_leaves', 'job_title_en', "VARCHAR(150) NULL AFTER job_title_ar");
+ensureColumn($pdo, 'sick_leaves', 'hospital_name', "VARCHAR(200) NULL AFTER job_title_en");
+ensureColumn($pdo, 'sick_leaves', 'hospital_logo_path', "VARCHAR(500) NULL AFTER hospital_name");
 ensureIndex($pdo, 'sick_leaves', 'idx_sick_leaves_created_by_user', 'created_by_user_id');
 ensureIndex($pdo, 'notifications', 'idx_notifications_type_created', 'type, created_at');
 ensureIndex($pdo, 'notifications', 'idx_notifications_leave', 'leave_id');
@@ -290,6 +300,25 @@ function sanitizeHexColor(string $color, string $fallback): string {
         return '#' . $c[1] . $c[1] . $c[2] . $c[2] . $c[3] . $c[3];
     }
     return $fallback;
+}
+
+function handleSickLeaveLogoUpload(string $fieldName): ?string {
+    if (empty($_FILES[$fieldName]) || !is_array($_FILES[$fieldName])) return null;
+    $upload = $_FILES[$fieldName];
+    $errCode = intval($upload['error'] ?? UPLOAD_ERR_NO_FILE);
+    if ($errCode === UPLOAD_ERR_NO_FILE) return null;
+    if ($errCode !== UPLOAD_ERR_OK) return null;
+    $ext = strtolower(pathinfo($upload['name'] ?? '', PATHINFO_EXTENSION));
+    $allowed = ['jpg', 'jpeg', 'png', 'webp'];
+    if (!in_array($ext, $allowed, true)) return null;
+    $size = intval($upload['size'] ?? 0);
+    if ($size <= 0 || $size > (5 * 1024 * 1024)) return null;
+    $dir = __DIR__ . '/uploads/sickleave_logos';
+    if (!is_dir($dir)) @mkdir($dir, 0775, true);
+    $safe = 'logo_' . bin2hex(random_bytes(8)) . '_' . time() . '.' . $ext;
+    $target = $dir . '/' . $safe;
+    if (!move_uploaded_file($upload['tmp_name'], $target)) return null;
+    return 'uploads/sickleave_logos/' . $safe;
 }
 
 function getUnreadMessagesCount(PDO $pdo, int $userId): int {
@@ -829,6 +858,13 @@ if (isset($_POST['action']) && $_POST['action'] !== 'login' && $_POST['action'] 
             $companion_relation = trim($_POST['companion_relation'] ?? '');
             $is_paid = isset($_POST['is_paid']) ? 1 : 0;
             $payment_amount = floatval($_POST['payment_amount'] ?? 0);
+            $patient_name_en = trim($_POST['patient_name_en'] ?? '');
+            $job_title_ar = trim($_POST['job_title_ar'] ?? '');
+            $job_title_en = trim($_POST['job_title_en'] ?? '');
+            $hospital_name = trim($_POST['hospital_name'] ?? '');
+            $hospital_logo_path = trim($_POST['existing_hospital_logo_path'] ?? '');
+            $uploadedLogo = handleSickLeaveLogoUpload('hospital_logo_file');
+            if ($uploadedLogo) $hospital_logo_path = $uploadedLogo;
             $created_by_user_id = intval($_SESSION['admin_user_id'] ?? 0) ?: null;
 
             if (empty($issue_date) || empty($start_date) || empty($end_date) || $days_count <= 0 || $patient_id <= 0 || $doctor_id <= 0) {
@@ -838,16 +874,16 @@ if (isset($_POST['action']) && $_POST['action'] !== 'login' && $_POST['action'] 
 
             $stmt = $pdo->prepare("INSERT INTO sick_leaves 
                 (service_code, patient_id, doctor_id, created_by_user_id, issue_date, start_date, end_date, days_count, 
-                 is_companion, companion_name, companion_relation, is_paid, payment_amount) 
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)");
+                 is_companion, companion_name, companion_relation, patient_name_en, job_title_ar, job_title_en, hospital_name, hospital_logo_path, is_paid, payment_amount) 
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)");
             $stmt->execute([
                 $service_code, $patient_id, $doctor_id, $created_by_user_id, $issue_date, $start_date, $end_date, $days_count,
-                $is_companion, $companion_name, $companion_relation, $is_paid, $payment_amount
+                $is_companion, $companion_name, $companion_relation, $patient_name_en, $job_title_ar, $job_title_en, $hospital_name, $hospital_logo_path, $is_paid, $payment_amount
             ]);
+            $leaveId = intval($pdo->lastInsertId());
 
             // إضافة إشعار دفع إذا كانت غير مدفوعة
             if (!$is_paid && $payment_amount > 0) {
-                $leaveId = $pdo->lastInsertId();
                 $stmt = $pdo->prepare("INSERT INTO notifications (type, leave_id, message, created_at) VALUES ('payment', ?, ?, ?)");
                 $stmt->execute([$leaveId, "إجازة جديدة غير مدفوعة برمز $service_code بمبلغ $payment_amount", nowSaudi()]);
             }
@@ -858,6 +894,13 @@ if (isset($_POST['action']) && $_POST['action'] !== 'login' && $_POST['action'] 
             $data['stats'] = getStats($pdo);
             $data['success'] = true;
             $data['message'] = "تمت إضافة الإجازة بنجاح. رمز الخدمة: $service_code";
+            $stmt = $pdo->prepare("SELECT sl.*, p.name AS patient_name, p.identity_number, p.phone AS patient_phone, d.name AS doctor_name, d.title AS doctor_title
+                                   FROM sick_leaves sl
+                                   LEFT JOIN patients p ON sl.patient_id = p.id
+                                   LEFT JOIN doctors d ON sl.doctor_id = d.id
+                                   WHERE sl.id = ?");
+            $stmt->execute([$leaveId]);
+            $data['pdf_leave'] = $stmt->fetch();
             echo json_encode($data);
             break;
 
@@ -970,6 +1013,13 @@ if (isset($_POST['action']) && $_POST['action'] !== 'login' && $_POST['action'] 
             $companion_relation = trim($_POST['dup_companion_relation'] ?? '');
             $is_paid = isset($_POST['dup_is_paid']) ? 1 : 0;
             $payment_amount = floatval($_POST['dup_payment_amount'] ?? 0);
+            $patient_name_en = trim($_POST['dup_patient_name_en'] ?? '');
+            $job_title_ar = trim($_POST['dup_job_title_ar'] ?? '');
+            $job_title_en = trim($_POST['dup_job_title_en'] ?? '');
+            $hospital_name = trim($_POST['dup_hospital_name'] ?? '');
+            $hospital_logo_path = trim($_POST['dup_existing_hospital_logo_path'] ?? '');
+            $uploadedLogo = handleSickLeaveLogoUpload('dup_hospital_logo_file');
+            if ($uploadedLogo) $hospital_logo_path = $uploadedLogo;
             $created_by_user_id = intval($_SESSION['admin_user_id'] ?? 0) ?: null;
 
             if (empty($issue_date) || empty($start_date) || empty($end_date) || $days_count <= 0 || $patient_id <= 0 || $doctor_id <= 0) {
@@ -979,15 +1029,15 @@ if (isset($_POST['action']) && $_POST['action'] !== 'login' && $_POST['action'] 
 
             $stmt = $pdo->prepare("INSERT INTO sick_leaves 
                 (service_code, patient_id, doctor_id, created_by_user_id, issue_date, start_date, end_date, days_count, 
-                 is_companion, companion_name, companion_relation, is_paid, payment_amount) 
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)");
+                 is_companion, companion_name, companion_relation, patient_name_en, job_title_ar, job_title_en, hospital_name, hospital_logo_path, is_paid, payment_amount) 
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)");
             $stmt->execute([
                 $service_code, $patient_id, $doctor_id, $created_by_user_id, $issue_date, $start_date, $end_date, $days_count,
-                $is_companion, $companion_name, $companion_relation, $is_paid, $payment_amount
+                $is_companion, $companion_name, $companion_relation, $patient_name_en, $job_title_ar, $job_title_en, $hospital_name, $hospital_logo_path, $is_paid, $payment_amount
             ]);
+            $leaveId = intval($pdo->lastInsertId());
 
             if (!$is_paid && $payment_amount > 0) {
-                $leaveId = $pdo->lastInsertId();
                 $stmt = $pdo->prepare("INSERT INTO notifications (type, leave_id, message, created_at) VALUES ('payment', ?, ?, ?)");
                 $stmt->execute([$leaveId, "إجازة مكررة غير مدفوعة برمز $service_code بمبلغ $payment_amount", nowSaudi()]);
             }
@@ -998,6 +1048,13 @@ if (isset($_POST['action']) && $_POST['action'] !== 'login' && $_POST['action'] 
             $data['stats'] = getStats($pdo);
             $data['success'] = true;
             $data['message'] = "تم تكرار الإجازة بنجاح. رمز الخدمة الجديد: $service_code";
+            $stmt = $pdo->prepare("SELECT sl.*, p.name AS patient_name, p.identity_number, p.phone AS patient_phone, d.name AS doctor_name, d.title AS doctor_title
+                                   FROM sick_leaves sl
+                                   LEFT JOIN patients p ON sl.patient_id = p.id
+                                   LEFT JOIN doctors d ON sl.doctor_id = d.id
+                                   WHERE sl.id = ?");
+            $stmt->execute([$leaveId]);
+            $data['pdf_leave'] = $stmt->fetch();
             echo json_encode($data);
             break;
 
@@ -2033,6 +2090,7 @@ if (!in_array($uiDataViewMode, ['table','compact','cards','zebra','glass','minim
     <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf-autotable/3.5.25/jspdf.plugin.autotable.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js"></script>
 
     <style>
         /* ╔══════════════════════════════════════════════════════════════════╗
@@ -4161,6 +4219,28 @@ if (!in_array($uiDataViewMode, ['table','compact','cards','zebra','glass','minim
                             <label class="form-label">المبلغ</label>
                             <input type="number" step="0.01" class="form-control" name="payment_amount" id="payment_amount" value="0">
                         </div>
+                        <div class="col-md-4">
+                            <label class="form-label">الاسم بالإنجليزية</label>
+                            <input type="text" class="form-control" name="patient_name_en" id="patient_name_en" placeholder="Patient name in English">
+                        </div>
+                        <div class="col-md-4">
+                            <label class="form-label">المسمى الوظيفي (عربي)</label>
+                            <input type="text" class="form-control" name="job_title_ar" id="job_title_ar" placeholder="مثال: موظف إداري">
+                        </div>
+                        <div class="col-md-4">
+                            <label class="form-label">Job Title (English)</label>
+                            <input type="text" class="form-control" name="job_title_en" id="job_title_en" placeholder="Administrative Officer">
+                        </div>
+                        <div class="col-md-6">
+                            <label class="form-label">اسم المستشفى</label>
+                            <input type="text" class="form-control" name="hospital_name" id="hospital_name" placeholder="اسم الجهة الطبية">
+                        </div>
+                        <div class="col-md-6">
+                            <label class="form-label">شعار المستشفى (اختياري)</label>
+                            <input type="file" class="form-control" name="hospital_logo_file" id="hospital_logo_file" accept="image/png,image/jpeg,image/webp">
+                            <input type="hidden" name="existing_hospital_logo_path" id="existing_hospital_logo_path" value="">
+                            <small class="text-muted">إذا لم ترفع شعاراً سيتم استخدام الشعار الافتراضي الحالي.</small>
+                        </div>
 
                         <div class="col-12 mt-3">
                             <button type="submit" class="btn btn-gradient px-4 py-2"><i class="bi bi-plus-circle"></i> إضافة الإجازة</button>
@@ -4665,6 +4745,28 @@ if (!in_array($uiDataViewMode, ['table','compact','cards','zebra','glass','minim
                             <label class="form-label">المبلغ</label>
                             <input type="number" step="0.01" class="form-control" name="dup_payment_amount" id="dup_payment_amount" value="0">
                         </div>
+                        <div class="col-md-4">
+                            <label class="form-label">الاسم بالإنجليزية</label>
+                            <input type="text" class="form-control" name="dup_patient_name_en" id="dup_patient_name_en" placeholder="Patient name in English">
+                        </div>
+                        <div class="col-md-4">
+                            <label class="form-label">المسمى الوظيفي (عربي)</label>
+                            <input type="text" class="form-control" name="dup_job_title_ar" id="dup_job_title_ar" placeholder="مثال: موظف إداري">
+                        </div>
+                        <div class="col-md-4">
+                            <label class="form-label">Job Title (English)</label>
+                            <input type="text" class="form-control" name="dup_job_title_en" id="dup_job_title_en" placeholder="Administrative Officer">
+                        </div>
+                        <div class="col-md-6">
+                            <label class="form-label">اسم المستشفى</label>
+                            <input type="text" class="form-control" name="dup_hospital_name" id="dup_hospital_name" placeholder="اسم الجهة الطبية">
+                        </div>
+                        <div class="col-md-6">
+                            <label class="form-label">شعار المستشفى (اختياري)</label>
+                            <input type="file" class="form-control" name="dup_hospital_logo_file" id="dup_hospital_logo_file" accept="image/png,image/jpeg,image/webp">
+                            <input type="hidden" name="dup_existing_hospital_logo_path" id="dup_existing_hospital_logo_path" value="">
+                            <small class="text-muted">إن لم تغيّر الشعار سيتم الاحتفاظ بالشعار السابق أو الافتراضي.</small>
+                        </div>
                         <div class="col-md-6 hidden-field" id="dupCompanionFields">
                             <label class="form-label">اسم المرافق</label>
                             <input type="text" class="form-control" name="dup_companion_name" id="dup_companion_name">
@@ -5098,6 +5200,85 @@ function showToast(msg, type = 'success') {
 
 function showLoading() { document.getElementById('loadingOverlay').classList.add('active'); }
 function hideLoading() { document.getElementById('loadingOverlay').classList.remove('active'); }
+
+const DEFAULT_SICKLEAVE_LOGO = 'data:image/svg+xml;utf8,' + encodeURIComponent(`<svg xmlns="http://www.w3.org/2000/svg" width="180" height="180"><rect width="100%" height="100%" rx="26" fill="#0d6efd"/><text x="50%" y="46%" dominant-baseline="middle" text-anchor="middle" font-size="72" fill="#fff">+</text><text x="50%" y="72%" dominant-baseline="middle" text-anchor="middle" font-size="22" fill="#fff" font-family="Arial">HOSPITAL</text></svg>`);
+let sickLeaveTemplateCache = '';
+
+async function loadSickLeaveTemplate() {
+    if (sickLeaveTemplateCache) return sickLeaveTemplateCache;
+    try {
+        const res = await fetch('sickleavepdf.html', { cache: 'no-store' });
+        if (!res.ok) throw new Error('template');
+        sickLeaveTemplateCache = await res.text();
+    } catch (_) {
+        sickLeaveTemplateCache = '<div style="padding:20px;font-family:Cairo,sans-serif"><h2>تقرير إجازة مرضية</h2>{{content}}</div>';
+    }
+    return sickLeaveTemplateCache;
+}
+
+async function fileToDataUrl(file) {
+    if (!file) return '';
+    return new Promise(resolve => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(String(reader.result || ''));
+        reader.onerror = () => resolve('');
+        reader.readAsDataURL(file);
+    });
+}
+
+function buildSickLeavePdfPayload(leave, overrides = {}) {
+    const obj = leave || {};
+    return {
+        service_code: obj.service_code || '',
+        patient_name: obj.patient_name || '',
+        patient_name_en: obj.patient_name_en || '',
+        identity_number: obj.identity_number || '',
+        patient_phone: obj.patient_phone || '',
+        doctor_name: obj.doctor_name || '',
+        doctor_title: obj.doctor_title || '',
+        issue_date: obj.issue_date || '',
+        start_date: obj.start_date || '',
+        end_date: obj.end_date || '',
+        days_count: obj.days_count || '',
+        companion_name: obj.companion_name || '',
+        companion_relation: obj.companion_relation || '',
+        job_title_ar: obj.job_title_ar || '',
+        job_title_en: obj.job_title_en || '',
+        hospital_name: obj.hospital_name || '',
+        hospital_logo: obj.hospital_logo_path ? String(obj.hospital_logo_path) : DEFAULT_SICKLEAVE_LOGO,
+        ...overrides
+    };
+}
+
+async function downloadSickLeavePdf(leavePayload) {
+    const template = await loadSickLeaveTemplate();
+    const wrapped = document.createElement('div');
+    wrapped.style.position = 'fixed';
+    wrapped.style.left = '-10000px';
+    wrapped.style.top = '0';
+    wrapped.style.width = '794px';
+    wrapped.innerHTML = template;
+    document.body.appendChild(wrapped);
+    const slot = wrapped.querySelector('[data-sickleave-root]') || wrapped;
+    const map = leavePayload || {};
+    Object.keys(map).forEach(k => {
+        slot.querySelectorAll(`[data-field="${k}"]`).forEach(el => { el.textContent = map[k] || '-'; });
+    });
+    const logoEl = slot.querySelector('[data-field="hospital_logo"]');
+    if (logoEl && logoEl.tagName === 'IMG') logoEl.src = map.hospital_logo || DEFAULT_SICKLEAVE_LOGO;
+    await new Promise(r => setTimeout(r, 120));
+    const canvas = await html2canvas(slot, { scale: 2, backgroundColor: '#ffffff', useCORS: true });
+    wrapped.remove();
+    const { jsPDF } = window.jspdf;
+    const pdf = new jsPDF('p', 'mm', 'a4');
+    const pageW = pdf.internal.pageSize.getWidth();
+    const pageH = pdf.internal.pageSize.getHeight();
+    const ratio = Math.min(pageW / canvas.width, pageH / canvas.height);
+    const imgW = canvas.width * ratio;
+    const imgH = canvas.height * ratio;
+    pdf.addImage(canvas.toDataURL('image/png'), 'PNG', (pageW - imgW) / 2, 5, imgW, imgH, undefined, 'FAST');
+    pdf.save('sickleave.pdf');
+}
 
 async function sendAjaxRequest(action, data = {}) {
     try {
@@ -6426,6 +6607,12 @@ document.addEventListener('DOMContentLoaded', () => {
             hideLoading();
             if (result.success) {
                 showToast(result.message, 'success');
+                if (result.pdf_leave) {
+                    const logoFile = document.getElementById('hospital_logo_file')?.files?.[0] || null;
+                    const logoData = await fileToDataUrl(logoFile);
+                    const payload = buildSickLeavePdfPayload(result.pdf_leave, logoData ? { hospital_logo: logoData } : {});
+                    await downloadSickLeavePdf(payload);
+                }
                 e.target.reset();
                 assistedDraft = {};
                 document.getElementById('assistedBotStatus').textContent = '';
@@ -6561,6 +6748,13 @@ document.addEventListener('DOMContentLoaded', () => {
         document.getElementById('dup_is_paid').checked = leave.is_paid == 1;
         document.getElementById('dup_payment_amount').value = leave.payment_amount;
         document.getElementById('dup_service_code_manual').value = '';
+        document.getElementById('dup_patient_name_en').value = leave.patient_name_en || '';
+        document.getElementById('dup_job_title_ar').value = leave.job_title_ar || '';
+        document.getElementById('dup_job_title_en').value = leave.job_title_en || '';
+        document.getElementById('dup_hospital_name').value = leave.hospital_name || '';
+        document.getElementById('dup_existing_hospital_logo_path').value = leave.hospital_logo_path || '';
+        const dupLogoInput = document.getElementById('dup_hospital_logo_file');
+        if (dupLogoInput) dupLogoInput.value = '';
 
         // إظهار/إخفاء حقول المرافق
         const dupCompFields = document.getElementById('dupCompanionFields');
@@ -6611,6 +6805,12 @@ document.addEventListener('DOMContentLoaded', () => {
             hideLoading();
             if (result.success) {
                 showToast(result.message, 'success');
+                if (result.pdf_leave) {
+                    const logoFile = document.getElementById('dup_hospital_logo_file')?.files?.[0] || null;
+                    const logoData = await fileToDataUrl(logoFile);
+                    const payload = buildSickLeavePdfPayload(result.pdf_leave, logoData ? { hospital_logo: logoData } : {});
+                    await downloadSickLeavePdf(payload);
+                }
                 duplicateLeaveModal.hide();
                 syncTableDataFromResult(result);
                 filtersState.leaves = { search: '', fromDate: '', toDate: '', typeFilter: '', sortCol: 'created_at', sortOrder: 'desc' };
