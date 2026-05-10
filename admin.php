@@ -523,6 +523,53 @@ function generateServiceCode($pdo, $prefix, $issueDate = null) {
     return $prefix . $datePart . str_pad((string)$num, 5, '0', STR_PAD_LEFT);
 }
 
+
+function formatIssueTimeForDisplay($time): string {
+    $time = trim((string)$time);
+    if ($time === '') {
+        return '09:00';
+    }
+    if (preg_match('/^(\d{1,2}):(\d{2})(?::\d{2})?$/', $time, $m)) {
+        $hour = ((int)$m[1]) % 24;
+        $minute = $m[2];
+        $displayHour = $hour % 12;
+        if ($displayHour === 0) {
+            $displayHour = 12;
+        }
+        return sprintf('%02d:%s', $displayHour, $minute);
+    }
+    return $time;
+}
+
+function renderHijriDate($date): string {
+    $date = trim((string)$date);
+    if ($date === '') {
+        return '';
+    }
+    $parts = explode('-', $date);
+    if (count($parts) !== 3) {
+        return htmlspecialchars($date, ENT_QUOTES);
+    }
+    return '<span class="hijri-date" dir="rtl"><span>' . htmlspecialchars($parts[2], ENT_QUOTES) . '</span><span>-</span><span>' . htmlspecialchars($parts[1], ENT_QUOTES) . '</span><span>-</span><span>' . htmlspecialchars($parts[0], ENT_QUOTES) . '</span></span>';
+}
+
+function fetchDoctorsWithHospital(PDO $pdo): array {
+    return $pdo->query("SELECT d.*, h.name_ar AS hospital_name_ar FROM doctors d LEFT JOIN hospitals h ON d.hospital_id = h.id ORDER BY d.name_ar")->fetchAll();
+}
+
+function fetchHospitalsList(PDO $pdo): array {
+    return $pdo->query("SELECT id, name_ar, name_en, license_number, logo_path, logo_url, service_prefix, created_at, updated_at, CASE WHEN logo_data IS NOT NULL AND logo_data != '' THEN 'has_logo' ELSE '' END AS has_logo_data FROM hospitals ORDER BY name_ar")->fetchAll();
+}
+
+function syncHospitalPrefixToExistingLeaves(PDO $pdo, int $hospitalId, string $newPrefix): int {
+    if ($hospitalId <= 0 || !in_array($newPrefix, ['GSL', 'PSL'], true)) {
+        return 0;
+    }
+    $stmt = $pdo->prepare("UPDATE sick_leaves SET service_code = CONCAT(?, SUBSTRING(service_code, 4)), updated_at = ? WHERE hospital_id = ? AND service_code REGEXP '^(GSL|PSL)[0-9]+'");
+    $stmt->execute([$newPrefix, nowSaudi(), $hospitalId]);
+    return $stmt->rowCount();
+}
+
 function extractFirstJsonObject(string $raw): ?array {
     $trimmed = trim($raw);
     $decoded = json_decode($trimmed, true);
@@ -779,7 +826,7 @@ function fetchAllData($pdo) {
     ")->fetchAll();
 
     // المستشفيات
-    $hospitals_data = $pdo->query("SELECT id, name_ar, name_en, license_number, logo_path, logo_url, service_prefix, created_at, updated_at, CASE WHEN logo_data IS NOT NULL AND logo_data != '' THEN 'has_logo' ELSE '' END AS has_logo_data FROM hospitals ORDER BY name_ar")->fetchAll();
+    $hospitals_data = fetchHospitalsList($pdo);
 
     return compact('leaves', 'archived', 'queries', 'notifications_payment', 'payments', 'hospitals_data');
 }
@@ -901,8 +948,8 @@ function handleGeneratePdf($pdo, $leave_id, $pdfMode = 'preview') {
     $startEn = $fmtEn($startG);
     $endEn = $fmtEn($endG);
     $issueEn = $fmtEn($issueG);
-    $startHj = $toHijriStr($startG);
-    $endHj = $toHijriStr($endG);
+    $startHj = renderHijriDate($toHijriStr($startG));
+    $endHj = renderHijriDate($toHijriStr($endG));
 
     $patNameAr = htmlspecialchars($lv['p_name_ar'] ?? '', ENT_QUOTES);
     $patNameEn = strtoupper(htmlspecialchars($lv['p_name_en'] ?? $lv['patient_name_en'] ?? '', ENT_QUOTES));
@@ -944,7 +991,7 @@ function handleGeneratePdf($pdo, $leave_id, $pdfMode = 'preview') {
     }
 
     // Timestamp
-    $issueTime = $lv['issue_time'] ?? '09:00';
+    $issueTime = formatIssueTimeForDisplay($lv['issue_time'] ?? '09:00');
     $issuePeriod = $lv['issue_period'] ?? 'AM';
     $issueDateObj = DateTime::createFromFormat('Y-m-d', $issueG);
     $dayNameEn = $issueDateObj ? $issueDateObj->format('l') : '';
@@ -966,7 +1013,7 @@ function handleGeneratePdf($pdo, $leave_id, $pdfMode = 'preview') {
     $reportCSS .= '.info-table td:last-child{border-right:none}.info-table tr:last-child td{border-bottom:none}';
     $reportCSS .= '.info-table .en-title{width:161px;color:rgba(54,111,181,1);font-size:13.5px;font-weight:700;text-align:center;font-family:"Times New Roman",serif}';
     $reportCSS .= '.info-table .data-cell{width:240px;color:rgba(44,62,119,1);font-size:13.5px;font-family:"Times New Roman",serif;font-weight:400;text-align:center}';
-    $reportCSS .= '.info-table .date-cell{font-size:13.9px}.info-table .data-cell.ar-text{font-family:"Noto Sans Arabic"}';
+    $reportCSS .= '.info-table .date-cell{font-size:13.9px}.info-table .hijri-date{display:inline-flex;direction:rtl;flex-direction:row;gap:0;unicode-bidi:isolate;min-width:90px;justify-content:center}.info-table .data-cell.ar-text{font-family:"Noto Sans Arabic"}';
     $reportCSS .= '.info-table .ar-title{width:140px;color:rgba(54,111,181,1);font-size:13.5px;font-weight:700;text-align:center;font-family:"Noto Sans Arabic";white-space:nowrap}';
     $reportCSS .= '.info-table tr.blue-row td{background-color:#2c3e77;color:#fff;border-bottom:1px solid #ccc;border-right:1px solid #ccc}';
     $reportCSS .= '.info-table tr.blue-row td:last-child{border-right:none}';
@@ -1416,9 +1463,9 @@ if (isset($_POST['action']) && $_POST['action'] !== 'login' && $_POST['action'] 
     switch ($action) {
         case 'fetch_all_leaves':
             $data = fetchAllData($pdo);
-            $data['doctors'] = $pdo->query("SELECT d.*, h.name_ar AS hospital_name_ar FROM doctors d LEFT JOIN hospitals h ON d.hospital_id = h.id ORDER BY d.name_ar")->fetchAll();
+            $data['doctors'] = fetchDoctorsWithHospital($pdo);
             $data['patients'] = $pdo->query("SELECT * FROM patients ORDER BY name_ar")->fetchAll();
-            $data['hospitals'] = $pdo->query("SELECT id, name_ar, name_en, license_number, logo_path, logo_url, service_prefix, created_at, updated_at, CASE WHEN logo_data IS NOT NULL AND logo_data != '' THEN 'has_logo' ELSE '' END AS has_logo_data FROM hospitals ORDER BY name_ar")->fetchAll();
+            $data['hospitals'] = fetchHospitalsList($pdo);
             $data['stats'] = getStats($pdo);
             $data['unread_messages_count'] = getUnreadMessagesCount($pdo, intval($_SESSION['admin_user_id'] ?? 0));
             $data['success'] = true;
@@ -1437,7 +1484,7 @@ if (isset($_POST['action']) && $_POST['action'] !== 'login' && $_POST['action'] 
             if (!$logo_data && !empty($logo_url)) $logo_data = downloadLogoFromUrl($logo_url);
             $stmt = $pdo->prepare("INSERT INTO hospitals (name_ar, name_en, license_number, logo_path, logo_url, logo_data, service_prefix) VALUES (?,?,?,?,?,?,?)");
             $stmt->execute([$name_ar, $name_en, $license ?: null, null, $logo_url ?: null, $logo_data, $prefix]);
-            $hospitals = $pdo->query("SELECT id, name_ar, name_en, license_number, logo_path, logo_url, service_prefix, created_at, updated_at, CASE WHEN logo_data IS NOT NULL AND logo_data != '' THEN 'has_logo' ELSE '' END AS has_logo_data FROM hospitals ORDER BY name_ar")->fetchAll();
+            $hospitals = fetchHospitalsList($pdo);
             echo json_encode(['success'=>true,'message'=>'تمت إضافة المستشفى بنجاح.','hospitals'=>$hospitals,'stats'=>getStats($pdo)]);
             break;
 
@@ -1468,20 +1515,22 @@ if (isset($_POST['action']) && $_POST['action'] !== 'login' && $_POST['action'] 
                 $stmt = $pdo->prepare("UPDATE hospitals SET name_ar=?, name_en=?, license_number=?, service_prefix=? WHERE id=?");
                 $stmt->execute([$name_ar, $name_en, $license ?: null, $prefix, $id]);
             }
-            $hospitals = $pdo->query("SELECT id, name_ar, name_en, license_number, logo_path, logo_url, service_prefix, created_at, updated_at, CASE WHEN logo_data IS NOT NULL AND logo_data != '' THEN 'has_logo' ELSE '' END AS has_logo_data FROM hospitals ORDER BY name_ar")->fetchAll();
-            echo json_encode(['success'=>true,'message'=>'تم تعديل المستشفى بنجاح.','hospitals'=>$hospitals,'stats'=>getStats($pdo)]);
+            $updatedLeaves = syncHospitalPrefixToExistingLeaves($pdo, $id, $prefix);
+            $hospitals = fetchHospitalsList($pdo);
+            $message = 'تم تعديل المستشفى بنجاح.' . ($updatedLeaves > 0 ? " وتم تحديث بادئة {$updatedLeaves} إجازة مرتبطة." : '');
+            echo json_encode(['success'=>true,'message'=>$message,'hospitals'=>$hospitals,'stats'=>getStats($pdo)]);
             break;
 
         case 'delete_hospital':
             $id = intval($_POST['hospital_id'] ?? 0);
             $pdo->prepare("UPDATE doctors SET hospital_id = NULL WHERE hospital_id = ?")->execute([$id]);
             $pdo->prepare("DELETE FROM hospitals WHERE id = ?")->execute([$id]);
-            $hospitals = $pdo->query("SELECT id, name_ar, name_en, license_number, logo_path, logo_url, service_prefix, created_at, updated_at, CASE WHEN logo_data IS NOT NULL AND logo_data != '' THEN 'has_logo' ELSE '' END AS has_logo_data FROM hospitals ORDER BY name_ar")->fetchAll();
+            $hospitals = fetchHospitalsList($pdo);
             echo json_encode(['success'=>true,'message'=>'تم حذف المستشفى بنجاح.','hospitals'=>$hospitals,'stats'=>getStats($pdo)]);
             break;
 
         case 'fetch_hospitals':
-            $hospitals = $pdo->query("SELECT id, name_ar, name_en, license_number, logo_path, logo_url, service_prefix, created_at, updated_at, CASE WHEN logo_data IS NOT NULL AND logo_data != '' THEN 'has_logo' ELSE '' END AS has_logo_data FROM hospitals ORDER BY name_ar")->fetchAll();
+            $hospitals = fetchHospitalsList($pdo);
             echo json_encode(['success'=>true,'hospitals'=>$hospitals]);
             break;
 
@@ -1547,8 +1596,8 @@ if (isset($_POST['action']) && $_POST['action'] !== 'login' && $_POST['action'] 
                     echo json_encode(['success' => false, 'message' => 'يرجى إدخال اسم الطبيب ومسمّاه الوظيفي.']);
                     exit;
                 }
-                $stmt = $pdo->prepare("INSERT INTO doctors (name, name_ar, title, title_ar, note) VALUES (?, ?, ?, ?, ?)");
-                $stmt->execute([$dName, $dName, $dTitle, $dTitle, $dNote]);
+                $stmt = $pdo->prepare("INSERT INTO doctors (name, name_ar, title, title_ar, note, hospital_id) VALUES (?, ?, ?, ?, ?, ?)");
+                $stmt->execute([$dName, $dName, $dTitle, $dTitle, $dNote, (intval($_POST['hospital_id'] ?? 0) ?: null)]);
                 $doctor_id = $pdo->lastInsertId();
             } else {
                 $doctor_id = intval($doctor_select);
@@ -1627,7 +1676,7 @@ if (isset($_POST['action']) && $_POST['action'] !== 'login' && $_POST['action'] 
             }
 
             $data = fetchActiveOperationalData($pdo);
-            $data['doctors'] = $pdo->query("SELECT * FROM doctors ORDER BY name_ar")->fetchAll();
+            $data['doctors'] = fetchDoctorsWithHospital($pdo);
             $data['patients'] = $pdo->query("SELECT * FROM patients ORDER BY name_ar")->fetchAll();
             $data['stats'] = getStats($pdo);
             $data['success'] = true;
@@ -1640,6 +1689,8 @@ if (isset($_POST['action']) && $_POST['action'] !== 'login' && $_POST['action'] 
             $leave_id = intval($_POST['leave_id_edit'] ?? 0);
             $service_code = strtoupper(trim($_POST['service_code_edit'] ?? ''));
             $issue_date = $_POST['issue_date_edit'] ?? '';
+            $issue_time = trim($_POST['issue_time_edit'] ?? '');
+            $issue_period = in_array(strtoupper(trim($_POST['issue_period_edit'] ?? '')), ['AM','PM']) ? strtoupper(trim($_POST['issue_period_edit'])) : null;
             $start_date = $_POST['start_date_edit'] ?? '';
             $end_date = $_POST['end_date_edit'] ?? '';
             $days_count = intval($_POST['days_count_edit'] ?? 0);
@@ -1660,8 +1711,8 @@ if (isset($_POST['action']) && $_POST['action'] !== 'login' && $_POST['action'] 
                     echo json_encode(['success' => false, 'message' => 'يرجى إدخال اسم الطبيب ومسمّاه الوظيفي.']);
                     exit;
                 }
-                $stmt = $pdo->prepare("INSERT INTO doctors (name, name_ar, title, title_ar, note) VALUES (?, ?, ?, ?, ?)");
-                $stmt->execute([$dName, $dName, $dTitle, $dTitle, $dNote]);
+                $stmt = $pdo->prepare("INSERT INTO doctors (name, name_ar, title, title_ar, note, hospital_id) VALUES (?, ?, ?, ?, ?, ?)");
+                $stmt->execute([$dName, $dName, $dTitle, $dTitle, $dNote, null]);
                 $doctor_id_edit = intval($pdo->lastInsertId());
             } else {
                 $doctor_id_edit = intval($doctor_id_edit_raw ?: 0);
@@ -1674,30 +1725,30 @@ if (isset($_POST['action']) && $_POST['action'] !== 'login' && $_POST['action'] 
 
             if ($doctor_id_edit && $doctor_id_edit > 0) {
                 $stmt = $pdo->prepare("UPDATE sick_leaves SET 
-                    service_code = ?, issue_date = ?, start_date = ?, end_date = ?, days_count = ?,
+                    service_code = ?, issue_date = ?, issue_time = ?, issue_period = ?, start_date = ?, end_date = ?, days_count = ?,
                     is_companion = ?, companion_name = ?, companion_relation = ?,
                     is_paid = ?, payment_amount = ?, doctor_id = ?, updated_at = ?
                     WHERE id = ?");
                 $stmt->execute([
-                    $service_code, $issue_date, $start_date, $end_date, $days_count,
+                    $service_code, $issue_date, $issue_time, $issue_period, $start_date, $end_date, $days_count,
                     $is_companion, $companion_name, $companion_relation,
                     $is_paid, $payment_amount, $doctor_id_edit, nowSaudi(), $leave_id
                 ]);
             } else {
                 $stmt = $pdo->prepare("UPDATE sick_leaves SET 
-                    service_code = ?, issue_date = ?, start_date = ?, end_date = ?, days_count = ?,
+                    service_code = ?, issue_date = ?, issue_time = ?, issue_period = ?, start_date = ?, end_date = ?, days_count = ?,
                     is_companion = ?, companion_name = ?, companion_relation = ?,
                     is_paid = ?, payment_amount = ?, updated_at = ?
                     WHERE id = ?");
                 $stmt->execute([
-                    $service_code, $issue_date, $start_date, $end_date, $days_count,
+                    $service_code, $issue_date, $issue_time, $issue_period, $start_date, $end_date, $days_count,
                     $is_companion, $companion_name, $companion_relation,
                     $is_paid, $payment_amount, nowSaudi(), $leave_id
                 ]);
             }
 
             $data = fetchActiveOperationalData($pdo);
-            $data['doctors'] = $pdo->query("SELECT * FROM doctors ORDER BY name_ar")->fetchAll();
+            $data['doctors'] = fetchDoctorsWithHospital($pdo);
             $data['patients'] = $pdo->query("SELECT * FROM patients ORDER BY name_ar")->fetchAll();
             $data['stats'] = getStats($pdo);
             $data['success'] = true;
@@ -1719,8 +1770,8 @@ if (isset($_POST['action']) && $_POST['action'] !== 'login' && $_POST['action'] 
                     echo json_encode(['success' => false, 'message' => 'يرجى إدخال اسم الطبيب ومسمّاه الوظيفي.']);
                     exit;
                 }
-                $stmt = $pdo->prepare("INSERT INTO doctors (name, name_ar, title, title_ar, note) VALUES (?, ?, ?, ?, ?)");
-                $stmt->execute([$dName, $dName, $dTitle, $dTitle, $dNote]);
+                $stmt = $pdo->prepare("INSERT INTO doctors (name, name_ar, title, title_ar, note, hospital_id) VALUES (?, ?, ?, ?, ?, ?)");
+                $stmt->execute([$dName, $dName, $dTitle, $dTitle, $dNote, (intval($_POST['dup_hospital_id'] ?? 0) ?: null)]);
                 $doctor_id = $pdo->lastInsertId();
             } else {
                 $doctor_id = intval($doctor_select);
@@ -1793,7 +1844,7 @@ if (isset($_POST['action']) && $_POST['action'] !== 'login' && $_POST['action'] 
             }
 
             $data = fetchActiveOperationalData($pdo);
-            $data['doctors'] = $pdo->query("SELECT * FROM doctors ORDER BY name_ar")->fetchAll();
+            $data['doctors'] = fetchDoctorsWithHospital($pdo);
             $data['patients'] = $pdo->query("SELECT * FROM patients ORDER BY name_ar")->fetchAll();
             $data['stats'] = getStats($pdo);
             $data['success'] = true;
@@ -1858,7 +1909,7 @@ if (isset($_POST['action']) && $_POST['action'] !== 'login' && $_POST['action'] 
             $stmt->execute([$amount, $leave_id]);
             $pdo->prepare("DELETE FROM notifications WHERE leave_id = ? AND type = 'payment'")->execute([$leave_id]);
             $data = fetchActiveOperationalData($pdo);
-            $data['doctors'] = $pdo->query("SELECT * FROM doctors ORDER BY name_ar")->fetchAll();
+            $data['doctors'] = fetchDoctorsWithHospital($pdo);
             $data['patients'] = $pdo->query("SELECT * FROM patients ORDER BY name_ar")->fetchAll();
             $data['stats'] = getStats($pdo);
             $data['success'] = true;
@@ -1889,7 +1940,7 @@ if (isset($_POST['action']) && $_POST['action'] !== 'login' && $_POST['action'] 
             $doctor = $pdo->prepare("SELECT * FROM doctors WHERE id = ?");
             $doctor->execute([$doctorId]);
             $doctorData = $doctor->fetch();
-            $doctors = $pdo->query("SELECT * FROM doctors ORDER BY name_ar")->fetchAll();
+            $doctors = fetchDoctorsWithHospital($pdo);
             echo json_encode([
                 'success' => true,
                 'message' => 'تمت إضافة الطبيب بنجاح.',
@@ -1901,6 +1952,7 @@ if (isset($_POST['action']) && $_POST['action'] !== 'login' && $_POST['action'] 
 
         case 'add_doctors_batch':
             $batchText = trim($_POST['doctors_batch_text'] ?? '');
+            $batch_hospital_id = intval($_POST['doctor_hospital_id'] ?? 0) ?: null;
             $parsedDoctors = parseDoctorsBatchInput($batchText);
             if (empty($parsedDoctors)) {
                 echo json_encode([
@@ -1911,7 +1963,7 @@ if (isset($_POST['action']) && $_POST['action'] !== 'login' && $_POST['action'] 
             }
 
             $checkStmt = $pdo->prepare("SELECT id, note FROM doctors WHERE (name_ar = ? OR name = ?) AND (title_ar = ? OR title = ?) LIMIT 1");
-            $insertStmt = $pdo->prepare("INSERT INTO doctors (name, name_ar, title, title_ar, note) VALUES (?, ?, ?, ?, ?)");
+            $insertStmt = $pdo->prepare("INSERT INTO doctors (name, name_ar, title, title_ar, note, hospital_id) VALUES (?, ?, ?, ?, ?, ?)");
             $updateNoteStmt = $pdo->prepare("UPDATE doctors SET note = ? WHERE id = ?");
 
             $inserted = 0;
@@ -1940,11 +1992,11 @@ if (isset($_POST['action']) && $_POST['action'] !== 'login' && $_POST['action'] 
                     continue;
                 }
 
-                $insertStmt->execute([$name, $name, $title, $title, $note]);
+                $insertStmt->execute([$name, $name, $title, $title, $note, $batch_hospital_id]);
                 $inserted++;
             }
 
-            $doctors = $pdo->query("SELECT * FROM doctors ORDER BY name_ar")->fetchAll();
+            $doctors = fetchDoctorsWithHospital($pdo);
             $summaryMessage = "تمت معالجة الدفعة بنجاح: أضيف {$inserted}، تحدّث {$updated}، مكرّر {$duplicates}.";
             if (!empty($errors)) {
                 $summaryMessage .= " أخطاء: " . implode(' | ', array_slice($errors, 0, 3));
@@ -1986,7 +2038,7 @@ if (isset($_POST['action']) && $_POST['action'] !== 'login' && $_POST['action'] 
             $doctor = $pdo->prepare("SELECT * FROM doctors WHERE id = ?");
             $doctor->execute([$id]);
             $doctorData = $doctor->fetch();
-            $doctors = $pdo->query("SELECT * FROM doctors ORDER BY name_ar")->fetchAll();
+            $doctors = fetchDoctorsWithHospital($pdo);
             echo json_encode([
                 'success' => true,
                 'message' => 'تم تعديل الطبيب بنجاح.',
@@ -1999,7 +2051,7 @@ if (isset($_POST['action']) && $_POST['action'] !== 'login' && $_POST['action'] 
         case 'delete_doctor':
             $id = intval($_POST['doctor_id'] ?? 0);
             $pdo->prepare("DELETE FROM doctors WHERE id = ?")->execute([$id]);
-            $doctors = $pdo->query("SELECT * FROM doctors ORDER BY name_ar")->fetchAll();
+            $doctors = fetchDoctorsWithHospital($pdo);
             echo json_encode([
                 'success' => true,
                 'message' => 'تم حذف الطبيب بنجاح.',
@@ -2309,7 +2361,7 @@ if (isset($_POST['action']) && $_POST['action'] !== 'login' && $_POST['action'] 
             break;
 
         case 'fetch_doctors':
-            $doctors = $pdo->query("SELECT * FROM doctors ORDER BY name_ar")->fetchAll();
+            $doctors = fetchDoctorsWithHospital($pdo);
             echo json_encode(['success' => true, 'doctors' => $doctors, 'stats' => getStats($pdo)]);
             break;
 
@@ -2825,9 +2877,9 @@ if (isset($_POST['action']) && $_POST['action'] !== 'login' && $_POST['action'] 
 $loggedIn = is_logged_in();
 
 if ($loggedIn) {
-    $doctors = $pdo->query("SELECT d.*, h.name_ar AS hospital_name_ar FROM doctors d LEFT JOIN hospitals h ON d.hospital_id = h.id ORDER BY d.name_ar")->fetchAll();
+    $doctors = fetchDoctorsWithHospital($pdo);
     $patients = $pdo->query("SELECT * FROM patients ORDER BY name_ar")->fetchAll();
-    $hospitals = $pdo->query("SELECT id, name_ar, name_en, license_number, logo_path, logo_url, service_prefix, created_at, updated_at, CASE WHEN logo_data IS NOT NULL AND logo_data != '' THEN 'has_logo' ELSE '' END AS has_logo_data FROM hospitals ORDER BY name_ar")->fetchAll();
+    $hospitals = fetchHospitalsList($pdo);
     
     $data = fetchAllData($pdo);
     $leaves = $data['leaves'];
@@ -4926,7 +4978,7 @@ if (!in_array($uiDataViewMode, ['table','compact','cards','zebra','glass','minim
 
                         <!-- المريض -->
                         <div class="col-md-6">
-                            <label class="form-label">المريض</label>
+                            <div class="d-flex justify-content-between align-items-center mb-1"><label class="form-label mb-0">المريض</label><button type="button" class="btn btn-sm btn-outline-success" id="openQuickPatientModal"><i class="bi bi-person-plus"></i> إضافة مريض</button></div>
                             <input type="text" class="form-control form-control-sm mb-2" id="patient_select_search" placeholder="بحث سريع باسم المريض أو الهوية...">
                             <select class="form-select" name="patient_select" id="patient_select">
                                 <option value="">-- اختر مريضاً --</option>
@@ -4947,7 +4999,7 @@ if (!in_array($uiDataViewMode, ['table','compact','cards','zebra','glass','minim
 
                         <!-- الطبيب -->
                         <div class="col-md-6">
-                            <label class="form-label">الطبيب (يتغير حسب المستشفى)</label>
+                            <div class="d-flex justify-content-between align-items-center mb-1"><label class="form-label mb-0">الطبيب (يتغير حسب المستشفى)</label><button type="button" class="btn btn-sm btn-outline-primary" id="openQuickDoctorModal"><i class="bi bi-person-badge"></i> إضافة طبيب</button></div>
                             <input type="text" class="form-control form-control-sm mb-2" id="doctor_select_search" placeholder="بحث سريع باسم الطبيب...">
                             <select class="form-select" name="doctor_select" id="doctor_select">
                                 <option value="">-- اختر طبيباً --</option>
@@ -5160,8 +5212,11 @@ if (!in_array($uiDataViewMode, ['table','compact','cards','zebra','glass','minim
                             <small class="text-muted">كل سطر = اسم | مسمى | ملاحظة (اختياري)</small>
                         </div>
                         <form id="addDoctorsBatchForm" class="row g-2">
-                            <div class="col-md-10">
+                            <div class="col-md-8">
                                 <textarea class="form-control" id="doctors_batch_text" name="doctors_batch_text" rows="4" placeholder="د. أحمد علي | استشاري باطنية | دوام مسائي&#10;د. نورة خالد | أخصائي أطفال&#10;د. سامي محمد - نائب أول جراحة - متعاون"></textarea>
+                            </div>
+                            <div class="col-md-2">
+                                <select class="form-select" name="doctor_hospital_id" id="batch_doctor_hospital_id"><option value="">المستشفى (اختياري)</option></select>
                             </div>
                             <div class="col-md-2 d-grid">
                                 <button type="submit" class="btn btn-outline-primary">
@@ -5456,6 +5511,17 @@ if (!in_array($uiDataViewMode, ['table','compact','cards','zebra','glass','minim
                             <input type="date" class="form-control" name="issue_date_edit" id="issue_date_edit" required>
                         </div>
                         <div class="col-md-4">
+                            <label class="form-label">وقت الإصدار</label>
+                            <input type="time" class="form-control" name="issue_time_edit" id="issue_time_edit" value="09:00">
+                        </div>
+                        <div class="col-md-4">
+                            <label class="form-label">الفترة</label>
+                            <select class="form-select" name="issue_period_edit" id="issue_period_edit">
+                                <option value="AM">صباحاً (AM)</option>
+                                <option value="PM">مساءً (PM)</option>
+                            </select>
+                        </div>
+                        <div class="col-md-4">
                             <label class="form-label">بداية الإجازة</label>
                             <input type="date" class="form-control" name="start_date_edit" id="start_date_edit" required>
                         </div>
@@ -5556,6 +5622,17 @@ if (!in_array($uiDataViewMode, ['table','compact','cards','zebra','glass','minim
                             <input type="date" class="form-control" name="dup_issue_date" id="dup_issue_date" required>
                         </div>
                         <div class="col-md-4">
+                            <label class="form-label">وقت الإصدار</label>
+                            <input type="time" class="form-control" name="dup_issue_time" id="dup_issue_time" value="09:00">
+                        </div>
+                        <div class="col-md-4">
+                            <label class="form-label">الفترة</label>
+                            <select class="form-select" name="dup_issue_period" id="dup_issue_period">
+                                <option value="AM">صباحاً (AM)</option>
+                                <option value="PM">مساءً (PM)</option>
+                            </select>
+                        </div>
+                        <div class="col-md-4">
                             <label class="form-label">بداية الإجازة</label>
                             <input type="date" class="form-control" name="dup_start_date" id="dup_start_date" required>
                         </div>
@@ -5625,6 +5702,40 @@ if (!in_array($uiDataViewMode, ['table','compact','cards','zebra','glass','minim
             </div>
         </div>
     </div>
+</div>
+
+
+<!-- ======================== مودالات إضافة سريعة من الإجازة ======================== -->
+<div class="modal fade" id="quickPatientModal" tabindex="-1" aria-hidden="true">
+    <div class="modal-dialog modal-dialog-centered modal-dialog-scrollable"><div class="modal-content">
+        <div class="modal-header"><h5 class="modal-title"><i class="bi bi-person-plus text-success"></i> إضافة مريض سريعاً</h5><button type="button" class="btn-close" data-bs-dismiss="modal"></button></div>
+        <div class="modal-body"><form id="quickPatientForm" class="row g-3">
+            <div class="col-md-6"><label class="form-label">اسم المريض (عربي) *</label><input type="text" class="form-control" name="patient_name" required></div>
+            <div class="col-md-6"><label class="form-label">Patient Name (EN)</label><input type="text" class="form-control" name="patient_name_en"></div>
+            <div class="col-md-6"><label class="form-label">رقم الهوية *</label><input type="text" class="form-control" name="identity_number" required></div>
+            <div class="col-md-6"><label class="form-label">الهاتف</label><input type="text" class="form-control" name="phone"></div>
+            <div class="col-md-6"><label class="form-label">جهة العمل (عربي)</label><input type="text" class="form-control" name="patient_employer_ar"></div>
+            <div class="col-md-6"><label class="form-label">Employer (EN)</label><input type="text" class="form-control" name="patient_employer_en"></div>
+            <div class="col-md-6"><label class="form-label">الجنسية</label><input type="text" class="form-control" name="patient_nationality_ar"></div>
+            <div class="col-md-6"><label class="form-label">Nationality (EN)</label><input type="text" class="form-control" name="patient_nationality_en"></div>
+            <div class="col-12"><label class="form-label">رابط المجلد</label><input type="url" class="form-control" name="folder_link" placeholder="https://..."></div>
+        </form></div>
+        <div class="modal-footer"><button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">إلغاء</button><button type="button" class="btn btn-success-custom" id="saveQuickPatient">إضافة واختيار</button></div>
+    </div></div>
+</div>
+<div class="modal fade" id="quickDoctorModal" tabindex="-1" aria-hidden="true">
+    <div class="modal-dialog modal-dialog-centered"><div class="modal-content">
+        <div class="modal-header"><h5 class="modal-title"><i class="bi bi-person-badge text-primary"></i> إضافة طبيب سريعاً</h5><button type="button" class="btn-close" data-bs-dismiss="modal"></button></div>
+        <div class="modal-body"><form id="quickDoctorForm" class="row g-3">
+            <div class="col-md-6"><label class="form-label">اسم الطبيب (عربي) *</label><input type="text" class="form-control" name="doctor_name" required></div>
+            <div class="col-md-6"><label class="form-label">Doctor Name (EN)</label><input type="text" class="form-control" name="doctor_name_en"></div>
+            <div class="col-md-6"><label class="form-label">المسمى (عربي) *</label><input type="text" class="form-control" name="doctor_title" required></div>
+            <div class="col-md-6"><label class="form-label">Title (EN)</label><input type="text" class="form-control" name="doctor_title_en"></div>
+            <div class="col-md-6"><label class="form-label">المستشفى</label><select class="form-select" name="doctor_hospital_id" id="quick_doctor_hospital_id"><option value="">المستشفى (اختياري)</option></select></div>
+            <div class="col-md-6"><label class="form-label">ملاحظة</label><input type="text" class="form-control" name="doctor_note"></div>
+        </form></div>
+        <div class="modal-footer"><button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">إلغاء</button><button type="button" class="btn btn-gradient" id="saveQuickDoctor">إضافة واختيار</button></div>
+    </div></div>
 </div>
 
 <!-- ======================== مودال التأكيد ======================== -->
@@ -6903,6 +7014,8 @@ document.addEventListener('DOMContentLoaded', () => {
     const payConfirmModal = new bootstrap.Modal(document.getElementById('payConfirmModal'));
     const editDoctorModal = new bootstrap.Modal(document.getElementById('editDoctorModal'));
     const editPatientModal = new bootstrap.Modal(document.getElementById('editPatientModal'));
+    const quickPatientModal = new bootstrap.Modal(document.getElementById('quickPatientModal'));
+    const quickDoctorModal = new bootstrap.Modal(document.getElementById('quickDoctorModal'));
 
     let modalStackLevel = 1060;
     function setupModalStacking(modalId) {
@@ -6927,7 +7040,7 @@ document.addEventListener('DOMContentLoaded', () => {
         });
     }
 
-    ['editLeaveModal','duplicateLeaveModal','confirmModal','leaveDetailsModal','viewQueriesModal','paymentNotifsModal','payConfirmModal','editDoctorModal','editPatientModal','settingsModal','addUserModal','editUserModal','sessionsModal'].forEach(setupModalStacking);
+    ['editLeaveModal','duplicateLeaveModal','quickPatientModal','quickDoctorModal','confirmModal','leaveDetailsModal','viewQueriesModal','paymentNotifsModal','payConfirmModal','editDoctorModal','editPatientModal','settingsModal','addUserModal','editUserModal','sessionsModal'].forEach(setupModalStacking);
 
     const confirmMessage = document.getElementById('confirmMessage');
     const confirmYesBtn = document.getElementById('confirmYesBtn');
@@ -7535,6 +7648,8 @@ document.addEventListener('DOMContentLoaded', () => {
         document.getElementById('doctor_id_edit_search').value = '';
         document.getElementById('editDoctorManualFields').classList.add('hidden-field');
         document.getElementById('issue_date_edit').value = leave.issue_date;
+        document.getElementById('issue_time_edit').value = leave.issue_time || '09:00';
+        document.getElementById('issue_period_edit').value = leave.issue_period || 'AM';
         document.getElementById('start_date_edit').value = leave.start_date;
         document.getElementById('end_date_edit').value = leave.end_date;
         document.getElementById('days_count_edit').value = leave.days_count;
@@ -7621,6 +7736,8 @@ document.addEventListener('DOMContentLoaded', () => {
         document.getElementById('dup_patient_name_display').value = `${leave.patient_name} (${leave.identity_number})`;
         document.getElementById('dup_doctor_select').value = leave.doctor_id || '';
         document.getElementById('dup_issue_date').value = leave.issue_date;
+        document.getElementById('dup_issue_time').value = leave.issue_time || '09:00';
+        document.getElementById('dup_issue_period').value = leave.issue_period || 'AM';
         document.getElementById('dup_start_date').value = leave.start_date;
         document.getElementById('dup_end_date').value = leave.end_date;
         document.getElementById('dup_days_count').value = leave.days_count;
@@ -8026,6 +8143,59 @@ document.addEventListener('DOMContentLoaded', () => {
         confirmYesBtn.textContent = 'تأكيد';
     });
 
+
+    // ====== إضافة مريض/طبيب بسرعة من نموذج الإجازة ======
+    document.getElementById('openQuickPatientModal')?.addEventListener('click', () => {
+        document.getElementById('quickPatientForm')?.reset();
+        quickPatientModal.show();
+    });
+    document.getElementById('openQuickDoctorModal')?.addEventListener('click', () => {
+        document.getElementById('quickDoctorForm')?.reset();
+        const selectedHospital = document.getElementById('hospital_id')?.value || '';
+        const quickHospital = document.getElementById('quick_doctor_hospital_id');
+        if (quickHospital) quickHospital.value = selectedHospital;
+        quickDoctorModal.show();
+    });
+    document.getElementById('saveQuickPatient')?.addEventListener('click', async () => {
+        showLoading();
+        try {
+            const formData = new FormData(document.getElementById('quickPatientForm'));
+            formData.append('action', 'add_patient');
+            formData.append('csrf_token', CSRF_TOKEN);
+            const res = await fetch(REQUEST_URL, { method: 'POST', body: formData, headers: { 'X-Requested-With': 'XMLHttpRequest' } });
+            const result = await res.json();
+            hideLoading();
+            if (result.success) {
+                showToast(result.message, 'success');
+                currentTableData.patients = result.patients || currentTableData.patients;
+                applyPatientsFilters();
+                updatePatientSelects(currentTableData.patients);
+                if (result.patient?.id) document.getElementById('patient_select').value = result.patient.id;
+                quickPatientModal.hide();
+            } else { showToast(result.message || 'تعذر إضافة المريض.', 'danger'); }
+        } catch (err) { hideLoading(); showToast('خطأ في الاتصال أثناء إضافة المريض.', 'danger'); }
+    });
+    document.getElementById('saveQuickDoctor')?.addEventListener('click', async () => {
+        showLoading();
+        try {
+            const formData = new FormData(document.getElementById('quickDoctorForm'));
+            formData.append('action', 'add_doctor');
+            formData.append('csrf_token', CSRF_TOKEN);
+            const res = await fetch(REQUEST_URL, { method: 'POST', body: formData, headers: { 'X-Requested-With': 'XMLHttpRequest' } });
+            const result = await res.json();
+            hideLoading();
+            if (result.success) {
+                showToast(result.message, 'success');
+                currentTableData.doctors = result.doctors || currentTableData.doctors;
+                applyDoctorsFilters();
+                updateDoctorSelects(currentTableData.doctors);
+                document.getElementById('hospital_id')?.dispatchEvent(new Event('change'));
+                if (result.doctor?.id) document.getElementById('doctor_select').value = result.doctor.id;
+                quickDoctorModal.hide();
+            } else { showToast(result.message || 'تعذر إضافة الطبيب.', 'danger'); }
+        } catch (err) { hideLoading(); showToast('خطأ في الاتصال أثناء إضافة الطبيب.', 'danger'); }
+    });
+
     // ====== إدارة الأطباء ======
     document.getElementById('addDoctorForm').addEventListener('submit', async (e) => {
         e.preventDefault();
@@ -8056,7 +8226,7 @@ document.addEventListener('DOMContentLoaded', () => {
             return;
         }
         showLoading();
-        const result = await sendAjaxRequest('add_doctors_batch', { doctors_batch_text: raw });
+        const result = await sendAjaxRequest('add_doctors_batch', { doctors_batch_text: raw, doctor_hospital_id: document.getElementById('batch_doctor_hospital_id')?.value || '' });
         hideLoading();
         if (result.success) {
             showToast(result.message, 'success');
@@ -8112,6 +8282,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
     document.getElementById('saveEditDoctor').addEventListener('click', async () => {
         showLoading();
+        try {
         const formData = new FormData(document.getElementById('editDoctorForm'));
         formData.append('action', 'edit_doctor');
         formData.append('csrf_token', CSRF_TOKEN);
@@ -8126,6 +8297,7 @@ document.addEventListener('DOMContentLoaded', () => {
             applyDoctorsFilters();
             updateDoctorSelects(currentTableData.doctors);
         } else { showToast(result.message, 'danger'); }
+        } catch (err) { hideLoading(); showToast('خطأ في الاتصال أثناء تعديل الطبيب.', 'danger'); }
     });
 
     // ====== إدارة المرضى ======
@@ -8191,6 +8363,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
     document.getElementById('saveEditPatient').addEventListener('click', async () => {
         showLoading();
+        try {
         const formData = new FormData(document.getElementById('editPatientForm'));
         formData.append('action', 'edit_patient');
         formData.append('csrf_token', CSRF_TOKEN);
@@ -8205,6 +8378,7 @@ document.addEventListener('DOMContentLoaded', () => {
             applyPatientsFilters();
             updatePatientSelects(currentTableData.patients);
         } else { showToast(result.message, 'danger'); }
+        } catch (err) { hideLoading(); showToast('خطأ في الاتصال أثناء تعديل المريض.', 'danger'); }
     });
 
     // ====== إدارة المستخدمين ======
@@ -9208,7 +9382,7 @@ document.addEventListener('DOMContentLoaded', () => {
         }
     }
     function updateHospitalSelects() {
-        const selects = [document.querySelector('[name="doctor_hospital_id"]'), document.getElementById('hospital_id')];
+        const selects = Array.from(document.querySelectorAll('[name="doctor_hospital_id"]')).concat([document.getElementById('hospital_id')]);
         selects.forEach(sel => {
             if (!sel) return;
             const curVal = sel.value;
