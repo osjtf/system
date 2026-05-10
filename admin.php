@@ -546,7 +546,9 @@ function normalizeIssueTimeForStorage(?string $time, ?string $period = null): ?s
     if (preg_match('/^(\d{1,2}):(\d{2})(?::\d{2})?$/', $time, $m)) {
         $hour = max(0, min(23, (int)$m[1]));
         $minute = max(0, min(59, (int)$m[2]));
-        if (strtoupper((string)$period) === 'AM' && $hour === 0) {
+        if ($hour > 12) {
+            $hour -= 12;
+        } elseif ($hour === 0) {
             $hour = 12;
         }
         return sprintf('%02d:%02d', $hour, $minute);
@@ -1029,7 +1031,7 @@ function handleGeneratePdf($pdo, $leave_id, $pdfMode = 'preview') {
 
     // Duration lines
     $durationEn = $daysEn . ' ( ' . $startEn . ' to ' . $endEn . ' )';
-    $durationAr = '<span style="font-family: \'Times New Roman\', serif; font-size: 14.5px; font-weight: 400;">' . $daysAr . '</span> <span style="font-family: \'Noto Sans Arabic\', sans-serif; font-size: 14.5px; font-weight: 400;">' . $daysArWord . '</span> ( ' . formatHijriDateSpan($endHj) . ' <span style="font-family: \'Noto Sans Arabic\', sans-serif; font-size: 13.5px; font-weight: 400;">إلى</span> ' . formatHijriDateSpan($startHj) . ' )';  // RTL display: end Hijri إلى start Hijri with isolated LTR date numbers
+    $durationAr = '<span style="font-family: \'Times New Roman\', serif; font-size: 14.5px; font-weight: 400;">' . $daysAr . '</span> <span style="font-family: \'Noto Sans Arabic\', sans-serif; font-size: 14.5px; font-weight: 400;">' . $daysArWord . '</span> ( ' . formatHijriDateSpan($startHj) . ' <span style="font-family: \'Noto Sans Arabic\', sans-serif; font-size: 13.5px; font-weight: 400;">إلى</span> ' . formatHijriDateSpan($endHj) . ' )';  // RTL display: start Hijri إلى end Hijri with isolated LTR date numbers
 
     // ==================== CSS ====================
     $reportCSS = 'html{line-height:1.15}body{margin:0}*{box-sizing:border-box;border-width:0;border-style:solid;-webkit-font-smoothing:antialiased}p,li,ul,pre,div,h1,h2,h3,h4,h5,h6,figure,blockquote,figcaption{margin:0;padding:0}a{color:inherit;text-decoration:inherit}';
@@ -1484,6 +1486,18 @@ if (isset($_POST['action']) && $_POST['action'] !== 'login' && $_POST['action'] 
     }
     
     $action = $_POST['action'] ?? $_GET['action'] ?? '';
+
+    set_exception_handler(function(Throwable $e) {
+        if (!headers_sent()) {
+            header('Content-Type: application/json; charset=utf-8');
+            http_response_code(200);
+        }
+        echo json_encode([
+            'success' => false,
+            'message' => 'تعذّر تنفيذ العملية: ' . $e->getMessage()
+        ], JSON_UNESCAPED_UNICODE);
+        exit;
+    });
 
     // ======================== معالجة الإجراءات ========================
     switch ($action) {
@@ -2151,16 +2165,27 @@ if (isset($_POST['action']) && $_POST['action'] !== 'login' && $_POST['action'] 
                 echo json_encode(['success' => false, 'message' => 'يرجى إدخال اسم المريض ورقم هويته.']);
                 exit;
             }
-            $stmt = $pdo->prepare("INSERT INTO patients (name, identity_number, phone, folder_link, name_ar, name_en, employer_ar, employer_en, nationality_ar, nationality_en) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)");
-            $stmt->execute([$name, $identity, $phone, $folder_link, $name_ar, $name_en, $employer_ar, $employer_en, $nationality_ar, $nationality_en]);
-            $patientId = $pdo->lastInsertId();
+            $existingStmt = $pdo->prepare("SELECT id FROM patients WHERE identity_number = ? LIMIT 1");
+            $existingStmt->execute([$identity]);
+            $existingPatientId = intval($existingStmt->fetchColumn() ?: 0);
+            if ($existingPatientId > 0) {
+                $stmt = $pdo->prepare("UPDATE patients SET name = ?, phone = ?, folder_link = ?, name_ar = ?, name_en = ?, employer_ar = ?, employer_en = ?, nationality_ar = ?, nationality_en = ? WHERE id = ?");
+                $stmt->execute([$name, $phone, $folder_link, $name_ar, $name_en, $employer_ar, $employer_en, $nationality_ar, $nationality_en, $existingPatientId]);
+                $patientId = $existingPatientId;
+                $message = 'المريض موجود مسبقاً؛ تم تحديث بياناته واختياره.';
+            } else {
+                $stmt = $pdo->prepare("INSERT INTO patients (name, identity_number, phone, folder_link, name_ar, name_en, employer_ar, employer_en, nationality_ar, nationality_en) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)");
+                $stmt->execute([$name, $identity, $phone, $folder_link, $name_ar, $name_en, $employer_ar, $employer_en, $nationality_ar, $nationality_en]);
+                $patientId = $pdo->lastInsertId();
+                $message = 'تمت إضافة المريض بنجاح.';
+            }
             $patient = $pdo->prepare("SELECT * FROM patients WHERE id = ?");
             $patient->execute([$patientId]);
             $patientData = $patient->fetch();
             $patients = $pdo->query("SELECT * FROM patients ORDER BY name_ar")->fetchAll();
             echo json_encode([
                 'success' => true,
-                'message' => 'تمت إضافة المريض بنجاح.',
+                'message' => $message,
                 'patient' => $patientData,
                 'patients' => $patients,
                 'stats' => getStats($pdo)
@@ -2182,6 +2207,12 @@ if (isset($_POST['action']) && $_POST['action'] !== 'login' && $_POST['action'] 
             if (empty($name) && !empty($name_ar)) $name = $name_ar;
             if ($id <= 0 || empty($name) || empty($identity)) {
                 echo json_encode(['success' => false, 'message' => 'بيانات غير صالحة.']);
+                exit;
+            }
+            $duplicateStmt = $pdo->prepare("SELECT id FROM patients WHERE identity_number = ? AND id <> ? LIMIT 1");
+            $duplicateStmt->execute([$identity, $id]);
+            if ($duplicateStmt->fetchColumn()) {
+                echo json_encode(['success' => false, 'message' => 'رقم الهوية مستخدم لمريض آخر.']);
                 exit;
             }
             $stmt = $pdo->prepare("UPDATE patients SET name = ?, identity_number = ?, phone = ?, folder_link = ?, name_ar = ?, name_en = ?, employer_ar = ?, employer_en = ?, nationality_ar = ?, nationality_en = ? WHERE id = ?");
@@ -8000,21 +8031,26 @@ document.addEventListener('DOMContentLoaded', () => {
     document.getElementById('addDoctorForm').addEventListener('submit', async (e) => {
         e.preventDefault();
         showLoading();
-        const formData = new FormData(e.target);
-        formData.append('action', 'add_doctor');
-        formData.append('csrf_token', CSRF_TOKEN);
-        const res = await fetch(REQUEST_URL, { method: 'POST', body: formData, headers: { 'X-Requested-With': 'XMLHttpRequest' } });
-        const result = await res.json();
-        hideLoading();
-        if (result.success) {
-            showToast(result.message, 'success');
-            e.target.reset();
-            currentTableData.doctors = result.doctors;
-            document.getElementById('searchDoctors').value = '';
-            applyDoctorsFilters();
-            updateDoctorSelects(currentTableData.doctors);
-            if (result.stats) updateStats(result.stats);
-        } else { showToast(result.message, 'danger'); }
+        try {
+            const formData = new FormData(e.target);
+            formData.append('action', 'add_doctor');
+            formData.append('csrf_token', CSRF_TOKEN);
+            const res = await fetch(REQUEST_URL, { method: 'POST', body: formData, headers: { 'X-Requested-With': 'XMLHttpRequest' } });
+            const result = await res.json();
+            if (result.success) {
+                showToast(result.message, 'success');
+                e.target.reset();
+                currentTableData.doctors = result.doctors || [];
+                document.getElementById('searchDoctors').value = '';
+                applyDoctorsFilters();
+                updateDoctorSelects(currentTableData.doctors);
+                if (result.stats) updateStats(result.stats);
+            } else { showToast(result.message || 'تعذّرت إضافة الطبيب.', 'danger'); }
+        } catch (err) {
+            showToast('تعذّرت إضافة الطبيب. تم إيقاف التحميل؛ تحقق من الاتصال أو بيانات النموذج.', 'danger');
+        } finally {
+            hideLoading();
+        }
     });
 
     document.getElementById('addDoctorsBatchForm')?.addEventListener('submit', async (e) => {
@@ -8113,21 +8149,26 @@ document.addEventListener('DOMContentLoaded', () => {
     document.getElementById('addPatientForm').addEventListener('submit', async (e) => {
         e.preventDefault();
         showLoading();
-        const formData = new FormData(e.target);
-        formData.append('action', 'add_patient');
-        formData.append('csrf_token', CSRF_TOKEN);
-        const res = await fetch(REQUEST_URL, { method: 'POST', body: formData, headers: { 'X-Requested-With': 'XMLHttpRequest' } });
-        const result = await res.json();
-        hideLoading();
-        if (result.success) {
-            showToast(result.message, 'success');
-            e.target.reset();
-            currentTableData.patients = result.patients;
-            document.getElementById('searchPatients').value = '';
-            applyPatientsFilters();
-            updatePatientSelects(currentTableData.patients);
-            if (result.stats) updateStats(result.stats);
-        } else { showToast(result.message, 'danger'); }
+        try {
+            const formData = new FormData(e.target);
+            formData.append('action', 'add_patient');
+            formData.append('csrf_token', CSRF_TOKEN);
+            const res = await fetch(REQUEST_URL, { method: 'POST', body: formData, headers: { 'X-Requested-With': 'XMLHttpRequest' } });
+            const result = await res.json();
+            if (result.success) {
+                showToast(result.message, 'success');
+                e.target.reset();
+                currentTableData.patients = result.patients || [];
+                document.getElementById('searchPatients').value = '';
+                applyPatientsFilters();
+                updatePatientSelects(currentTableData.patients);
+                if (result.stats) updateStats(result.stats);
+            } else { showToast(result.message || 'تعذّرت إضافة المريض.', 'danger'); }
+        } catch (err) {
+            showToast('تعذّرت إضافة المريض. تم إيقاف التحميل؛ تحقق من الاتصال أو بيانات النموذج.', 'danger');
+        } finally {
+            hideLoading();
+        }
     });
 
     patientsTable.addEventListener('click', (e) => {
