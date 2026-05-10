@@ -540,6 +540,30 @@ function getArabicMonthName($month) {
     return $months[(int)$month] ?? '';
 }
 
+function normalizeIssueTimeForStorage(?string $time, ?string $period = null): ?string {
+    $time = trim((string)$time);
+    if ($time === '') return null;
+    if (preg_match('/^(\d{1,2}):(\d{2})(?::\d{2})?$/', $time, $m)) {
+        $hour = max(0, min(23, (int)$m[1]));
+        $minute = max(0, min(59, (int)$m[2]));
+        if (strtoupper((string)$period) === 'AM' && $hour === 0) {
+            $hour = 12;
+        }
+        return sprintf('%02d:%02d', $hour, $minute);
+    }
+    return $time;
+}
+
+function formatIssueTimeForDisplay(?string $time, ?string $period = null): string {
+    $normalized = normalizeIssueTimeForStorage($time, $period);
+    return $normalized ?: '09:00';
+}
+
+function formatHijriDateSpan(string $date): string {
+    $safeDate = htmlspecialchars($date, ENT_QUOTES);
+    return '<span dir="ltr" style="unicode-bidi:isolate;direction:ltr;display:inline-block;">' . $safeDate . '</span>';
+}
+
 function formatDaysText($days) {
     $days = (int)$days;
     return $days . ($days === 1 ? ' day' : ' days');
@@ -928,7 +952,7 @@ function handleGeneratePdf($pdo, $leave_id, $pdfMode = 'preview') {
     $days = (int)($lv['days_count'] ?? 1);
     $daysEn = $days . ($days === 1 ? ' day' : ' days');
     $daysAr = $days == 1 ? '1' : ($days == 2 ? '2' : (string)$days);
-    $daysArWord = $days == 1 ? 'يوم' : ($days == 2 ? 'يومين' : 'أيام');
+    $daysArWord = 'يوم';
 
     $startG = $lv['start_date'] ?? '';
     $endG = $lv['end_date'] ?? '';
@@ -993,8 +1017,8 @@ function handleGeneratePdf($pdo, $leave_id, $pdfMode = 'preview') {
     }
 
     // Timestamp
-    $issueTime = $lv['issue_time'] ?? '09:00';
     $issuePeriod = $lv['issue_period'] ?? 'AM';
+    $issueTime = formatIssueTimeForDisplay($lv['issue_time'] ?? '09:00', $issuePeriod);
     $issueDateObj = DateTime::createFromFormat('Y-m-d', $issueG);
     $dayNameEn = $issueDateObj ? $issueDateObj->format('l') : '';
     $monthNameEn = $issueDateObj ? $issueDateObj->format('F') : '';
@@ -1005,7 +1029,7 @@ function handleGeneratePdf($pdo, $leave_id, $pdfMode = 'preview') {
 
     // Duration lines
     $durationEn = $daysEn . ' ( ' . $startEn . ' to ' . $endEn . ' )';
-    $durationAr = '<span style="font-family: \'Times New Roman\', serif; font-size: 14.5px; font-weight: 400;">' . $daysAr . '</span> <span style="font-family: \'Noto Sans Arabic\', sans-serif; font-size: 14.5px; font-weight: 400;">' . $daysArWord . '</span> ( ' . $startHj . ' <span style="font-family: \'Noto Sans Arabic\', sans-serif; font-size: 13.5px; font-weight: 400;">إلى</span> ' . $endHj . ' )';  // Format: YYYY-MM-DD إلى YYYY-MM-DD with Noto Sans Arabic Regular 13.5px for إلى
+    $durationAr = '<span style="font-family: \'Times New Roman\', serif; font-size: 14.5px; font-weight: 400;">' . $daysAr . '</span> <span style="font-family: \'Noto Sans Arabic\', sans-serif; font-size: 14.5px; font-weight: 400;">' . $daysArWord . '</span> ( ' . formatHijriDateSpan($endHj) . ' <span style="font-family: \'Noto Sans Arabic\', sans-serif; font-size: 13.5px; font-weight: 400;">إلى</span> ' . formatHijriDateSpan($startHj) . ' )';  // RTL display: end Hijri إلى start Hijri with isolated LTR date numbers
 
     // ==================== CSS ====================
     $reportCSS = 'html{line-height:1.15}body{margin:0}*{box-sizing:border-box;border-width:0;border-style:solid;-webkit-font-smoothing:antialiased}p,li,ul,pre,div,h1,h2,h3,h4,h5,h6,figure,blockquote,figcaption{margin:0;padding:0}a{color:inherit;text-decoration:inherit}';
@@ -1501,6 +1525,9 @@ if (isset($_POST['action']) && $_POST['action'] !== 'login' && $_POST['action'] 
             $logo_offset_x = floatval($_POST['logo_offset_x'] ?? 0);
             $logo_offset_y = floatval($_POST['logo_offset_y'] ?? 0);
             if ($id <= 0 || empty($name_ar)) { echo json_encode(['success'=>false,'message'=>'بيانات غير صالحة.']); exit; }
+            $oldPrefixStmt = $pdo->prepare("SELECT service_prefix FROM hospitals WHERE id = ?");
+            $oldPrefixStmt->execute([$id]);
+            $oldPrefix = strtoupper((string)($oldPrefixStmt->fetchColumn() ?: ''));
             $logo_data = uploadHospitalLogo($_FILES['hospital_logo'] ?? []);
             if (!$logo_data && !empty($logo_url)) $logo_data = downloadLogoFromUrl($logo_url);
             if ($logo_data) {
@@ -1522,6 +1549,10 @@ if (isset($_POST['action']) && $_POST['action'] !== 'login' && $_POST['action'] 
             // Cascade update to leaves
             $cascadeStmt = $pdo->prepare("UPDATE sick_leaves SET hospital_name_ar = ?, hospital_name_en = ? WHERE hospital_id = ?");
             $cascadeStmt->execute([$name_ar, $name_en, $id]);
+            if ($oldPrefix && $oldPrefix !== $prefix && in_array($oldPrefix, ['GSL','PSL'], true)) {
+                $codeCascadeStmt = $pdo->prepare("UPDATE sick_leaves SET service_code = CONCAT(?, SUBSTRING(service_code, 4)) WHERE hospital_id = ? AND service_code LIKE ?");
+                $codeCascadeStmt->execute([$prefix, $id, $oldPrefix . '%']);
+            }
             $hospitals = $pdo->query("SELECT id, name_ar, name_en, license_number, logo_path, logo_url, service_prefix, logo_scale, logo_offset_x, logo_offset_y, created_at, updated_at, CASE WHEN logo_data IS NOT NULL AND logo_data != '' THEN 'has_logo' ELSE '' END AS has_logo_data FROM hospitals ORDER BY name_ar")->fetchAll();
             echo json_encode(['success'=>true,'message'=>'تم تعديل المستشفى بنجاح.','hospitals'=>$hospitals,'stats'=>getStats($pdo)]);
             break;
@@ -1584,6 +1615,7 @@ if (isset($_POST['action']) && $_POST['action'] !== 'login' && $_POST['action'] 
         case 'add_leave':
             $patient_id = null;
             $doctor_id = null;
+            $hospital_id = intval($_POST['hospital_id'] ?? 0) ?: null;
 
             // معالجة المريض
             $patient_select = $_POST['patient_select'] ?? '';
@@ -1620,8 +1652,8 @@ if (isset($_POST['action']) && $_POST['action'] !== 'login' && $_POST['action'] 
                     echo json_encode(['success' => false, 'message' => 'يرجى إدخال اسم الطبيب ومسمّاه الوظيفي.']);
                     exit;
                 }
-                $stmt = $pdo->prepare("INSERT INTO doctors (name, name_ar, title, title_ar, note) VALUES (?, ?, ?, ?, ?)");
-                $stmt->execute([$dName, $dName, $dTitle, $dTitle, $dNote]);
+                $stmt = $pdo->prepare("INSERT INTO doctors (name, name_ar, title, title_ar, note, hospital_id) VALUES (?, ?, ?, ?, ?, ?)");
+                $stmt->execute([$dName, $dName, $dTitle, $dTitle, $dNote, $hospital_id]);
                 $doctor_id = $pdo->lastInsertId();
             } else {
                 $doctor_id = intval($doctor_select);
@@ -1630,7 +1662,7 @@ if (isset($_POST['action']) && $_POST['action'] !== 'login' && $_POST['action'] 
             $issue_date = $_POST['issue_date'] ?? '';
             $issue_time = trim($_POST['issue_time'] ?? '');
             $issue_period = in_array(strtoupper(trim($_POST['issue_period'] ?? '')), ['AM','PM']) ? strtoupper(trim($_POST['issue_period'])) : null;
-            $hospital_id = intval($_POST['hospital_id'] ?? 0) ?: null;
+            $issue_time = normalizeIssueTimeForStorage($issue_time, $issue_period);
 
             // توليد رمز الخدمة - الحصول على البادئة من المستشفى
             $service_code_manual = trim($_POST['service_code_manual'] ?? '');
@@ -1724,6 +1756,7 @@ if (isset($_POST['action']) && $_POST['action'] !== 'login' && $_POST['action'] 
             $hospital_id_edit = intval($_POST['hospital_id_edit'] ?? 0) ?: null;
             $issue_time = trim($_POST['issue_time_edit'] ?? '');
             $issue_period = in_array(strtoupper(trim($_POST['issue_period_edit'] ?? '')), ['AM','PM']) ? strtoupper(trim($_POST['issue_period_edit'])) : null;
+            $issue_time = normalizeIssueTimeForStorage($issue_time, $issue_period);
             
             // خاصية تغيير الطبيب
             $doctor_id_edit_raw = $_POST['doctor_id_edit'] ?? '';
@@ -1828,6 +1861,7 @@ if (isset($_POST['action']) && $_POST['action'] !== 'login' && $_POST['action'] 
             $hospital_id = intval($_POST['dup_hospital_id'] ?? 0) ?: null;
             $issue_time = trim($_POST['dup_issue_time'] ?? '');
             $issue_period = in_array(strtoupper(trim($_POST['dup_issue_period'] ?? '')), ['AM','PM']) ? strtoupper(trim($_POST['dup_issue_period'])) : null;
+            $issue_time = normalizeIssueTimeForStorage($issue_time, $issue_period);
             
             // Fetch patient data
             $patStmt = $pdo->prepare("SELECT name_en, employer_ar, employer_en FROM patients WHERE id = ?");
@@ -2007,6 +2041,7 @@ if (isset($_POST['action']) && $_POST['action'] !== 'login' && $_POST['action'] 
             $insertStmt = $pdo->prepare("INSERT INTO doctors (name, name_ar, name_en, title, title_ar, title_en, hospital_id) VALUES (?, ?, ?, ?, ?, ?, ?)");
 
             $inserted = 0;
+            $updated = 0;
             $duplicates = 0;
             $errors = [];
 
@@ -5007,7 +5042,10 @@ if (!in_array($uiDataViewMode, ['table','compact','cards','zebra','glass','minim
 
                         <!-- المريض -->
                         <div class="col-md-6">
-                            <label class="form-label">المريض</label>
+                            <div class="d-flex justify-content-between align-items-center gap-2 mb-1">
+                                <label class="form-label mb-0">المريض</label>
+                                <button type="button" class="btn btn-sm btn-outline-success" id="openQuickPatientModal"><i class="bi bi-person-plus"></i> إضافة مريض جديد</button>
+                            </div>
                             <input type="text" class="form-control form-control-sm mb-2" id="patient_select_search" placeholder="بحث سريع باسم المريض أو الهوية...">
                             <select class="form-select" name="patient_select" id="patient_select">
                                 <option value="">-- اختر مريضاً --</option>
@@ -5028,7 +5066,10 @@ if (!in_array($uiDataViewMode, ['table','compact','cards','zebra','glass','minim
 
                         <!-- الطبيب -->
                         <div class="col-md-6">
-                            <label class="form-label">الطبيب (يتغير حسب المستشفى)</label>
+                            <div class="d-flex justify-content-between align-items-center gap-2 mb-1">
+                                <label class="form-label mb-0">الطبيب (يتغير حسب المستشفى)</label>
+                                <button type="button" class="btn btn-sm btn-outline-primary" id="openQuickDoctorModal"><i class="bi bi-person-badge"></i> إضافة طبيب جديد</button>
+                            </div>
                             <input type="text" class="form-control form-control-sm mb-2" id="doctor_select_search" placeholder="بحث سريع باسم الطبيب...">
                             <select class="form-select" name="doctor_select" id="doctor_select">
                                 <option value="">-- اختر طبيباً --</option>
@@ -5824,6 +5865,55 @@ if (!in_array($uiDataViewMode, ['table','compact','cards','zebra','glass','minim
             <div class="modal-footer">
                 <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">إلغاء</button>
                 <button type="button" class="btn btn-success-custom" id="confirmPayBtn">تأكيد الدفع</button>
+            </div>
+        </div>
+    </div>
+</div>
+
+
+<!-- ======================== مودالات إضافة سريعة من نموذج الإجازة ======================== -->
+<div class="modal fade" id="quickPatientModal" tabindex="-1" aria-hidden="true">
+    <div class="modal-dialog modal-dialog-centered modal-dialog-scrollable">
+        <div class="modal-content">
+            <div class="modal-header"><h5 class="modal-title"><i class="bi bi-person-plus text-success"></i> إضافة مريض جديد للإجازة</h5><button type="button" class="btn-close" data-bs-dismiss="modal"></button></div>
+            <div class="modal-body">
+                <form id="quickPatientForm">
+                    <div class="mb-3"><label class="form-label">الاسم (عربي)</label><input type="text" class="form-control" name="patient_name" id="quick_patient_name" required></div>
+                    <div class="mb-3"><label class="form-label">Patient Name (EN)</label><input type="text" class="form-control" name="patient_name_en" id="quick_patient_name_en"></div>
+                    <div class="mb-3"><label class="form-label">رقم الهوية</label><input type="text" class="form-control" name="identity_number" id="quick_patient_identity" required></div>
+                    <div class="mb-3"><label class="form-label">الهاتف</label><input type="text" class="form-control" name="phone" id="quick_patient_phone"></div>
+                    <div class="mb-3"><label class="form-label">جهة العمل (عربي)</label><input type="text" class="form-control" name="patient_employer_ar" id="quick_patient_employer_ar"></div>
+                    <div class="mb-3"><label class="form-label">Employer (EN)</label><input type="text" class="form-control" name="patient_employer_en" id="quick_patient_employer_en"></div>
+                    <div class="mb-3"><label class="form-label">الجنسية (عربي)</label><input type="text" class="form-control" name="patient_nationality_ar" id="quick_patient_nationality_ar"></div>
+                    <div class="mb-3"><label class="form-label">Nationality (EN)</label><input type="text" class="form-control" name="patient_nationality_en" id="quick_patient_nationality_en"></div>
+                    <div class="mb-3"><label class="form-label">رابط المجلد</label><input type="url" class="form-control" name="folder_link" id="quick_patient_folder_link" placeholder="https://..."></div>
+                </form>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">إلغاء</button>
+                <button type="button" class="btn btn-success-custom" id="saveQuickPatient">حفظ واختيار المريض</button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<div class="modal fade" id="quickDoctorModal" tabindex="-1" aria-hidden="true">
+    <div class="modal-dialog modal-dialog-centered modal-dialog-scrollable">
+        <div class="modal-content">
+            <div class="modal-header"><h5 class="modal-title"><i class="bi bi-person-badge text-primary"></i> إضافة طبيب جديد للإجازة</h5><button type="button" class="btn-close" data-bs-dismiss="modal"></button></div>
+            <div class="modal-body">
+                <form id="quickDoctorForm">
+                    <div class="mb-3"><label class="form-label">الاسم (عربي)</label><input type="text" class="form-control" name="doctor_name" id="quick_doctor_name" required></div>
+                    <div class="mb-3"><label class="form-label">Doctor Name (EN)</label><input type="text" class="form-control" name="doctor_name_en" id="quick_doctor_name_en"></div>
+                    <div class="mb-3"><label class="form-label">المسمى (عربي)</label><input type="text" class="form-control" name="doctor_title" id="quick_doctor_title" required></div>
+                    <div class="mb-3"><label class="form-label">Title (EN)</label><input type="text" class="form-control" name="doctor_title_en" id="quick_doctor_title_en"></div>
+                    <div class="mb-3"><label class="form-label">المستشفى</label><select class="form-select" name="doctor_hospital_id" id="quick_doctor_hospital_id"><option value="">غير محدد</option></select></div>
+                    <div class="mb-3"><label class="form-label">ملاحظة</label><input type="text" class="form-control" name="doctor_note" id="quick_doctor_note"></div>
+                </form>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">إلغاء</button>
+                <button type="button" class="btn btn-gradient" id="saveQuickDoctor">حفظ واختيار الطبيب</button>
             </div>
         </div>
     </div>
@@ -7239,6 +7329,80 @@ document.addEventListener('DOMContentLoaded', () => {
     setupSelectQuickSearch('doctor_id_edit_search', 'doctor_id_edit');
     setupSelectQuickSearch('hospital_id_search', 'hospital_id');
 
+    const quickPatientModalEl = document.getElementById('quickPatientModal');
+    const quickDoctorModalEl = document.getElementById('quickDoctorModal');
+    const quickPatientModal = quickPatientModalEl ? new bootstrap.Modal(quickPatientModalEl) : null;
+    const quickDoctorModal = quickDoctorModalEl ? new bootstrap.Modal(quickDoctorModalEl) : null;
+    if (quickPatientModalEl) setupModalStacking('quickPatientModal');
+    if (quickDoctorModalEl) setupModalStacking('quickDoctorModal');
+
+    document.getElementById('openQuickPatientModal')?.addEventListener('click', () => {
+        document.getElementById('quickPatientForm')?.reset();
+        quickPatientModal?.show();
+    });
+
+    document.getElementById('openQuickDoctorModal')?.addEventListener('click', () => {
+        document.getElementById('quickDoctorForm')?.reset();
+        const leaveHospitalId = document.getElementById('hospital_id')?.value || '';
+        const quickHospitalSelect = document.getElementById('quick_doctor_hospital_id');
+        if (quickHospitalSelect) quickHospitalSelect.value = leaveHospitalId;
+        quickDoctorModal?.show();
+    });
+
+    document.getElementById('saveQuickPatient')?.addEventListener('click', async () => {
+        showLoading();
+        try {
+            const formData = new FormData(document.getElementById('quickPatientForm'));
+            formData.append('action', 'add_patient');
+            formData.append('csrf_token', CSRF_TOKEN);
+            const res = await fetch(REQUEST_URL, { method: 'POST', body: formData, headers: { 'X-Requested-With': 'XMLHttpRequest' } });
+            const result = await res.json();
+            if (result.success) {
+                currentTableData.patients = result.patients || currentTableData.patients;
+                updatePatientSelects(currentTableData.patients);
+                if (result.patient?.id) document.getElementById('patient_select').value = result.patient.id;
+                refreshSelectQuickSearchData('patient_select');
+                document.getElementById('patient_select')?.dispatchEvent(new Event('change'));
+                quickPatientModal?.hide();
+                showToast(result.message || 'تمت إضافة المريض واختياره.', 'success');
+                if (result.stats) updateStats(result.stats);
+            } else {
+                showToast(result.message || 'تعذّرت إضافة المريض.', 'danger');
+            }
+        } catch (err) {
+            showToast('تعذّرت إضافة المريض. تحقق من الاتصال وحاول مرة أخرى.', 'danger');
+        } finally {
+            hideLoading();
+        }
+    });
+
+    document.getElementById('saveQuickDoctor')?.addEventListener('click', async () => {
+        showLoading();
+        try {
+            const formData = new FormData(document.getElementById('quickDoctorForm'));
+            formData.append('action', 'add_doctor');
+            formData.append('csrf_token', CSRF_TOKEN);
+            const res = await fetch(REQUEST_URL, { method: 'POST', body: formData, headers: { 'X-Requested-With': 'XMLHttpRequest' } });
+            const result = await res.json();
+            if (result.success) {
+                currentTableData.doctors = result.doctors || currentTableData.doctors;
+                updateDoctorSelects(currentTableData.doctors);
+                if (result.doctor?.id) document.getElementById('doctor_select').value = result.doctor.id;
+                refreshSelectQuickSearchData('doctor_select');
+                document.getElementById('doctor_select')?.dispatchEvent(new Event('change'));
+                quickDoctorModal?.hide();
+                showToast(result.message || 'تمت إضافة الطبيب واختياره.', 'success');
+                if (result.stats) updateStats(result.stats);
+            } else {
+                showToast(result.message || 'تعذّرت إضافة الطبيب.', 'danger');
+            }
+        } catch (err) {
+            showToast('تعذّرت إضافة الطبيب. تحقق من الاتصال وحاول مرة أخرى.', 'danger');
+        } finally {
+            hideLoading();
+        }
+    });
+
     // حقول المرافق في نموذج الإضافة
     const companionCheckbox = document.getElementById('is_companion');
     const companionFields = document.querySelectorAll('.companion-field');
@@ -7923,20 +8087,26 @@ document.addEventListener('DOMContentLoaded', () => {
 
     document.getElementById('saveEditDoctor').addEventListener('click', async () => {
         showLoading();
-        const formData = new FormData(document.getElementById('editDoctorForm'));
-        formData.append('action', 'edit_doctor');
-        formData.append('csrf_token', CSRF_TOKEN);
-        const res = await fetch(REQUEST_URL, { method: 'POST', body: formData, headers: { 'X-Requested-With': 'XMLHttpRequest' } });
-        const result = await res.json();
-        hideLoading();
-        if (result.success) {
-            showToast(result.message, 'success');
-            editDoctorModal.hide();
-            currentTableData.doctors = result.doctors;
-            document.getElementById('searchDoctors').value = '';
-            applyDoctorsFilters();
-            updateDoctorSelects(currentTableData.doctors);
-        } else { showToast(result.message, 'danger'); }
+        try {
+            const formData = new FormData(document.getElementById('editDoctorForm'));
+            formData.append('action', 'edit_doctor');
+            formData.append('csrf_token', CSRF_TOKEN);
+            const res = await fetch(REQUEST_URL, { method: 'POST', body: formData, headers: { 'X-Requested-With': 'XMLHttpRequest' } });
+            const result = await res.json();
+            if (result.success) {
+                showToast(result.message, 'success');
+                editDoctorModal.hide();
+                currentTableData.doctors = result.doctors || [];
+                document.getElementById('searchDoctors').value = '';
+                applyDoctorsFilters();
+                updateDoctorSelects(currentTableData.doctors);
+                if (result.stats) updateStats(result.stats);
+            } else { showToast(result.message || 'تعذّر تعديل الطبيب.', 'danger'); }
+        } catch (err) {
+            showToast('تعذّر تعديل الطبيب. تم إيقاف التحميل؛ تحقق من الاتصال أو بيانات النموذج.', 'danger');
+        } finally {
+            hideLoading();
+        }
     });
 
     // ====== إدارة المرضى ======
@@ -8002,20 +8172,26 @@ document.addEventListener('DOMContentLoaded', () => {
 
     document.getElementById('saveEditPatient').addEventListener('click', async () => {
         showLoading();
-        const formData = new FormData(document.getElementById('editPatientForm'));
-        formData.append('action', 'edit_patient');
-        formData.append('csrf_token', CSRF_TOKEN);
-        const res = await fetch(REQUEST_URL, { method: 'POST', body: formData, headers: { 'X-Requested-With': 'XMLHttpRequest' } });
-        const result = await res.json();
-        hideLoading();
-        if (result.success) {
-            showToast(result.message, 'success');
-            editPatientModal.hide();
-            currentTableData.patients = result.patients;
-            document.getElementById('searchPatients').value = '';
-            applyPatientsFilters();
-            updatePatientSelects(currentTableData.patients);
-        } else { showToast(result.message, 'danger'); }
+        try {
+            const formData = new FormData(document.getElementById('editPatientForm'));
+            formData.append('action', 'edit_patient');
+            formData.append('csrf_token', CSRF_TOKEN);
+            const res = await fetch(REQUEST_URL, { method: 'POST', body: formData, headers: { 'X-Requested-With': 'XMLHttpRequest' } });
+            const result = await res.json();
+            if (result.success) {
+                showToast(result.message, 'success');
+                editPatientModal.hide();
+                currentTableData.patients = result.patients || [];
+                document.getElementById('searchPatients').value = '';
+                applyPatientsFilters();
+                updatePatientSelects(currentTableData.patients);
+                if (result.stats) updateStats(result.stats);
+            } else { showToast(result.message || 'تعذّر تعديل المريض.', 'danger'); }
+        } catch (err) {
+            showToast('تعذّر تعديل المريض. تم إيقاف التحميل؛ تحقق من الاتصال أو بيانات النموذج.', 'danger');
+        } finally {
+            hideLoading();
+        }
     });
 
     // ====== إدارة المستخدمين ======
@@ -9051,17 +9227,29 @@ document.addEventListener('DOMContentLoaded', () => {
         }
     }
     function updateHospitalSelects() {
-        const selects = [document.querySelector('[name="doctor_hospital_id"]'), document.getElementById('hospital_id')];
+        const selects = [
+            document.querySelector('#addDoctorForm [name="doctor_hospital_id"]'),
+            document.getElementById('hospital_id'),
+            document.getElementById('batch_hospital_id'),
+            document.getElementById('edit_doctor_hospital_id'),
+            document.getElementById('quick_doctor_hospital_id'),
+            document.getElementById('dup_hospital_id'),
+            document.getElementById('hospital_id_edit')
+        ];
+        const seen = new Set();
         selects.forEach(sel => {
-            if (!sel) return;
+            if (!sel || seen.has(sel)) return;
+            seen.add(sel);
             const curVal = sel.value;
             const isLeaveForm = sel.id === 'hospital_id';
-            sel.innerHTML = isLeaveForm ? '<option value="">-- اختر مستشفى --</option>' : '<option value="">المستشفى (اختياري)</option>';
+            const isBatch = sel.id === 'batch_hospital_id';
+            const isRequiredLeaveHospital = ['hospital_id', 'dup_hospital_id', 'hospital_id_edit'].includes(sel.id);
+            sel.innerHTML = isRequiredLeaveHospital ? '<option value="">-- اختر مستشفى --</option>' : (isBatch ? '<option value="">اختر مستشفى</option>' : '<option value="">المستشفى (اختياري)</option>');
             (currentTableData.hospitals || []).forEach(h => {
                 const opt = document.createElement('option');
                 opt.value = h.id;
                 opt.textContent = h.name_ar || '';
-                if (isLeaveForm) opt.dataset.prefix = h.service_prefix || 'GSL';
+                if (isLeaveForm || sel.id === 'dup_hospital_id' || sel.id === 'hospital_id_edit') opt.dataset.prefix = h.service_prefix || 'GSL';
                 if (h.id == curVal) opt.selected = true;
                 sel.appendChild(opt);
             });
@@ -9176,17 +9364,23 @@ document.addEventListener('DOMContentLoaded', () => {
     // حفظ تعديل المستشفى
     document.getElementById('saveEditHospital')?.addEventListener('click', async () => {
         showLoading();
-        const formData = new FormData(document.getElementById('editHospitalForm'));
-        formData.append('action', 'edit_hospital');
-        formData.append('csrf_token', CSRF_TOKEN);
-        const res = await fetch(REQUEST_URL, { method: 'POST', body: formData, headers: { 'X-Requested-With': 'XMLHttpRequest' } });
-        const result = await res.json();
-        hideLoading();
-        if (result.success) {
-            showToast(result.message, 'success');
-            editHospitalModal.hide();
-            if (result.hospitals) { currentTableData.hospitals = result.hospitals; renderHospitals(); updateHospitalSelects(); }
-        } else { showToast(result.message, 'danger'); }
+        try {
+            const formData = new FormData(document.getElementById('editHospitalForm'));
+            formData.append('action', 'edit_hospital');
+            formData.append('csrf_token', CSRF_TOKEN);
+            const res = await fetch(REQUEST_URL, { method: 'POST', body: formData, headers: { 'X-Requested-With': 'XMLHttpRequest' } });
+            const result = await res.json();
+            if (result.success) {
+                showToast(result.message, 'success');
+                editHospitalModal.hide();
+                if (result.hospitals) { currentTableData.hospitals = result.hospitals; renderHospitals(); updateHospitalSelects(); }
+                await fetchAllLeaves();
+            } else { showToast(result.message || 'تعذّر تعديل المستشفى.', 'danger'); }
+        } catch (err) {
+            showToast('تعذّر تعديل المستشفى أو تحديث الإجازات المرتبطة.', 'danger');
+        } finally {
+            hideLoading();
+        }
     });
 
     // ====== ربط المستشفى بالأطباء + البادئة ======
