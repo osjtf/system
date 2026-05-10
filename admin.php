@@ -110,6 +110,9 @@ $pdo->exec("CREATE TABLE IF NOT EXISTS hospitals (
 
 // Ensure logo_data column exists for existing tables
 ensureColumn($pdo, 'hospitals', 'logo_data', "LONGTEXT NULL AFTER logo_url");
+ensureColumn($pdo, 'hospitals', 'logo_scale', "FLOAT DEFAULT 1.0 AFTER logo_data");
+ensureColumn($pdo, 'hospitals', 'logo_offset_x', "FLOAT DEFAULT 0 AFTER logo_scale");
+ensureColumn($pdo, 'hospitals', 'logo_offset_y', "FLOAT DEFAULT 0 AFTER logo_offset_x");
 
 $pdo->exec("CREATE TABLE IF NOT EXISTS doctors (
     id INT AUTO_INCREMENT PRIMARY KEY,
@@ -462,21 +465,62 @@ function downloadLogoFromUrl(string $url): ?string {
 }
 
 function gregorianToHijri($gYear, $gMonth, $gDay) {
-    $d = (int)$gDay; $m = (int)$gMonth; $y = (int)$gYear;
-    if (($y > 1582) || (($y == 1582) && ($m > 10)) || (($y == 1582) && ($m == 10) && ($d > 14))) {
-        $jd = (int)(1461 * ($y + 4800 + (int)(($m - 14) / 12)) / 4) + (int)(367 * ($m - 2 - 12 * ((int)(($m - 14) / 12))) / 12) - (int)(3 * ((int)(($y + 4900 + (int)(($m - 14) / 12)) / 100)) / 4) + $d - 32075;
-    } else {
-        $jd = 367 * $y - (int)(7 * ($y + (int)(($m + 9) / 12)) / 4) + (int)(275 * $m / 9) + $d + 1721013.5;
+    // Tabular Islamic Calendar conversion (accurate to ±1-2 days)
+    $gYear = (int)$gYear; $gMonth = (int)$gMonth; $gDay = (int)$gDay;
+    
+    // Step 1: Gregorian to Julian Day Number
+    $a = intval((14 - $gMonth) / 12);
+    $y = $gYear + 4800 - $a;
+    $m = $gMonth + 12 * $a - 3;
+    $jdn = $gDay + intval((153 * $m + 2) / 5) + 365 * $y + intval($y / 4) - intval($y / 100) + intval($y / 400) - 32045;
+    
+    // Step 2: JDN to Hijri using tabular Islamic calendar
+    $epoch = 1948440;
+    $days = $jdn - $epoch;
+    
+    // Approximate year
+    $hYear = intval(floor(($days - 1) / 354.36667) + 1);
+    
+    // Leap years in 30-year cycle
+    $leapYears = [2, 5, 7, 10, 13, 16, 18, 21, 24, 26, 29];
+    
+    // Calculate start of Hijri year
+    $hijriYearStart = function($year) use ($epoch, $leapYears) {
+        $y2 = $year - 1;
+        $cycle = intval($y2 / 30);
+        $yearInCycle = $y2 % 30;
+        $leapCount = 0;
+        foreach ($leapYears as $ly) {
+            if ($ly <= $yearInCycle) $leapCount++;
+        }
+        return $epoch + $cycle * 10631 + $yearInCycle * 354 + $leapCount;
+    };
+    
+    // Adjust year
+    while ($hijriYearStart($hYear + 1) <= $jdn) $hYear++;
+    while ($hijriYearStart($hYear) > $jdn) $hYear--;
+    
+    // Day of year
+    $dayOfYear = $jdn - $hijriYearStart($hYear) + 1;
+    
+    // Determine if leap year
+    $isLeap = in_array($hYear % 30, $leapYears);
+    
+    // Calculate month and day
+    $hMonth = 1;
+    $hDay = $dayOfYear;
+    $remaining = $dayOfYear;
+    for ($monthNum = 1; $monthNum <= 12; $monthNum++) {
+        $monthDays = ($monthNum % 2 == 1) ? 30 : 29;
+        if ($monthNum == 12 && $isLeap) $monthDays = 30;
+        if ($remaining <= $monthDays) {
+            $hMonth = $monthNum;
+            $hDay = $remaining;
+            break;
+        }
+        $remaining -= $monthDays;
     }
-    $jd = (int)$jd;
-    $l = $jd - 1948440 + 10632;
-    $n = (int)(($l - 1) / 10631);
-    $l = $l - 10631 * $n + 354;
-    $j = ((int)(10985 - $l) / 5316) * ((int)(50 * $l) / 17719) + ((int)($l / 5670)) * ((int)(43 * $l) / 15238);
-    $l = $l - ((int)(30 - $j) / 15) * ((int)(17719 * $j) / 5316) - ((int)($j / 16)) * ((int)(15238 * $j) / 43) + 29;
-    $hMonth = (int)(24 * $l / 709);
-    $hDay = $l - (int)(709 * $hMonth / 24);
-    $hYear = 30 * $n + $j - 30;
+    
     return ['year' => $hYear, 'month' => $hMonth, 'day' => $hDay];
 }
 
@@ -498,7 +542,7 @@ function getArabicMonthName($month) {
 
 function formatDaysText($days) {
     $days = (int)$days;
-    return $days . ' ' . ($days > 1 ? 'Days' : 'Day');
+    return $days . ($days === 1 ? ' day' : ' days');
 }
 
 function generateServiceCode($pdo, $prefix, $issueDate = null) {
@@ -779,7 +823,7 @@ function fetchAllData($pdo) {
     ")->fetchAll();
 
     // المستشفيات
-    $hospitals_data = $pdo->query("SELECT id, name_ar, name_en, license_number, logo_path, logo_url, service_prefix, created_at, updated_at, CASE WHEN logo_data IS NOT NULL AND logo_data != '' THEN 'has_logo' ELSE '' END AS has_logo_data FROM hospitals ORDER BY name_ar")->fetchAll();
+    $hospitals_data = $pdo->query("SELECT id, name_ar, name_en, license_number, logo_path, logo_url, service_prefix, logo_scale, logo_offset_x, logo_offset_y, created_at, updated_at, CASE WHEN logo_data IS NOT NULL AND logo_data != '' THEN 'has_logo' ELSE '' END AS has_logo_data FROM hospitals ORDER BY name_ar")->fetchAll();
 
     return compact('leaves', 'archived', 'queries', 'notifications_payment', 'payments', 'hospitals_data');
 }
@@ -864,7 +908,8 @@ function handleGeneratePdf($pdo, $leave_id, $pdfMode = 'preview') {
                d.title_ar AS d_title_ar, d.title_en AS d_title_en,
                h.name_ar AS h_name_ar, h.name_en AS h_name_en, 
                h.license_number AS h_license, h.logo_path AS h_logo_path, h.logo_url AS h_logo_url,
-               h.logo_data AS h_logo_data
+               h.logo_data AS h_logo_data,
+               h.logo_scale AS h_logo_scale, h.logo_offset_x AS h_logo_offset_x, h.logo_offset_y AS h_logo_offset_y
         FROM sick_leaves sl
         LEFT JOIN patients p ON sl.patient_id = p.id
         LEFT JOIN doctors d ON sl.doctor_id = d.id
@@ -881,7 +926,7 @@ function handleGeneratePdf($pdo, $leave_id, $pdfMode = 'preview') {
     // Prepare all data
     $sc = htmlspecialchars($lv['service_code'] ?? '', ENT_QUOTES);
     $days = (int)($lv['days_count'] ?? 1);
-    $daysEn = $days . ' ' . ($days > 1 ? 'Days' : 'Day');
+    $daysEn = $days . ($days === 1 ? ' day' : ' days');
     $daysAr = $days == 1 ? '1' : ($days == 2 ? '2' : (string)$days);
     $daysArWord = $days == 1 ? 'يوم' : ($days == 2 ? 'يومين' : 'أيام');
 
@@ -895,7 +940,7 @@ function handleGeneratePdf($pdo, $leave_id, $pdfMode = 'preview') {
         $parts = explode('-', $d);
         if (count($parts) !== 3) return $d;
         $h = gregorianToHijri((int)$parts[0], (int)$parts[1], (int)$parts[2]);
-        return sprintf('%02d-%02d-%04d', $h['day'], $h['month'], $h['year']);
+        return sprintf('%04d-%02d-%02d', $h['year'], $h['month'], $h['day']);
     };
 
     $startEn = $fmtEn($startG);
@@ -935,7 +980,11 @@ function handleGeneratePdf($pdo, $leave_id, $pdfMode = 'preview') {
     } elseif ($hospLogoUrl && strpos($hospLogoUrl, 'http') === 0) {
         $logoSrc = $hospLogoUrl;
     }
-    $hospLogoHtml = '<img src="' . htmlspecialchars($logoSrc) . '" alt="Hospital Logo" style="width: 120px; height: 120px; object-fit: contain;" />';
+    $hLogoScale = floatval($lv['h_logo_scale'] ?? 1);
+    $hLogoOffX = floatval($lv['h_logo_offset_x'] ?? 0);
+    $hLogoOffY = floatval($lv['h_logo_offset_y'] ?? 0);
+    $logoTransform = "transform: translate({$hLogoOffX}px, {$hLogoOffY}px) scale({$hLogoScale});";
+    $hospLogoHtml = '<div style="width:120px;height:120px;overflow:hidden;position:relative;"><img src="' . htmlspecialchars($logoSrc) . '" alt="Hospital Logo" style="width:100%;height:100%;object-fit:contain;position:absolute;top:0;left:0;' . $logoTransform . '" /></div>';
 
     // License section
     $licenseHtml = '';
@@ -956,7 +1005,7 @@ function handleGeneratePdf($pdo, $leave_id, $pdfMode = 'preview') {
 
     // Duration lines
     $durationEn = $daysEn . ' ( ' . $startEn . ' to ' . $endEn . ' )';
-    $durationAr = '<span style="font-family: \'Times New Roman\', serif; font-size: 14.5px; font-weight: 400;">' . $daysAr . '</span> <span style="font-family: \'Noto Sans Arabic\', sans-serif; font-size: 14.5px; font-weight: 400;">' . $daysArWord . '</span> ( ' . $startHj . ' الى ' . $endHj . ' )';
+    $durationAr = '<span style="font-family: \'Times New Roman\', serif; font-size: 14.5px; font-weight: 400;">' . $daysAr . '</span> <span style="font-family: \'Noto Sans Arabic\', sans-serif; font-size: 14.5px; font-weight: 400;">' . $daysArWord . '</span> ( ' . $startHj . ' <span style="font-family: \'Noto Sans Arabic\', sans-serif; font-size: 13.5px; font-weight: 400;">إلى</span> ' . $endHj . ' )';  // Format: YYYY-MM-DD إلى YYYY-MM-DD with Noto Sans Arabic Regular 13.5px for إلى
 
     // ==================== CSS ====================
     $reportCSS = 'html{line-height:1.15}body{margin:0}*{box-sizing:border-box;border-width:0;border-style:solid;-webkit-font-smoothing:antialiased}p,li,ul,pre,div,h1,h2,h3,h4,h5,h6,figure,blockquote,figcaption{margin:0;padding:0}a{color:inherit;text-decoration:inherit}';
@@ -1012,8 +1061,8 @@ function handleGeneratePdf($pdo, $leave_id, $pdfMode = 'preview') {
     $reportBody .= '<table class="info-table" cellpadding="0" cellspacing="0"><tbody>';
     $reportBody .= '<tr><td class="en-title">Leave ID</td><td class="data-cell" colspan="2">' . $sc . '</td><td class="ar-title">رمز الإجازة</td></tr>';
     $reportBody .= '<tr class="blue-row"><td class="en-title" style="color:white">Leave Duration</td><td class="data-cell">' . $durationEn . '</td><td class="data-cell ar-text" dir="rtl">' . $durationAr . '</td><td class="ar-title" style="color:white">مدة الإجازة</td></tr>';
-    $reportBody .= '<tr><td class="en-title">Admission Date</td><td class="data-cell date-cell">' . $startEn . '</td><td class="data-cell date-cell">' . $startHj . '</td><td class="ar-title">تاريخ الدخول</td></tr>';
-    $reportBody .= '<tr class="gray-row"><td class="en-title">Discharge Date</td><td class="data-cell date-cell">' . $endEn . '</td><td class="data-cell date-cell">' . $endHj . '</td><td class="ar-title">تاريخ الخروج</td></tr>';
+    $reportBody .= '<tr><td class="en-title">Admission Date</td><td class="data-cell date-cell">' . $startEn . '</td><td class="data-cell date-cell" dir="ltr">' . $startHj . '</td><td class="ar-title">تاريخ الدخول</td></tr>';
+    $reportBody .= '<tr class="gray-row"><td class="en-title">Discharge Date</td><td class="data-cell date-cell">' . $endEn . '</td><td class="data-cell date-cell" dir="ltr">' . $endHj . '</td><td class="ar-title">تاريخ الخروج</td></tr>';
     $reportBody .= '<tr><td class="en-title">Issue Date</td><td class="data-cell" colspan="2">' . $issueEn . '</td><td class="ar-title">تاريخ الإصدار</td></tr>';
     $reportBody .= '<tr class="gray-row"><td class="en-title">Patient Name</td><td class="data-cell en-spaced">' . $patNameEn . '</td><td class="data-cell ar-text">' . $patNameAr . '</td><td class="ar-title">الاسم</td></tr>';
     $reportBody .= '<tr><td class="en-title">National ID / Iqama</td><td class="data-cell" colspan="2">' . $patId . '</td><td class="ar-title">رقم الهوية<span class="thin-slash">/</span>الإقامة</td></tr>';
@@ -1060,12 +1109,12 @@ function handleGeneratePdf($pdo, $leave_id, $pdfMode = 'preview') {
         $pdfHtml .= '</style>';
         $pdfHtml .= '<style data-tag="default-style-sheet">';
         $pdfHtml .= 'html { font-family: Inter, sans-serif; font-size: 16px; }';
-        $pdfHtml .= 'body { font-weight: 400; color: #191818; background: #ffffff; }';
+        $pdfHtml .= 'body { font-weight: 400; color: #191818; background: #ffffff; margin: 0; padding: 0; }';
         $pdfHtml .= '</style>';
         $pdfHtml .= '<style>';
-        $pdfHtml .= '@page { size: A4; margin: 0; }';
-        $pdfHtml .= '.group1-container1 { width: 100%; display: flex; align-items: center; flex-direction: column; background-color: transparent; }';
-        $pdfHtml .= '.group1-thq-group1-elm { width: 842.25px; height: 1190.25px; display: flex; position: relative; align-items: flex-start; background-color: white; }';
+        $pdfHtml .= '@page { size: 842.25px 1190.25px; margin: 0; }';
+        $pdfHtml .= '.group1-container1 { width: 842.25px; height: 1190.25px; position: relative; background-color: transparent; margin: 0; padding: 0; }';
+        $pdfHtml .= '.group1-thq-group1-elm { width: 842.25px; height: 1190.25px; position: relative; background-color: white; margin: 0; padding: 0; }';
         $pdfHtml .= '.info-table { position: absolute; top: 242px; left: 36px; width: 770px; border-collapse: separate; border-spacing: 0; border: 1px solid #cccccc; border-radius: 8px; overflow: hidden; background-color: transparent; z-index: 10; }';
         $pdfHtml .= '.info-table td { border-bottom: 1px solid #cccccc; border-right: 1px solid #cccccc; height: 42px; text-align: center; vertical-align: middle; padding: 4px 8px; }';
         $pdfHtml .= '.info-table td:last-child { border-right: none; } .info-table tr:last-child td { border-bottom: none; }';
@@ -1418,7 +1467,7 @@ if (isset($_POST['action']) && $_POST['action'] !== 'login' && $_POST['action'] 
             $data = fetchAllData($pdo);
             $data['doctors'] = $pdo->query("SELECT d.*, h.name_ar AS hospital_name_ar FROM doctors d LEFT JOIN hospitals h ON d.hospital_id = h.id ORDER BY d.name_ar")->fetchAll();
             $data['patients'] = $pdo->query("SELECT * FROM patients ORDER BY name_ar")->fetchAll();
-            $data['hospitals'] = $pdo->query("SELECT id, name_ar, name_en, license_number, logo_path, logo_url, service_prefix, created_at, updated_at, CASE WHEN logo_data IS NOT NULL AND logo_data != '' THEN 'has_logo' ELSE '' END AS has_logo_data FROM hospitals ORDER BY name_ar")->fetchAll();
+            $data['hospitals'] = $pdo->query("SELECT id, name_ar, name_en, license_number, logo_path, logo_url, service_prefix, logo_scale, logo_offset_x, logo_offset_y, created_at, updated_at, CASE WHEN logo_data IS NOT NULL AND logo_data != '' THEN 'has_logo' ELSE '' END AS has_logo_data FROM hospitals ORDER BY name_ar")->fetchAll();
             $data['stats'] = getStats($pdo);
             $data['unread_messages_count'] = getUnreadMessagesCount($pdo, intval($_SESSION['admin_user_id'] ?? 0));
             $data['success'] = true;
@@ -1437,7 +1486,7 @@ if (isset($_POST['action']) && $_POST['action'] !== 'login' && $_POST['action'] 
             if (!$logo_data && !empty($logo_url)) $logo_data = downloadLogoFromUrl($logo_url);
             $stmt = $pdo->prepare("INSERT INTO hospitals (name_ar, name_en, license_number, logo_path, logo_url, logo_data, service_prefix) VALUES (?,?,?,?,?,?,?)");
             $stmt->execute([$name_ar, $name_en, $license ?: null, null, $logo_url ?: null, $logo_data, $prefix]);
-            $hospitals = $pdo->query("SELECT id, name_ar, name_en, license_number, logo_path, logo_url, service_prefix, created_at, updated_at, CASE WHEN logo_data IS NOT NULL AND logo_data != '' THEN 'has_logo' ELSE '' END AS has_logo_data FROM hospitals ORDER BY name_ar")->fetchAll();
+            $hospitals = $pdo->query("SELECT id, name_ar, name_en, license_number, logo_path, logo_url, service_prefix, logo_scale, logo_offset_x, logo_offset_y, created_at, updated_at, CASE WHEN logo_data IS NOT NULL AND logo_data != '' THEN 'has_logo' ELSE '' END AS has_logo_data FROM hospitals ORDER BY name_ar")->fetchAll();
             echo json_encode(['success'=>true,'message'=>'تمت إضافة المستشفى بنجاح.','hospitals'=>$hospitals,'stats'=>getStats($pdo)]);
             break;
 
@@ -1448,27 +1497,32 @@ if (isset($_POST['action']) && $_POST['action'] !== 'login' && $_POST['action'] 
             $license = trim($_POST['hospital_license'] ?? '');
             $prefix = in_array(strtoupper(trim($_POST['hospital_prefix'] ?? 'GSL')), ['GSL','PSL']) ? strtoupper(trim($_POST['hospital_prefix'])) : 'GSL';
             $logo_url = trim($_POST['hospital_logo_url'] ?? '');
+            $logo_scale = floatval($_POST['logo_scale'] ?? 1.0);
+            $logo_offset_x = floatval($_POST['logo_offset_x'] ?? 0);
+            $logo_offset_y = floatval($_POST['logo_offset_y'] ?? 0);
             if ($id <= 0 || empty($name_ar)) { echo json_encode(['success'=>false,'message'=>'بيانات غير صالحة.']); exit; }
             $logo_data = uploadHospitalLogo($_FILES['hospital_logo'] ?? []);
             if (!$logo_data && !empty($logo_url)) $logo_data = downloadLogoFromUrl($logo_url);
             if ($logo_data) {
-                $stmt = $pdo->prepare("UPDATE hospitals SET name_ar=?, name_en=?, license_number=?, logo_data=?, logo_url=?, service_prefix=? WHERE id=?");
-                $stmt->execute([$name_ar, $name_en, $license ?: null, $logo_data, $logo_url ?: null, $prefix, $id]);
+                $stmt = $pdo->prepare("UPDATE hospitals SET name_ar=?, name_en=?, license_number=?, logo_data=?, logo_url=?, service_prefix=?, logo_scale=?, logo_offset_x=?, logo_offset_y=? WHERE id=?");
+                $stmt->execute([$name_ar, $name_en, $license ?: null, $logo_data, $logo_url ?: null, $prefix, $logo_scale, $logo_offset_x, $logo_offset_y, $id]);
             } elseif (!empty($logo_url)) {
-                // Try to download and convert to base64
                 $downloaded = downloadLogoFromUrl($logo_url);
                 if ($downloaded) {
-                    $stmt = $pdo->prepare("UPDATE hospitals SET name_ar=?, name_en=?, license_number=?, logo_data=?, logo_url=?, service_prefix=? WHERE id=?");
-                    $stmt->execute([$name_ar, $name_en, $license ?: null, $downloaded, $logo_url, $prefix, $id]);
+                    $stmt = $pdo->prepare("UPDATE hospitals SET name_ar=?, name_en=?, license_number=?, logo_data=?, logo_url=?, service_prefix=?, logo_scale=?, logo_offset_x=?, logo_offset_y=? WHERE id=?");
+                    $stmt->execute([$name_ar, $name_en, $license ?: null, $downloaded, $logo_url, $prefix, $logo_scale, $logo_offset_x, $logo_offset_y, $id]);
                 } else {
-                    $stmt = $pdo->prepare("UPDATE hospitals SET name_ar=?, name_en=?, license_number=?, logo_url=?, service_prefix=? WHERE id=?");
-                    $stmt->execute([$name_ar, $name_en, $license ?: null, $logo_url, $prefix, $id]);
+                    $stmt = $pdo->prepare("UPDATE hospitals SET name_ar=?, name_en=?, license_number=?, logo_url=?, service_prefix=?, logo_scale=?, logo_offset_x=?, logo_offset_y=? WHERE id=?");
+                    $stmt->execute([$name_ar, $name_en, $license ?: null, $logo_url, $prefix, $logo_scale, $logo_offset_x, $logo_offset_y, $id]);
                 }
             } else {
-                $stmt = $pdo->prepare("UPDATE hospitals SET name_ar=?, name_en=?, license_number=?, service_prefix=? WHERE id=?");
-                $stmt->execute([$name_ar, $name_en, $license ?: null, $prefix, $id]);
+                $stmt = $pdo->prepare("UPDATE hospitals SET name_ar=?, name_en=?, license_number=?, service_prefix=?, logo_scale=?, logo_offset_x=?, logo_offset_y=? WHERE id=?");
+                $stmt->execute([$name_ar, $name_en, $license ?: null, $prefix, $logo_scale, $logo_offset_x, $logo_offset_y, $id]);
             }
-            $hospitals = $pdo->query("SELECT id, name_ar, name_en, license_number, logo_path, logo_url, service_prefix, created_at, updated_at, CASE WHEN logo_data IS NOT NULL AND logo_data != '' THEN 'has_logo' ELSE '' END AS has_logo_data FROM hospitals ORDER BY name_ar")->fetchAll();
+            // Cascade update to leaves
+            $cascadeStmt = $pdo->prepare("UPDATE sick_leaves SET hospital_name_ar = ?, hospital_name_en = ? WHERE hospital_id = ?");
+            $cascadeStmt->execute([$name_ar, $name_en, $id]);
+            $hospitals = $pdo->query("SELECT id, name_ar, name_en, license_number, logo_path, logo_url, service_prefix, logo_scale, logo_offset_x, logo_offset_y, created_at, updated_at, CASE WHEN logo_data IS NOT NULL AND logo_data != '' THEN 'has_logo' ELSE '' END AS has_logo_data FROM hospitals ORDER BY name_ar")->fetchAll();
             echo json_encode(['success'=>true,'message'=>'تم تعديل المستشفى بنجاح.','hospitals'=>$hospitals,'stats'=>getStats($pdo)]);
             break;
 
@@ -1476,14 +1530,33 @@ if (isset($_POST['action']) && $_POST['action'] !== 'login' && $_POST['action'] 
             $id = intval($_POST['hospital_id'] ?? 0);
             $pdo->prepare("UPDATE doctors SET hospital_id = NULL WHERE hospital_id = ?")->execute([$id]);
             $pdo->prepare("DELETE FROM hospitals WHERE id = ?")->execute([$id]);
-            $hospitals = $pdo->query("SELECT id, name_ar, name_en, license_number, logo_path, logo_url, service_prefix, created_at, updated_at, CASE WHEN logo_data IS NOT NULL AND logo_data != '' THEN 'has_logo' ELSE '' END AS has_logo_data FROM hospitals ORDER BY name_ar")->fetchAll();
+            $hospitals = $pdo->query("SELECT id, name_ar, name_en, license_number, logo_path, logo_url, service_prefix, logo_scale, logo_offset_x, logo_offset_y, created_at, updated_at, CASE WHEN logo_data IS NOT NULL AND logo_data != '' THEN 'has_logo' ELSE '' END AS has_logo_data FROM hospitals ORDER BY name_ar")->fetchAll();
             echo json_encode(['success'=>true,'message'=>'تم حذف المستشفى بنجاح.','hospitals'=>$hospitals,'stats'=>getStats($pdo)]);
             break;
 
         case 'fetch_hospitals':
-            $hospitals = $pdo->query("SELECT id, name_ar, name_en, license_number, logo_path, logo_url, service_prefix, created_at, updated_at, CASE WHEN logo_data IS NOT NULL AND logo_data != '' THEN 'has_logo' ELSE '' END AS has_logo_data FROM hospitals ORDER BY name_ar")->fetchAll();
+            $hospitals = $pdo->query("SELECT id, name_ar, name_en, license_number, logo_path, logo_url, service_prefix, logo_scale, logo_offset_x, logo_offset_y, created_at, updated_at, CASE WHEN logo_data IS NOT NULL AND logo_data != '' THEN 'has_logo' ELSE '' END AS has_logo_data FROM hospitals ORDER BY name_ar")->fetchAll();
             echo json_encode(['success'=>true,'hospitals'=>$hospitals]);
             break;
+
+        case 'get_hospital_logo':
+            $hid = intval($_GET['hospital_id'] ?? $_POST['hospital_id'] ?? 0);
+            $stmt = $pdo->prepare("SELECT logo_data, logo_url FROM hospitals WHERE id = ?");
+            $stmt->execute([$hid]);
+            $hRow = $stmt->fetch();
+            if ($hRow && !empty($hRow['logo_data']) && strpos($hRow['logo_data'], 'data:image/') === 0) {
+                $parts = explode(',', $hRow['logo_data'], 2);
+                preg_match('/data:image\/([a-z+]+);/', $parts[0], $mimeMatch);
+                $mime = 'image/' . ($mimeMatch[1] ?? 'png');
+                header('Content-Type: ' . $mime);
+                echo base64_decode($parts[1] ?? '');
+            } elseif ($hRow && !empty($hRow['logo_url'])) {
+                header('Location: ' . $hRow['logo_url']);
+            } else {
+                header('HTTP/1.1 404 Not Found');
+                echo 'No logo';
+            }
+            exit;
 
         case 'get_doctors_by_hospital':
             $hid = intval($_POST['hospital_id'] ?? 0);
@@ -1648,6 +1721,9 @@ if (isset($_POST['action']) && $_POST['action'] !== 'login' && $_POST['action'] 
             $companion_relation = trim($_POST['companion_relation_edit'] ?? '');
             $is_paid = isset($_POST['is_paid_edit']) ? 1 : 0;
             $payment_amount = floatval($_POST['payment_amount_edit'] ?? 0);
+            $hospital_id_edit = intval($_POST['hospital_id_edit'] ?? 0) ?: null;
+            $issue_time = trim($_POST['issue_time_edit'] ?? '');
+            $issue_period = in_array(strtoupper(trim($_POST['issue_period_edit'] ?? '')), ['AM','PM']) ? strtoupper(trim($_POST['issue_period_edit'])) : null;
             
             // خاصية تغيير الطبيب
             $doctor_id_edit_raw = $_POST['doctor_id_edit'] ?? '';
@@ -1676,23 +1752,27 @@ if (isset($_POST['action']) && $_POST['action'] !== 'login' && $_POST['action'] 
                 $stmt = $pdo->prepare("UPDATE sick_leaves SET 
                     service_code = ?, issue_date = ?, start_date = ?, end_date = ?, days_count = ?,
                     is_companion = ?, companion_name = ?, companion_relation = ?,
-                    is_paid = ?, payment_amount = ?, doctor_id = ?, updated_at = ?
+                    is_paid = ?, payment_amount = ?, doctor_id = ?, hospital_id = COALESCE(?, hospital_id),
+                    issue_time = ?, issue_period = ?, updated_at = ?
                     WHERE id = ?");
                 $stmt->execute([
                     $service_code, $issue_date, $start_date, $end_date, $days_count,
                     $is_companion, $companion_name, $companion_relation,
-                    $is_paid, $payment_amount, $doctor_id_edit, nowSaudi(), $leave_id
+                    $is_paid, $payment_amount, $doctor_id_edit, $hospital_id_edit,
+                    $issue_time ?: null, $issue_period, nowSaudi(), $leave_id
                 ]);
             } else {
                 $stmt = $pdo->prepare("UPDATE sick_leaves SET 
                     service_code = ?, issue_date = ?, start_date = ?, end_date = ?, days_count = ?,
                     is_companion = ?, companion_name = ?, companion_relation = ?,
-                    is_paid = ?, payment_amount = ?, updated_at = ?
+                    is_paid = ?, payment_amount = ?, hospital_id = COALESCE(?, hospital_id),
+                    issue_time = ?, issue_period = ?, updated_at = ?
                     WHERE id = ?");
                 $stmt->execute([
                     $service_code, $issue_date, $start_date, $end_date, $days_count,
                     $is_companion, $companion_name, $companion_relation,
-                    $is_paid, $payment_amount, nowSaudi(), $leave_id
+                    $is_paid, $payment_amount, $hospital_id_edit,
+                    $issue_time ?: null, $issue_period, nowSaudi(), $leave_id
                 ]);
             }
 
@@ -1745,28 +1825,38 @@ if (isset($_POST['action']) && $_POST['action'] !== 'login' && $_POST['action'] 
             $companion_relation = trim($_POST['dup_companion_relation'] ?? '');
             $is_paid = isset($_POST['dup_is_paid']) ? 1 : 0;
             $payment_amount = floatval($_POST['dup_payment_amount'] ?? 0);
-            $patient_name_en = trim($_POST['dup_patient_name_en'] ?? '');
-            $doctor_name_en = trim($_POST['dup_doctor_name_en'] ?? '');
-            $doctor_title_en = trim($_POST['dup_doctor_title_en'] ?? '');
-            $hospital_name_ar = trim($_POST['dup_hospital_name_ar'] ?? '');
-            $hospital_name_en = trim($_POST['dup_hospital_name_en'] ?? '');
             $hospital_id = intval($_POST['dup_hospital_id'] ?? 0) ?: null;
             $issue_time = trim($_POST['dup_issue_time'] ?? '');
             $issue_period = in_array(strtoupper(trim($_POST['dup_issue_period'] ?? '')), ['AM','PM']) ? strtoupper(trim($_POST['dup_issue_period'])) : null;
-            $employer_ar = trim($_POST['dup_employer_ar'] ?? '');
-            $employer_en = trim($_POST['dup_employer_en'] ?? '');
-            $existing_logo_path = trim($_POST['dup_existing_logo_path'] ?? '');
-            $logo_path = uploadLeaveLogo($_FILES['dup_leave_logo'] ?? []);
-            if (!$logo_path && $existing_logo_path !== '') {
-                $logo_path = $existing_logo_path;
-            }
-            // إذا لم يتم رفع شعار، نأخذه من المستشفى
-            if (!$logo_path && $hospital_id) {
+            
+            // Fetch patient data
+            $patStmt = $pdo->prepare("SELECT name_en, employer_ar, employer_en FROM patients WHERE id = ?");
+            $patStmt->execute([$patient_id]);
+            $patData = $patStmt->fetch();
+            $patient_name_en = $patData['name_en'] ?? '';
+            $employer_ar = $patData['employer_ar'] ?? '';
+            $employer_en = $patData['employer_en'] ?? '';
+            
+            // Fetch doctor data
+            $docStmt = $pdo->prepare("SELECT name_en, title_en FROM doctors WHERE id = ?");
+            $docStmt->execute([$doctor_id]);
+            $docData = $docStmt->fetch();
+            $doctor_name_en = $docData['name_en'] ?? '';
+            $doctor_title_en = $docData['title_en'] ?? '';
+            
+            // Fetch hospital data
+            $hospital_name_ar = '';
+            $hospital_name_en = '';
+            $logo_path = '';
+            if ($hospital_id) {
                 $hStmt = $pdo->prepare("SELECT logo_path, name_ar, name_en FROM hospitals WHERE id = ?");
                 $hStmt->execute([$hospital_id]);
                 $hData = $hStmt->fetch();
-                if ($hData && !empty($hData['logo_path'])) $logo_path = $hData['logo_path'];
-                if (empty($hospital_name_ar) && $hData) { $hospital_name_ar = $hData['name_ar'] ?? ''; $hospital_name_en = $hData['name_en'] ?? ''; }
+                if ($hData) {
+                    $logo_path = $hData['logo_path'] ?? '';
+                    $hospital_name_ar = $hData['name_ar'] ?? '';
+                    $hospital_name_en = $hData['name_en'] ?? '';
+                }
             }
             $created_by_user_id = intval($_SESSION['admin_user_id'] ?? 0) ?: null;
 
@@ -1901,51 +1991,50 @@ if (isset($_POST['action']) && $_POST['action'] !== 'login' && $_POST['action'] 
 
         case 'add_doctors_batch':
             $batchText = trim($_POST['doctors_batch_text'] ?? '');
-            $parsedDoctors = parseDoctorsBatchInput($batchText);
-            if (empty($parsedDoctors)) {
+            $batchHospitalId = intval($_POST['batch_hospital_id'] ?? 0) ?: null;
+            
+            // Parse new format: name_ar | name_en | title_ar | title_en (per line)
+            $lines = array_filter(array_map('trim', explode("\n", $batchText)));
+            if (empty($lines)) {
                 echo json_encode([
                     'success' => false,
-                    'message' => 'لم يتم التعرّف على أي طبيب. استخدم صيغة: اسم الطبيب | المسمى الوظيفي | الملاحظة (اختياري) في كل سطر.'
+                    'message' => 'لم يتم التعرّف على أي طبيب. استخدم صيغة: اسم عربي | اسم إنجليزي | مسمى عربي | مسمى إنجليزي'
                 ]);
                 exit;
             }
 
-            $checkStmt = $pdo->prepare("SELECT id, note FROM doctors WHERE (name_ar = ? OR name = ?) AND (title_ar = ? OR title = ?) LIMIT 1");
-            $insertStmt = $pdo->prepare("INSERT INTO doctors (name, name_ar, title, title_ar, note) VALUES (?, ?, ?, ?, ?)");
-            $updateNoteStmt = $pdo->prepare("UPDATE doctors SET note = ? WHERE id = ?");
+            $checkStmt = $pdo->prepare("SELECT id FROM doctors WHERE (name_ar = ? OR name = ?) AND (title_ar = ? OR title = ?) LIMIT 1");
+            $insertStmt = $pdo->prepare("INSERT INTO doctors (name, name_ar, name_en, title, title_ar, title_en, hospital_id) VALUES (?, ?, ?, ?, ?, ?, ?)");
 
             $inserted = 0;
-            $updated = 0;
             $duplicates = 0;
             $errors = [];
 
-            foreach ($parsedDoctors as $index => $doctorRow) {
-                $name = trim((string)($doctorRow['name'] ?? ''));
-                $title = trim((string)($doctorRow['title'] ?? ''));
-                $note = trim((string)($doctorRow['note'] ?? ''));
-                if ($name === '' || $title === '') {
+            foreach ($lines as $index => $line) {
+                $parts = array_map('trim', explode('|', $line));
+                $nameAr = $parts[0] ?? '';
+                $nameEn = $parts[1] ?? '';
+                $titleAr = $parts[2] ?? '';
+                $titleEn = $parts[3] ?? '';
+                
+                if ($nameAr === '' || $titleAr === '') {
                     $errors[] = "السطر " . ($index + 1) . " ناقص البيانات الأساسية.";
                     continue;
                 }
 
-                $checkStmt->execute([$name, $name, $title, $title]);
+                $checkStmt->execute([$nameAr, $nameAr, $titleAr, $titleAr]);
                 $existing = $checkStmt->fetch();
                 if ($existing) {
-                    if ($note !== '' && trim((string)($existing['note'] ?? '')) !== $note) {
-                        $updateNoteStmt->execute([$note, intval($existing['id'])]);
-                        $updated++;
-                    } else {
-                        $duplicates++;
-                    }
+                    $duplicates++;
                     continue;
                 }
 
-                $insertStmt->execute([$name, $name, $title, $title, $note]);
+                $insertStmt->execute([$nameAr, $nameAr, $nameEn, $titleAr, $titleAr, $titleEn, $batchHospitalId]);
                 $inserted++;
             }
 
             $doctors = $pdo->query("SELECT * FROM doctors ORDER BY name_ar")->fetchAll();
-            $summaryMessage = "تمت معالجة الدفعة بنجاح: أضيف {$inserted}، تحدّث {$updated}، مكرّر {$duplicates}.";
+            $summaryMessage = "تمت معالجة الدفعة بنجاح: أضيف {$inserted}، مكرّر {$duplicates}.";
             if (!empty($errors)) {
                 $summaryMessage .= " أخطاء: " . implode(' | ', array_slice($errors, 0, 3));
                 if (count($errors) > 3) {
@@ -1983,6 +2072,9 @@ if (isset($_POST['action']) && $_POST['action'] !== 'login' && $_POST['action'] 
             }
             $stmt = $pdo->prepare("UPDATE doctors SET name = ?, title = ?, note = ?, name_ar = ?, name_en = ?, title_ar = ?, title_en = ?, hospital_id = ? WHERE id = ?");
             $stmt->execute([$name, $title, $note, $name_ar, $name_en, $title_ar, $title_en, $doc_hospital_id, $id]);
+            // Cascade update to leaves
+            $cascadeStmt = $pdo->prepare("UPDATE sick_leaves SET doctor_name_en = ?, doctor_title_en = ? WHERE doctor_id = ?");
+            $cascadeStmt->execute([$name_en, $title_en, $id]);
             $doctor = $pdo->prepare("SELECT * FROM doctors WHERE id = ?");
             $doctor->execute([$id]);
             $doctorData = $doctor->fetch();
@@ -2059,6 +2151,9 @@ if (isset($_POST['action']) && $_POST['action'] !== 'login' && $_POST['action'] 
             }
             $stmt = $pdo->prepare("UPDATE patients SET name = ?, identity_number = ?, phone = ?, folder_link = ?, name_ar = ?, name_en = ?, employer_ar = ?, employer_en = ?, nationality_ar = ?, nationality_en = ? WHERE id = ?");
             $stmt->execute([$name, $identity, $phone, $folder_link, $name_ar, $name_en, $employer_ar, $employer_en, $nationality_ar, $nationality_en, $id]);
+            // Cascade update to leaves
+            $cascadeStmt = $pdo->prepare("UPDATE sick_leaves SET patient_name_en = ?, employer_ar = ?, employer_en = ? WHERE patient_id = ?");
+            $cascadeStmt->execute([$name_en, $employer_ar, $employer_en, $id]);
             $patient = $pdo->prepare("SELECT * FROM patients WHERE id = ?");
             $patient->execute([$id]);
             $patientData = $patient->fetch();
@@ -2780,6 +2875,28 @@ if (isset($_POST['action']) && $_POST['action'] !== 'login' && $_POST['action'] 
             echo json_encode(['success' => true, 'message' => 'تم حذف جميع جلسات المستخدم.']);
             break;
 
+        case 'mark_hospital_leaves_paid':
+            $hospital_id = intval($_POST['hospital_id'] ?? 0);
+            $amount = floatval($_POST['amount'] ?? 0);
+            if ($hospital_id <= 0) {
+                echo json_encode(['success' => false, 'message' => 'يرجى اختيار مستشفى.']);
+                exit;
+            }
+            if ($amount > 0) {
+                $stmt = $pdo->prepare("UPDATE sick_leaves SET is_paid = 1, payment_amount = ? WHERE hospital_id = ? AND is_paid = 0 AND deleted_at IS NULL");
+                $stmt->execute([$amount, $hospital_id]);
+            } else {
+                $stmt = $pdo->prepare("UPDATE sick_leaves SET is_paid = 1 WHERE hospital_id = ? AND is_paid = 0 AND deleted_at IS NULL");
+                $stmt->execute([$hospital_id]);
+            }
+            $pdo->prepare("DELETE FROM notifications WHERE type = 'payment' AND leave_id IN (SELECT id FROM sick_leaves WHERE hospital_id = ? AND is_paid = 1)")->execute([$hospital_id]);
+            $data = fetchAllData($pdo);
+            $data['stats'] = getStats($pdo);
+            $data['success'] = true;
+            $data['message'] = 'تم تأكيد دفع جميع إجازات المستشفى المحدد.';
+            echo json_encode($data);
+            break;
+
         case 'mark_all_leaves_paid':
             if ($_SESSION['admin_role'] !== 'admin') {
                 echo json_encode(['success' => false, 'message' => 'ليس لديك صلاحية.']);
@@ -2827,7 +2944,7 @@ $loggedIn = is_logged_in();
 if ($loggedIn) {
     $doctors = $pdo->query("SELECT d.*, h.name_ar AS hospital_name_ar FROM doctors d LEFT JOIN hospitals h ON d.hospital_id = h.id ORDER BY d.name_ar")->fetchAll();
     $patients = $pdo->query("SELECT * FROM patients ORDER BY name_ar")->fetchAll();
-    $hospitals = $pdo->query("SELECT id, name_ar, name_en, license_number, logo_path, logo_url, service_prefix, created_at, updated_at, CASE WHEN logo_data IS NOT NULL AND logo_data != '' THEN 'has_logo' ELSE '' END AS has_logo_data FROM hospitals ORDER BY name_ar")->fetchAll();
+    $hospitals = $pdo->query("SELECT id, name_ar, name_en, license_number, logo_path, logo_url, service_prefix, logo_scale, logo_offset_x, logo_offset_y, created_at, updated_at, CASE WHEN logo_data IS NOT NULL AND logo_data != '' THEN 'has_logo' ELSE '' END AS has_logo_data FROM hospitals ORDER BY name_ar")->fetchAll();
     
     $data = fetchAllData($pdo);
     $leaves = $data['leaves'];
@@ -4868,43 +4985,6 @@ if (!in_array($uiDataViewMode, ['table','compact','cards','zebra','glass','minim
                 <h5><i class="bi bi-plus-circle-fill"></i> إضافة إجازة مرضية جديدة</h5>
                 <form id="addLeaveForm" enctype="multipart/form-data">
                     <div class="row g-3">
-                        <div class="col-12">
-                            <label class="form-label">طريقة الإدخال</label>
-                            <div class="d-flex gap-3 flex-wrap">
-                                <div class="form-check">
-                                    <input class="form-check-input" type="radio" name="add_mode" id="add_mode_assisted" value="assisted" checked>
-                                    <label class="form-check-label" for="add_mode_assisted">ذكي (تحويل البيانات تلقائياً)</label>
-                                </div>
-                                <div class="form-check">
-                                    <input class="form-check-input" type="radio" name="add_mode" id="add_mode_manual" value="manual">
-                                    <label class="form-check-label" for="add_mode_manual">يدوي (الطريقة الحالية)</label>
-                                </div>
-                            </div>
-                        </div>
-
-                        <div class="col-12" id="assistedInputCard">
-                            <label class="form-label">إدخال ذكي للبيانات</label>
-                            <textarea class="form-control" id="assisted_leave_input" rows="5" placeholder="ألصق البيانات بأي تنسيق، مثال:
-اسم المريض: أحمد علي
-الهوية: 1020304050
-الجوال: 05xxxxxxxx
-رابط الملف: https://...
-اسم الطبيب: د. سارة محمد
-المسمى: استشاري باطنية
-تاريخ الإصدار: 2026-04-22
-من: 2026-04-22
-إلى: 2026-04-25
-مدفوعة: نعم
-المبلغ: 150
-مرافق: لا"></textarea>
-                            <div class="d-flex align-items-center gap-2 mt-2 flex-wrap">
-                                <button type="button" class="btn btn-outline-primary btn-sm" id="assistParseBtn"><i class="bi bi-magic"></i> تحليل وتعبئة الحقول</button>
-                                <small class="text-muted">سيتم تعبئة النموذج تلقائياً، وإذا كانت هناك حقول ناقصة سيتم تنبيهك بها.</small>
-                            </div>
-                            <small class="text-muted d-block mt-1">التحليل يعمل محلياً بدون API وبمحرك قواعد ذكي متعدد الاحتمالات.</small>
-                            <div class="mt-2 small" id="assistedBotStatus" style="white-space: pre-line; color:#0d6efd;"></div>
-                        </div>
-
                         <!-- رمز الخدمة -->
                         <div class="col-md-4">
                             <label class="form-label">رمز الخدمة (يدوي - اختياري)</label>
@@ -4915,6 +4995,7 @@ if (!in_array($uiDataViewMode, ['table','compact','cards','zebra','glass','minim
                         <!-- المستشفى -->
                         <div class="col-md-4">
                             <label class="form-label">المستشفى *</label>
+                            <input type="text" class="form-control form-control-sm mb-2" id="hospital_id_search" placeholder="بحث سريع باسم المستشفى...">
                             <select class="form-select" name="hospital_id" id="hospital_id" required>
                                 <option value="">-- اختر مستشفى --</option>
                                 <?php if (isset($hospitals)) foreach ($hospitals as $h): ?>
@@ -5156,16 +5237,26 @@ if (!in_array($uiDataViewMode, ['table','compact','cards','zebra','glass','minim
                     </form>
                     <div class="alert alert-light border mb-3">
                         <div class="d-flex flex-wrap justify-content-between align-items-center gap-2 mb-2">
-                            <strong><i class="bi bi-stars text-primary"></i> إضافة دفعة أطباء ذكية</strong>
-                            <small class="text-muted">كل سطر = اسم | مسمى | ملاحظة (اختياري)</small>
+                            <strong><i class="bi bi-people-fill text-primary"></i> إضافة دفعة أطباء</strong>
+                            <small class="text-muted">كل سطر = اسم عربي | اسم إنجليزي | مسمى عربي | مسمى إنجليزي</small>
                         </div>
                         <form id="addDoctorsBatchForm" class="row g-2">
-                            <div class="col-md-10">
-                                <textarea class="form-control" id="doctors_batch_text" name="doctors_batch_text" rows="4" placeholder="د. أحمد علي | استشاري باطنية | دوام مسائي&#10;د. نورة خالد | أخصائي أطفال&#10;د. سامي محمد - نائب أول جراحة - متعاون"></textarea>
+                            <div class="col-md-4">
+                                <label class="form-label">المستشفى</label>
+                                <select class="form-select" name="batch_hospital_id" id="batch_hospital_id">
+                                    <option value="">اختر مستشفى</option>
+                                    <?php foreach ($hospitals_data as $h): ?>
+                                    <option value="<?php echo $h['id']; ?>"><?php echo htmlspecialchars($h['name_ar']); ?></option>
+                                    <?php endforeach; ?>
+                                </select>
                             </div>
-                            <div class="col-md-2 d-grid">
+                            <div class="col-md-8">
+                                <label class="form-label">الأطباء (كل سطر طبيب واحد)</label>
+                                <textarea class="form-control" id="doctors_batch_text" name="doctors_batch_text" rows="4" placeholder="د. أحمد علي | Dr. Ahmed Ali | استشاري باطنية | Consultant Internal Medicine&#10;د. نورة خالد | Dr. Noura Khaled | أخصائي أطفال | Pediatric Specialist"></textarea>
+                            </div>
+                            <div class="col-md-12 d-grid">
                                 <button type="submit" class="btn btn-outline-primary">
-                                    <i class="bi bi-magic"></i> إضافة الدفعة
+                                    <i class="bi bi-people-fill"></i> إضافة الدفعة
                                 </button>
                             </div>
                         </form>
@@ -5433,6 +5524,15 @@ if (!in_array($uiDataViewMode, ['table','compact','cards','zebra','glass','minim
                             <input type="text" class="form-control" name="service_code_edit" id="service_code_edit" required>
                         </div>
                         <div class="col-md-6">
+                            <label class="form-label">المستشفى</label>
+                            <select class="form-select" name="hospital_id_edit" id="hospital_id_edit">
+                                <option value="">-- لا تغيير --</option>
+                                <?php if (isset($hospitals)) foreach ($hospitals as $h): ?>
+                                <option value="<?php echo $h['id']; ?>"><?php echo htmlspecialchars($h['name_ar']); ?></option>
+                                <?php endforeach; ?>
+                            </select>
+                        </div>
+                        <div class="col-md-6">
                             <label class="form-label">الطبيب</label>
                             <input type="text" class="form-control form-control-sm mb-2" id="doctor_id_edit_search" placeholder="بحث سريع باسم الطبيب...">
                             <select class="form-select" name="doctor_id_edit" id="doctor_id_edit">
@@ -5491,6 +5591,17 @@ if (!in_array($uiDataViewMode, ['table','compact','cards','zebra','glass','minim
                             <label class="form-label">المبلغ</label>
                             <input type="number" step="0.01" class="form-control" name="payment_amount_edit" id="payment_amount_edit" value="0">
                         </div>
+                        <div class="col-md-4">
+                            <label class="form-label">الوقت</label>
+                            <input type="time" class="form-control" name="issue_time_edit" id="issue_time_edit">
+                        </div>
+                        <div class="col-md-4">
+                            <label class="form-label">الفترة</label>
+                            <select class="form-select" name="issue_period_edit" id="issue_period_edit">
+                                <option value="AM">صباحاً (AM)</option>
+                                <option value="PM">مساءً (PM)</option>
+                            </select>
+                        </div>
                     </div>
                 </form>
             </div>
@@ -5516,10 +5627,21 @@ if (!in_array($uiDataViewMode, ['table','compact','cards','zebra','glass','minim
                 </div>
                 <form id="duplicateLeaveForm">
                     <input type="hidden" name="dup_patient_id" id="dup_patient_id">
+                    <input type="hidden" name="dup_hospital_id" id="dup_hospital_id">
                     <div class="row g-3">
                         <div class="col-md-6">
                             <label class="form-label">المريض</label>
                             <input type="text" class="form-control" id="dup_patient_name_display" readonly style="background:#f8f9fa;">
+                        </div>
+                        <div class="col-md-6">
+                            <label class="form-label">المستشفى</label>
+                            <input type="text" class="form-control form-control-sm mb-2" id="dup_hospital_search" placeholder="بحث سريع باسم المستشفى...">
+                            <select class="form-select" name="dup_hospital_select" id="dup_hospital_select">
+                                <option value="">-- اختر مستشفى --</option>
+                                <?php if (isset($hospitals)) foreach ($hospitals as $h): ?>
+                                <option value="<?php echo $h['id']; ?>"><?php echo htmlspecialchars($h['name_ar']); ?></option>
+                                <?php endforeach; ?>
+                            </select>
                         </div>
                         <div class="col-md-6">
                             <label class="form-label">الطبيب</label>
@@ -5591,30 +5713,16 @@ if (!in_array($uiDataViewMode, ['table','compact','cards','zebra','glass','minim
                             <label class="form-label">صلة القرابة</label>
                             <input type="text" class="form-control" name="dup_companion_relation" id="dup_companion_relation">
                         </div>
-                        <input type="hidden" name="dup_existing_logo_path" id="dup_existing_logo_path">
-                        <div class="col-md-6">
-                            <label class="form-label">اسم المريض (English)</label>
-                            <input type="text" class="form-control" name="dup_patient_name_en" id="dup_patient_name_en">
+                        <div class="col-md-4">
+                            <label class="form-label">الوقت</label>
+                            <input type="time" class="form-control" name="dup_issue_time" id="dup_issue_time">
                         </div>
-                        <div class="col-md-6">
-                            <label class="form-label">اسم الطبيب (English)</label>
-                            <input type="text" class="form-control" name="dup_doctor_name_en" id="dup_doctor_name_en">
-                        </div>
-                        <div class="col-md-6">
-                            <label class="form-label">المسمى الوظيفي (English)</label>
-                            <input type="text" class="form-control" name="dup_doctor_title_en" id="dup_doctor_title_en">
-                        </div>
-                        <div class="col-md-6">
-                            <label class="form-label">اسم المستشفى (عربي)</label>
-                            <input type="text" class="form-control" name="dup_hospital_name_ar" id="dup_hospital_name_ar">
-                        </div>
-                        <div class="col-md-6">
-                            <label class="form-label">Hospital Name (English)</label>
-                            <input type="text" class="form-control" name="dup_hospital_name_en" id="dup_hospital_name_en">
-                        </div>
-                        <div class="col-md-6">
-                            <label class="form-label">تغيير الشعار (اختياري)</label>
-                            <input type="file" class="form-control" name="dup_leave_logo" id="dup_leave_logo" accept="image/*">
+                        <div class="col-md-4">
+                            <label class="form-label">الفترة</label>
+                            <select class="form-select" name="dup_issue_period" id="dup_issue_period">
+                                <option value="AM">صباحاً (AM)</option>
+                                <option value="PM">مساءً (PM)</option>
+                            </select>
                         </div>
                     </div>
                 </form>
@@ -5772,6 +5880,51 @@ if (!in_array($uiDataViewMode, ['table','compact','cards','zebra','glass','minim
     </div>
 </div>
 
+<!-- ======================== مودال تعديل المستشفى ======================== -->
+<div class="modal fade" id="editHospitalModal" tabindex="-1" aria-hidden="true">
+    <div class="modal-dialog modal-lg modal-dialog-centered modal-dialog-scrollable">
+        <div class="modal-content">
+            <div class="modal-header"><h5 class="modal-title"><i class="bi bi-pencil text-primary"></i> تعديل المستشفى</h5><button type="button" class="btn-close" data-bs-dismiss="modal"></button></div>
+            <div class="modal-body">
+                <form id="editHospitalForm" enctype="multipart/form-data">
+                    <input type="hidden" name="hospital_id" id="edit_hospital_id">
+                    <input type="hidden" name="logo_scale" id="edit_logo_scale" value="1">
+                    <input type="hidden" name="logo_offset_x" id="edit_logo_offset_x" value="0">
+                    <input type="hidden" name="logo_offset_y" id="edit_logo_offset_y" value="0">
+                    <div class="row g-3">
+                        <div class="col-md-6"><label class="form-label">اسم المستشفى (عربي)</label><input type="text" class="form-control" name="hospital_name_ar" id="edit_hospital_name_ar" required></div>
+                        <div class="col-md-6"><label class="form-label">Hospital Name (EN)</label><input type="text" class="form-control" name="hospital_name_en" id="edit_hospital_name_en"></div>
+                        <div class="col-md-4"><label class="form-label">رقم الترخيص</label><input type="text" class="form-control" name="hospital_license" id="edit_hospital_license"></div>
+                        <div class="col-md-4"><label class="form-label">البادئة</label><select class="form-select" name="hospital_prefix" id="edit_hospital_prefix"><option value="GSL">GSL (حكومي)</option><option value="PSL">PSL (خاص)</option></select></div>
+                        <div class="col-md-4"></div>
+                        <div class="col-md-6"><label class="form-label">رفع شعار جديد</label><input type="file" class="form-control" name="hospital_logo" id="edit_hospital_logo_file" accept="image/*"></div>
+                        <div class="col-md-6"><label class="form-label">أو رابط الشعار</label><input type="url" class="form-control" name="hospital_logo_url" id="edit_hospital_logo_url" placeholder="https://..."></div>
+                        <div class="col-12">
+                            <label class="form-label">معاينة الشعار في القالب</label>
+                            <div style="border:1px solid #ddd;border-radius:8px;padding:10px;background:#f9f9f9;">
+                                <div id="logoPreviewBox" style="width:136px;height:136px;margin:0 auto;overflow:hidden;border:1px dashed #aaa;border-radius:8px;position:relative;cursor:move;">
+                                    <img id="edit_hospital_logo_preview" src="" style="position:absolute;top:0;left:0;width:100%;height:100%;object-fit:contain;transform-origin:center center;" draggable="false">
+                                </div>
+                                <div class="d-flex align-items-center gap-3 mt-2 justify-content-center flex-wrap">
+                                    <label class="form-label mb-0 small">تكبير/تصغير:</label>
+                                    <input type="range" id="logoScaleSlider" min="0.3" max="3" step="0.05" value="1" style="width:150px;">
+                                    <span id="logoScaleValue" class="small">100%</span>
+                                    <button type="button" class="btn btn-sm btn-outline-secondary" id="logoResetBtn"><i class="bi bi-arrow-counterclockwise"></i> إعادة</button>
+                                </div>
+                            </div>
+                            <small class="text-muted">اسحب الشعار لتحريكه، واستخدم الشريط للتكبير/التصغير. الإعدادات تُحفظ مع المستشفى.</small>
+                        </div>
+                    </div>
+                </form>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">إلغاء</button>
+                <button type="button" class="btn btn-success-custom" id="saveEditHospital">حفظ</button>
+            </div>
+        </div>
+    </div>
+</div>
+
 <?php if ($_SESSION['admin_role'] === 'admin'): ?>
 <!-- ======================== مودال الإعدادات ======================== -->
 <div class="modal fade" id="settingsModal" tabindex="-1" aria-hidden="true">
@@ -5794,6 +5947,22 @@ if (!in_array($uiDataViewMode, ['table','compact','cards','zebra','glass','minim
                                 <div class="d-flex flex-wrap gap-2">
                                     <button type="button" class="btn btn-success" id="settingsMarkAllPaidBtn"><i class="bi bi-check2-all"></i> جعل كل الإجازات مدفوعة</button>
                                     <button type="button" class="btn btn-warning" id="settingsResetAllPaymentsBtn"><i class="bi bi-eraser"></i> تصفير المدفوعات والمستحقات</button>
+                                </div>
+                                <hr class="my-3">
+                                <div class="fw-bold mb-2"><i class="bi bi-hospital"></i> دفعة واحدة لمستشفى محدد</div>
+                                <div class="row g-2 align-items-end">
+                                    <div class="col-md-5">
+                                        <label class="form-label">اختر المستشفى</label>
+                                        <select class="form-select" id="batchPayHospitalSelect"><option value="">اختر مستشفى...</option></select>
+                                    </div>
+                                    <div class="col-md-4">
+                                        <label class="form-label">المبلغ (اختياري - إذا فارغ يؤكد بدون تغيير المبلغ)</label>
+                                        <input type="number" class="form-control" id="batchPayAmount" step="0.01" min="0" placeholder="0.00">
+                                    </div>
+                                    <div class="col-md-3">
+                                        <button type="button" class="btn btn-success w-100" id="batchPayHospitalBtn"><i class="bi bi-cash-coin"></i> دفع الكل</button>
+                                    </div>
+                                </div>
                                 </div>
                             </div>
                         </div>
@@ -6338,7 +6507,7 @@ async function generateSickLeavePdf(leave) {
         const startDate = formatDateDMY(leave.start_date);
         const endDate = formatDateDMY(leave.end_date);
         const days = parseInt(leave.days_count || 0, 10) || 0;
-        const durationEn = `${days} day${days > 1 ? 's' : ''} ( ${startDate} to ${endDate} )`;
+        const durationEn = `${days} ${days === 1 ? 'day' : 'days'} ( ${startDate} to ${endDate} )`;
         const durationAr = `${days}`;
         const hospitalAr = leave.hospital_name_ar || 'مستشفى محمد بن عبدالعزيز الرياض';
         const hospitalEn = leave.hospital_name_en || 'MOHAMMAD BIN ABDULAZIZ HOSPITAL - RIYADH';
@@ -6370,7 +6539,21 @@ async function generateSickLeavePdf(leave) {
         if (leave.logo_path) {
             const logoContainer = parsed.getElementById('LBj8YtPxRzcJlJHK');
             const logoImg = logoContainer ? logoContainer.querySelector('img') : null;
-            if (logoImg) logoImg.setAttribute('src', leave.logo_path);
+            if (logoImg) {
+                logoImg.setAttribute('src', leave.logo_path);
+                // Apply saved logo scale/offset from hospital settings
+                const hData = (currentTableData.hospitals || []).find(h => h.id == leave.hospital_id);
+                if (hData) {
+                    const s = parseFloat(hData.logo_scale || 1);
+                    const ox = parseFloat(hData.logo_offset_x || 0);
+                    const oy = parseFloat(hData.logo_offset_y || 0);
+                    logoImg.style.transform = `translate(${ox}px, ${oy}px) scale(${s})`;
+                    logoImg.style.position = 'absolute';
+                    logoImg.style.top = '0';
+                    logoImg.style.left = '0';
+                    if (logoContainer) { logoContainer.style.overflow = 'hidden'; logoContainer.style.position = 'relative'; }
+                }
+            }
         }
 
         wrapper = document.createElement('div');
@@ -7054,6 +7237,7 @@ document.addEventListener('DOMContentLoaded', () => {
     setupSelectQuickSearch('doctor_select_search', 'doctor_select');
     setupSelectQuickSearch('dup_doctor_search', 'dup_doctor_select');
     setupSelectQuickSearch('doctor_id_edit_search', 'doctor_id_edit');
+    setupSelectQuickSearch('hospital_id_search', 'hospital_id');
 
     // حقول المرافق في نموذج الإضافة
     const companionCheckbox = document.getElementById('is_companion');
@@ -7081,404 +7265,7 @@ document.addEventListener('DOMContentLoaded', () => {
     document.getElementById('dup_start_date').addEventListener('change', () => calcDays('dup_start_date', 'dup_end_date', 'dup_days_count'));
     document.getElementById('dup_end_date').addEventListener('change', () => calcDays('dup_start_date', 'dup_end_date', 'dup_days_count'));
 
-    let assistedDraft = {};
 
-    function normalizeArabicText(value) {
-        return (value || '')
-            .toString()
-            .replace(/[\u064B-\u065F]/g, '')
-            .replace(/أ|إ|آ/g, 'ا')
-            .replace(/ى/g, 'ي')
-            .replace(/ة/g, 'ه')
-            .trim()
-            .toLowerCase();
-    }
-
-    function parseFlexibleDate(rawValue) {
-        const monthMap = {
-            'يناير': 1, 'jan': 1, 'january': 1,
-            'فبراير': 2, 'feb': 2, 'february': 2,
-            'مارس': 3, 'march': 3, 'mar': 3,
-            'ابريل': 4, 'أبريل': 4, 'april': 4, 'apr': 4,
-            'مايو': 5, 'may': 5,
-            'يونيو': 6, 'june': 6, 'jun': 6,
-            'يوليو': 7, 'july': 7, 'jul': 7,
-            'اغسطس': 8, 'أغسطس': 8, 'august': 8, 'aug': 8,
-            'سبتمبر': 9, 'september': 9, 'sep': 9,
-            'اكتوبر': 10, 'أكتوبر': 10, 'october': 10, 'oct': 10,
-            'نوفمبر': 11, 'november': 11, 'nov': 11,
-            'ديسمبر': 12, 'december': 12, 'dec': 12
-        };
-
-        const value = (rawValue || '')
-            .toString()
-            .replace(/[٠-٩]/g, d => '٠١٢٣٤٥٦٧٨٩'.indexOf(d))
-            .trim();
-        if (!value) return '';
-        if (/^\d{4}-\d{2}-\d{2}$/.test(value)) return value;
-
-        const monthTextMatch = value.match(/^(\d{1,2})\s+([^\s]+)\s+(\d{4})$/i);
-        if (monthTextMatch) {
-            const dayText = parseInt(monthTextMatch[1], 10);
-            const monthText = normalizeArabicText(monthTextMatch[2]);
-            const yearText = parseInt(monthTextMatch[3], 10);
-            const monthNum = monthMap[monthText];
-            if (monthNum) {
-                return `${yearText}-${String(monthNum).padStart(2, '0')}-${String(dayText).padStart(2, '0')}`;
-            }
-        }
-
-        const slashMatch = value.match(/^(\d{1,4})[\/\-](\d{1,2})[\/\-](\d{1,4})$/);
-        if (!slashMatch) return '';
-
-        let first = parseInt(slashMatch[1], 10);
-        let second = parseInt(slashMatch[2], 10);
-        let third = parseInt(slashMatch[3], 10);
-
-        let year, month, day;
-        if (first > 1900) {
-            year = first; month = second; day = third;
-        } else if (third > 1900) {
-            year = third; month = second; day = first;
-        } else {
-            return '';
-        }
-
-        const mm = String(month).padStart(2, '0');
-        const dd = String(day).padStart(2, '0');
-        if (month >= 1 && month <= 12 && day >= 1 && day <= 31) return `${year}-${mm}-${dd}`;
-        return '';
-    }
-
-    function daysInclusive(startDate, endDate) {
-        if (!startDate || !endDate) return '';
-        const diff = Math.ceil((new Date(endDate) - new Date(startDate)) / (1000 * 60 * 60 * 24)) + 1;
-        return diff > 0 ? diff : '';
-    }
-
-    function inferDatesFromRawText(rawText, payload) {
-        const text = (rawText || '').replace(/\s+/g, ' ').trim();
-        const rangeMatch = text.match(/(\d{1,4}[\/\-]\d{1,2}[\/\-]\d{1,4})\s*(?:الى|إلى|to|\-)\s*(\d{1,4}[\/\-]\d{1,2}[\/\-]\d{1,4})/i);
-        if (rangeMatch) {
-            const start = parseFlexibleDate(rangeMatch[1]);
-            const end = parseFlexibleDate(rangeMatch[2]);
-            if (start && end) {
-                payload.start_date = payload.start_date || start;
-                payload.end_date = payload.end_date || end;
-                payload.issue_date = payload.issue_date || start;
-                payload.days_count = payload.days_count || daysInclusive(start, end);
-                return;
-            }
-        }
-
-        const allDates = Array.from(text.matchAll(/\d{1,4}[\/\-]\d{1,2}[\/\-]\d{1,4}/g)).map(m => parseFlexibleDate(m[0])).filter(Boolean);
-        const uniqueDates = [...new Set(allDates)];
-        if (uniqueDates.length === 1) {
-            payload.issue_date = payload.issue_date || uniqueDates[0];
-            payload.start_date = payload.start_date || uniqueDates[0];
-            payload.end_date = payload.end_date || uniqueDates[0];
-            payload.days_count = payload.days_count || 1;
-        } else if (uniqueDates.length >= 2) {
-            const ordered = uniqueDates.sort();
-            payload.start_date = payload.start_date || ordered[0];
-            payload.end_date = payload.end_date || ordered[ordered.length - 1];
-            payload.issue_date = payload.issue_date || payload.start_date;
-            payload.days_count = payload.days_count || daysInclusive(payload.start_date, payload.end_date);
-        }
-    }
-
-    function inferServicePrefix(rawText, payload) {
-        if (payload.service_prefix) return;
-        const normalized = normalizeArabicText(rawText);
-        if (normalized.includes('مستشفي') || normalized.includes('hospital') || normalized.includes('حكومي') || normalized.includes('government')) {
-            payload.service_prefix = 'GSL';
-            return;
-        }
-        if (normalized.includes('مركز') || normalized.includes('مجمع') || normalized.includes('عياده') || normalized.includes('clinic') || normalized.includes('private')) {
-            payload.service_prefix = 'PSL';
-        }
-    }
-
-    function inferFacilityNote(rawText, payload) {
-        const text = (rawText || '').trim();
-        if (!text) return;
-
-        const facilityNameMatch = text.match(/(?:الجهة|المرفق|facility|hospital|clinic|center)\s*(?:هو|:)?\s*([^\n،]{2,80})/i);
-        if (facilityNameMatch) {
-            payload.facility_note = facilityNameMatch[1].trim();
-            return;
-        }
-
-        const normalized = normalizeArabicText(text);
-        if (normalized.includes('مستشفي') || normalized.includes('hospital')) {
-            payload.facility_note = 'مستشفى';
-            return;
-        }
-        if (normalized.includes('مركز') || normalized.includes('clinic') || normalized.includes('center') || normalized.includes('مجمع') || normalized.includes('عياده')) {
-            payload.facility_note = 'مركز';
-        }
-    }
-
-    function parseAssistedLeaveInput(rawText) {
-        const payload = {};
-        const fullText = (rawText || '').trim();
-        const lines = (rawText || '')
-            .split(/\n+/)
-            .map(l => l.trim())
-            .filter(Boolean);
-
-        const fieldMap = {
-            patient_name: ['اسم المريض', 'المريض', 'patient name'],
-            patient_identity: ['الهوية', 'رقم الهوية', 'identity', 'id number'],
-            patient_phone: ['الجوال', 'الهاتف', 'phone', 'mobile'],
-            patient_folder_link: ['رابط الملف', 'رابط المجلد', 'folder link', 'file link'],
-            doctor_name: ['اسم الطبيب', 'الطبيب', 'doctor name'],
-            doctor_title: ['المسمى', 'المسمى الوظيفي', 'الاختصاص', 'title', 'specialty'],
-            doctor_note: ['ملاحظة الطبيب', 'ملاحظة', 'note'],
-            issue_date: ['تاريخ الاصدار', 'تاريخ الإصدار', 'issue date'],
-            start_date: ['بداية الاجازة', 'بداية الإجازة', 'من', 'start date', 'from'],
-            end_date: ['نهاية الاجازة', 'نهاية الإجازة', 'الى', 'إلى', 'end date', 'to'],
-            days_count: ['عدد الايام', 'عدد الأيام', 'days', 'days count'],
-            service_code_manual: ['رمز الخدمة', 'service code'],
-            service_prefix: ['نوع الرمز', 'بادئة الرمز', 'prefix', 'service prefix'],
-            is_companion: ['مرافق', 'اجازة مرافق', 'إجازة مرافق', 'companion'],
-            companion_name: ['اسم المرافق', 'companion name'],
-            companion_relation: ['صلة القرابة', 'العلاقة', 'companion relation'],
-            is_paid: ['مدفوعة', 'دفع', 'paid'],
-            payment_amount: ['المبلغ', 'amount'],
-            facility_note: ['الجهة', 'المرفق', 'facility', 'hospital', 'clinic', 'center']
-        };
-
-        function findFieldByKey(rawKey) {
-            const normalizedKey = normalizeArabicText(rawKey);
-            for (const [fieldName, aliases] of Object.entries(fieldMap)) {
-                if (aliases.some(alias => normalizedKey.includes(normalizeArabicText(alias)))) {
-                    return fieldName;
-                }
-            }
-            return null;
-        }
-
-        lines.forEach(line => {
-            const match = line.match(/^([^:=\-]+)\s*[:=\-]\s*(.+)$/);
-            if (!match) return;
-            const key = match[1].trim();
-            const value = match[2].trim();
-            const fieldName = findFieldByKey(key);
-            if (!fieldName) return;
-
-            if (['issue_date', 'start_date', 'end_date'].includes(fieldName)) {
-                payload[fieldName] = parseFlexibleDate(value) || value;
-                return;
-            }
-            payload[fieldName] = value;
-        });
-
-        // استخراج ذكي من نص حر بدون صيغة "حقل: قيمة"
-        const urlMatch = fullText.match(/https?:\/\/[^\s]+/i);
-        if (!payload.patient_folder_link && urlMatch) payload.patient_folder_link = urlMatch[0];
-
-        const idMatch = fullText.match(/\b\d{10}\b/);
-        if (!payload.patient_identity && idMatch) payload.patient_identity = idMatch[0];
-
-        const phoneMatch = fullText.match(/(?:\+966|00966|966|0)?5\d{8}\b/);
-        if (!payload.patient_phone && phoneMatch) payload.patient_phone = phoneMatch[0];
-
-        if (!payload.patient_name) {
-            const pNameMatch = fullText.match(/(?:المريض|اسم المريض|patient)\s*(?:هو|:)?\s*([^\n،,.]{3,60})/i);
-            if (pNameMatch) payload.patient_name = pNameMatch[1].trim();
-        }
-
-        if (!payload.doctor_name) {
-            const dNameMatch = fullText.match(/(?:الطبيب|اسم الطبيب|doctor)\s*(?:هو|:)?\s*([^\n،,.]{3,60})/i);
-            if (dNameMatch) payload.doctor_name = dNameMatch[1].trim();
-        }
-
-        if (!payload.doctor_title) {
-            const titleMatch = fullText.match(/(?:المسمى|الاختصاص|التخصص|title|specialty)\s*(?:هو|:)?\s*([^\n،,.]{2,60})/i);
-            if (titleMatch) payload.doctor_title = titleMatch[1].trim();
-        }
-
-        if (payload.is_paid === undefined) {
-            if (/(غير\s*مدفوع|غير\s*مدفوعة|unpaid)/i.test(fullText)) payload.is_paid = 'لا';
-            if (/(مدفوع|مدفوعة|paid)/i.test(fullText)) payload.is_paid = 'نعم';
-        }
-
-        if (!payload.payment_amount) {
-            const amountMatch = fullText.match(/(?:المبلغ|amount|رسوم|قيمة)\s*(?:هو|:)?\s*([0-9]+(?:\.[0-9]+)?)/i);
-            if (amountMatch) payload.payment_amount = amountMatch[1];
-        }
-
-        if (payload.is_companion === undefined) {
-            if (/(بدون\s*مرافق|لا\s*يوجد\s*مرافق|ليس\s*مرافق|no\s*companion)/i.test(fullText)) payload.is_companion = 'لا';
-            else if (/(مرافق|companion)/i.test(fullText)) payload.is_companion = 'نعم';
-        }
-
-        if (!payload.days_count) {
-            const daysMatch = fullText.match(/(?:لمدة|عدد\s*الايام|عدد\s*الأيام|days?)\s*(?:هو|:)?\s*(\d{1,3})/i);
-            if (daysMatch) payload.days_count = daysMatch[1];
-        }
-
-        inferServicePrefix(rawText, payload);
-        inferFacilityNote(rawText, payload);
-        inferDatesFromRawText(rawText, payload);
-
-        if (payload.start_date && payload.end_date) {
-            payload.issue_date = payload.issue_date || payload.start_date;
-            payload.days_count = payload.days_count || daysInclusive(payload.start_date, payload.end_date);
-        }
-
-        return payload;
-    }
-
-    function parseBooleanValue(value) {
-        const normalized = normalizeArabicText(value);
-        return ['1', 'yes', 'true', 'نعم', 'ايوه', 'اي', 'صح', 'مدفوعه', 'مدفوعة'].includes(normalized);
-    }
-
-    function applyAssistedDataToAddForm(data) {
-        const patientSelect = document.getElementById('patient_select');
-        const doctorSelect = document.getElementById('doctor_select');
-
-        if (data.service_code_manual) document.getElementById('service_code_manual').value = data.service_code_manual.toUpperCase();
-        if (data.service_prefix) {
-            const normalizedPrefix = data.service_prefix.toUpperCase().includes('P') ? 'PSL' : 'GSL';
-            document.getElementById('service_prefix').value = normalizedPrefix;
-        }
-        if (data.issue_date) document.getElementById('issue_date').value = data.issue_date;
-        if (data.start_date) document.getElementById('start_date').value = data.start_date;
-        if (data.end_date) document.getElementById('end_date').value = data.end_date;
-        if (data.days_count) document.getElementById('days_count').value = parseInt(data.days_count, 10) || '';
-
-        if (data.patient_name || data.patient_identity || data.patient_phone || data.patient_folder_link) {
-            const patientOptions = Array.from(patientSelect.options || []).filter(o => o.value && o.value !== 'manual');
-            const matchedPatient = patientOptions.find(opt => {
-                const text = normalizeArabicText(opt.textContent || '');
-                const byIdentity = data.patient_identity && text.includes(normalizeArabicText(data.patient_identity));
-                const byName = data.patient_name && text.includes(normalizeArabicText(data.patient_name));
-                return byIdentity || byName;
-            });
-
-            if (matchedPatient) {
-                patientSelect.value = matchedPatient.value;
-                togglePatientManualFields();
-            } else {
-                patientSelect.value = 'manual';
-                togglePatientManualFields();
-                if (data.patient_name) document.getElementById('patient_manual_name').value = data.patient_name;
-                if (data.patient_identity) document.getElementById('patient_manual_id').value = data.patient_identity;
-                if (data.patient_phone) document.getElementById('patient_manual_phone').value = data.patient_phone;
-                if (data.patient_folder_link) document.getElementById('patient_manual_folder_link').value = data.patient_folder_link;
-            }
-        }
-
-        if (data.doctor_name || data.doctor_title || data.doctor_note) {
-            const doctorOptions = Array.from(doctorSelect.options || []).filter(o => o.value && o.value !== 'manual');
-            const matchedDoctor = doctorOptions.find(opt => {
-                const text = normalizeArabicText(opt.textContent || '');
-                const byName = data.doctor_name && text.includes(normalizeArabicText(data.doctor_name));
-                const byTitle = data.doctor_title && text.includes(normalizeArabicText(data.doctor_title));
-                return byName || byTitle;
-            });
-
-            if (matchedDoctor) {
-                doctorSelect.value = matchedDoctor.value;
-                toggleDoctorManualFields();
-            } else {
-                doctorSelect.value = 'manual';
-                toggleDoctorManualFields();
-                if (data.doctor_name) document.getElementById('doctor_manual_name').value = data.doctor_name;
-                if (data.doctor_title) document.getElementById('doctor_manual_title').value = data.doctor_title;
-                if (data.doctor_note) document.getElementById('doctor_manual_note').value = data.doctor_note;
-                if (data.facility_note && !document.getElementById('doctor_manual_note').value.trim()) {
-                    document.getElementById('doctor_manual_note').value = data.facility_note;
-                }
-            }
-        }
-
-        if (data.is_companion !== undefined) {
-            const checked = parseBooleanValue(data.is_companion);
-            document.getElementById('is_companion').checked = checked;
-            companionFields.forEach(f => checked ? f.classList.remove('hidden-field') : f.classList.add('hidden-field'));
-        }
-        if (data.companion_name) document.getElementById('companion_name').value = data.companion_name;
-        if (data.companion_relation) document.getElementById('companion_relation').value = data.companion_relation;
-
-        if (data.is_paid !== undefined) document.getElementById('is_paid').checked = parseBooleanValue(data.is_paid);
-        if (data.payment_amount) document.getElementById('payment_amount').value = parseFloat(data.payment_amount) || 0;
-
-        if (document.getElementById('start_date').value && document.getElementById('end_date').value) {
-            document.getElementById('days_count').value = daysInclusive(
-                document.getElementById('start_date').value,
-                document.getElementById('end_date').value
-            ) || document.getElementById('days_count').value;
-        }
-    }
-
-    function renderAssistedBotStatus(message) {
-        const statusBox = document.getElementById('assistedBotStatus');
-        statusBox.textContent = message || '';
-    }
-
-    function getSmartMissingSummary() {
-        const missing = [];
-        const patientSelect = document.getElementById('patient_select').value;
-        const doctorSelect = document.getElementById('doctor_select').value;
-
-        if (!document.getElementById('issue_date').value) missing.push('تاريخ الإصدار');
-        if (!document.getElementById('start_date').value) missing.push('بداية الإجازة');
-        if (!document.getElementById('end_date').value) missing.push('نهاية الإجازة');
-        if (!document.getElementById('days_count').value) missing.push('عدد الأيام');
-
-        if (!patientSelect) missing.push('المريض');
-        if (!doctorSelect) missing.push('الطبيب');
-
-        if (patientSelect === 'manual') {
-            if (!document.getElementById('patient_manual_name').value.trim()) missing.push('اسم المريض');
-            if (!document.getElementById('patient_manual_id').value.trim()) missing.push('رقم الهوية');
-        }
-        if (doctorSelect === 'manual') {
-            if (!document.getElementById('doctor_manual_name').value.trim()) missing.push('اسم الطبيب');
-            if (!document.getElementById('doctor_manual_title').value.trim()) missing.push('المسمى الوظيفي');
-        }
-
-        return missing;
-    }
-
-    function toggleAddInputMode() {
-        const assistedMode = document.getElementById('add_mode_assisted').checked;
-        const assistedCard = document.getElementById('assistedInputCard');
-        assistedCard.classList.toggle('hidden-field', !assistedMode);
-    }
-
-    document.getElementById('add_mode_assisted').addEventListener('change', toggleAddInputMode);
-    document.getElementById('add_mode_manual').addEventListener('change', toggleAddInputMode);
-    toggleAddInputMode();
-
-    document.getElementById('assistParseBtn').addEventListener('click', () => {
-        const rawText = document.getElementById('assisted_leave_input').value;
-        if (!rawText.trim()) {
-            showToast('يرجى إدخال بيانات الإجازة أولاً.', 'warning');
-            return;
-        }
-
-        const parsed = parseAssistedLeaveInput(rawText);
-        assistedDraft = { ...assistedDraft, ...parsed };
-
-        if (!Object.keys(assistedDraft).length) {
-            showToast('لم يتم التعرف على الحقول. استخدم الصيغة: اسم الحقل: القيمة', 'warning');
-            return;
-        }
-        applyAssistedDataToAddForm(assistedDraft);
-        const missing = getSmartMissingSummary();
-        if (missing.length) {
-            renderAssistedBotStatus(`🤖 تم التحليل المحلي الذكي. البيانات الناقصة: ${missing.join(' - ')}`);
-            showToast('تم التحليل لكن توجد حقول ناقصة، راجع الرسالة الزرقاء.', 'warning');
-        } else {
-            renderAssistedBotStatus('✅ تم التحليل المحلي الذكي واكتمال البيانات. جاهز للحفظ.');
-            showToast('تم تحليل البيانات وتعبئة النموذج بنجاح.', 'success');
-        }
-    });
 
     // ====== إضافة إجازة ======
     document.getElementById('addLeaveForm').addEventListener('submit', async (e) => {
@@ -7493,11 +7280,8 @@ document.addEventListener('DOMContentLoaded', () => {
             hideLoading();
             if (result.success) {
                 showToast(result.message, 'success');
-                const createdLeave = (result.leaves || []).find(l => l.service_code === (result.new_service_code || ''));
-                if (createdLeave) await generateSickLeavePdf(createdLeave);
+                // PDF download removed - user will click print button manually
                 e.target.reset();
-                assistedDraft = {};
-                document.getElementById('assistedBotStatus').textContent = '';
                 togglePatientManualFields();
                 toggleDoctorManualFields();
                 companionFields.forEach(f => f.classList.add('hidden-field'));
@@ -7531,6 +7315,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
         document.getElementById('leave_id_edit').value = leave.id;
         document.getElementById('service_code_edit').value = leave.service_code;
+        document.getElementById('hospital_id_edit').value = leave.hospital_id || '';
         document.getElementById('doctor_id_edit').value = leave.doctor_id || '';
         document.getElementById('doctor_id_edit_search').value = '';
         document.getElementById('editDoctorManualFields').classList.add('hidden-field');
@@ -7543,6 +7328,8 @@ document.addEventListener('DOMContentLoaded', () => {
         document.getElementById('companion_relation_edit').value = leave.companion_relation || '';
         document.getElementById('is_paid_edit').checked = leave.is_paid == 1;
         document.getElementById('payment_amount_edit').value = leave.payment_amount;
+        document.getElementById('issue_time_edit').value = leave.issue_time || '';
+        document.getElementById('issue_period_edit').value = leave.issue_period || 'AM';
 
         // إظهار/إخفاء حقول المرافق
         const editCompFields = document.getElementById('editCompanionFields');
@@ -7619,6 +7406,10 @@ document.addEventListener('DOMContentLoaded', () => {
 
         document.getElementById('dup_patient_id').value = leave.patient_id;
         document.getElementById('dup_patient_name_display').value = `${leave.patient_name} (${leave.identity_number})`;
+        document.getElementById('dup_hospital_id').value = leave.hospital_id || '';
+        // Set hospital select
+        const dupHospSel = document.getElementById('dup_hospital_select');
+        if (dupHospSel) dupHospSel.value = leave.hospital_id || '';
         document.getElementById('dup_doctor_select').value = leave.doctor_id || '';
         document.getElementById('dup_issue_date').value = leave.issue_date;
         document.getElementById('dup_start_date').value = leave.start_date;
@@ -7630,12 +7421,8 @@ document.addEventListener('DOMContentLoaded', () => {
         document.getElementById('dup_is_paid').checked = leave.is_paid == 1;
         document.getElementById('dup_payment_amount').value = leave.payment_amount;
         document.getElementById('dup_service_code_manual').value = '';
-        document.getElementById('dup_patient_name_en').value = leave.patient_name_en || '';
-        document.getElementById('dup_doctor_name_en').value = leave.doctor_name_en || '';
-        document.getElementById('dup_doctor_title_en').value = leave.doctor_title_en || '';
-        document.getElementById('dup_hospital_name_ar').value = leave.hospital_name_ar || '';
-        document.getElementById('dup_hospital_name_en').value = leave.hospital_name_en || '';
-        document.getElementById('dup_existing_logo_path').value = leave.logo_path || '';
+        document.getElementById('dup_issue_time').value = leave.issue_time || '';
+        document.getElementById('dup_issue_period').value = leave.issue_period || 'AM';
 
         // إظهار/إخفاء حقول المرافق
         const dupCompFields = document.getElementById('dupCompanionFields');
@@ -7660,6 +7447,26 @@ document.addEventListener('DOMContentLoaded', () => {
         if (this.value === 'manual') fields.classList.remove('hidden-field');
         else fields.classList.add('hidden-field');
     });
+
+    // تصفية الأطباء حسب المستشفى في التكرار
+    document.getElementById('dup_hospital_select')?.addEventListener('change', function() {
+        const hospitalId = this.value;
+        document.getElementById('dup_hospital_id').value = hospitalId;
+        const doctorSelect = document.getElementById('dup_doctor_select');
+        doctorSelect.innerHTML = '<option value="">-- اختر طبيباً --</option>';
+        (currentTableData.doctors || []).forEach(d => {
+            if (!hospitalId || d.hospital_id == hospitalId || !d.hospital_id) {
+                const opt = document.createElement('option');
+                opt.value = d.id;
+                opt.textContent = `${d.name_ar || d.name || ''} (${d.title_ar || d.title || ''})`;
+                doctorSelect.appendChild(opt);
+            }
+        });
+        doctorSelect.innerHTML += '<option value="manual">+ إدخال يدوي</option>';
+    });
+
+    // بحث سريع للمستشفى في التكرار
+    setupSelectQuickSearch('dup_hospital_search', 'dup_hospital_select');
 
     // حقول المرافق في التكرار
     document.getElementById('dup_is_companion').addEventListener('change', function() {
@@ -7686,8 +7493,7 @@ document.addEventListener('DOMContentLoaded', () => {
             hideLoading();
             if (result.success) {
                 showToast(result.message, 'success');
-                const createdLeave = (result.leaves || []).find(l => l.service_code === (result.new_service_code || ''));
-                if (createdLeave) await generateSickLeavePdf(createdLeave);
+                // PDF download removed - user will click print button manually
                 duplicateLeaveModal.hide();
                 syncTableDataFromResult(result);
                 filtersState.leaves = { search: '', fromDate: '', toDate: '', typeFilter: '', sortCol: 'created_at', sortOrder: 'desc' };
@@ -8051,12 +7857,17 @@ document.addEventListener('DOMContentLoaded', () => {
         e.preventDefault();
         const batchInput = document.getElementById('doctors_batch_text');
         const raw = (batchInput?.value || '').trim();
+        const batchHospitalId = document.getElementById('batch_hospital_id')?.value || '';
         if (!raw) {
             showToast('يرجى كتابة الدفعة أولاً.', 'warning');
             return;
         }
+        if (!batchHospitalId) {
+            showToast('يرجى اختيار المستشفى أولاً.', 'warning');
+            return;
+        }
         showLoading();
-        const result = await sendAjaxRequest('add_doctors_batch', { doctors_batch_text: raw });
+        const result = await sendAjaxRequest('add_doctors_batch', { doctors_batch_text: raw, batch_hospital_id: batchHospitalId });
         hideLoading();
         if (result.success) {
             showToast(result.message, 'success');
@@ -8876,6 +8687,38 @@ document.addEventListener('DOMContentLoaded', () => {
     document.getElementById('settingsMarkAllPaidBtn')?.addEventListener('click', triggerMarkAllPaidFlow);
     document.getElementById('settingsResetAllPaymentsBtn')?.addEventListener('click', triggerResetAllPaymentsFlow);
 
+    // Populate batch pay hospital select when settings modal opens
+    document.getElementById('settingsModal')?.addEventListener('show.bs.modal', () => {
+        const sel = document.getElementById('batchPayHospitalSelect');
+        if (sel) {
+            sel.innerHTML = '<option value="">اختر مستشفى...</option>';
+            (currentTableData.hospitals || []).forEach(h => {
+                sel.innerHTML += `<option value="${h.id}">${htmlspecialchars(h.name_ar || '')}</option>`;
+            });
+        }
+    });
+
+    // Batch pay for specific hospital
+    document.getElementById('batchPayHospitalBtn')?.addEventListener('click', () => {
+        const hospitalId = document.getElementById('batchPayHospitalSelect')?.value;
+        const amount = document.getElementById('batchPayAmount')?.value || '0';
+        if (!hospitalId) { showToast('يرجى اختيار مستشفى.', 'warning'); return; }
+        confirmMessage.textContent = 'سيتم تأكيد دفع جميع الإجازات غير المدفوعة لهذا المستشفى. متابعة؟';
+        confirmYesBtn.textContent = 'نعم، نفّذ';
+        currentConfirmAction = async () => {
+            showLoading();
+            const result = await sendAjaxRequest('mark_hospital_leaves_paid', { hospital_id: hospitalId, amount: amount });
+            hideLoading();
+            if (result.success) {
+                showToast(result.message, 'success');
+                syncTableDataFromResult(result);
+                applyAllCurrentFilters();
+                if (result.stats) updateStats(result.stats);
+            }
+        };
+        confirmModal.show();
+    });
+
     renderChatUsers(currentTableData.chat_users || []);
     refreshChatUsers();
     sendAjaxRequest('fetch_unread_messages_count', {}).then(r => { if (r.success) updateChatUnreadBadge(r.count); });
@@ -9200,7 +9043,7 @@ document.addEventListener('DOMContentLoaded', () => {
     function generateHospitalRow(h) {
         const hasLogo = h.has_logo_data === 'has_logo';
         const logoImg = hasLogo ? '<span class="badge bg-success"><i class="bi bi-image"></i> موجود</span>' : (h.logo_url ? `<img src="${htmlspecialchars(h.logo_url)}" style="max-height:40px;max-width:80px;" onerror="this.parentElement.innerHTML='افتراضي'">` : 'افتراضي');
-        return `<tr data-id="${h.id}"><td class="row-num"></td><td>${logoImg}</td><td>${htmlspecialchars(h.name_ar || '')}</td><td>${htmlspecialchars(h.name_en || '')}</td><td>${h.license_number || '-'}</td><td><span class="badge ${h.service_prefix === 'PSL' ? 'bg-warning' : 'bg-success'}">${h.service_prefix || 'GSL'}</span></td><td><button class="btn btn-sm btn-gradient action-btn btn-edit-hospital" data-id="${h.id}" data-name-ar="${htmlspecialchars(h.name_ar || '')}" data-name-en="${htmlspecialchars(h.name_en || '')}" data-license="${htmlspecialchars(h.license_number || '')}" data-prefix="${h.service_prefix || 'GSL'}" data-logo="${hasLogo ? 'has_logo' : htmlspecialchars(h.logo_url || '')}"><i class="bi bi-pencil"></i></button> <button class="btn btn-sm btn-danger-custom action-btn btn-delete-hospital" data-id="${h.id}"><i class="bi bi-trash3"></i></button></td></tr>`;
+        return `<tr data-id="${h.id}"><td class="row-num"></td><td>${logoImg}</td><td>${htmlspecialchars(h.name_ar || '')}</td><td>${htmlspecialchars(h.name_en || '')}</td><td>${h.license_number || '-'}</td><td><span class="badge ${h.service_prefix === 'PSL' ? 'bg-warning' : 'bg-success'}">${h.service_prefix || 'GSL'}</span></td><td><button class="btn btn-sm btn-gradient action-btn btn-edit-hospital" data-id="${h.id}" data-name-ar="${htmlspecialchars(h.name_ar || '')}" data-name-en="${htmlspecialchars(h.name_en || '')}" data-license="${htmlspecialchars(h.license_number || '')}" data-prefix="${h.service_prefix || 'GSL'}" data-logo="${hasLogo ? 'has_logo' : htmlspecialchars(h.logo_url || '')}" data-logo-scale="${h.logo_scale || 1}" data-logo-offset-x="${h.logo_offset_x || 0}" data-logo-offset-y="${h.logo_offset_y || 0}"><i class="bi bi-pencil"></i></button> <button class="btn btn-sm btn-danger-custom action-btn btn-delete-hospital" data-id="${h.id}"><i class="bi bi-trash3"></i></button></td></tr>`;
     }
     function renderHospitals() {
         if (hospitalsTable && currentTableData.hospitals) {
@@ -9245,43 +9088,105 @@ document.addEventListener('DOMContentLoaded', () => {
     });
 
     // حذف/تعديل مستشفى
+    const editHospitalModal = new bootstrap.Modal(document.getElementById('editHospitalModal'));
+    ['editHospitalModal'].forEach(setupModalStacking);
+
+    // ====== Logo Preview with Drag & Scale ======
+    let logoScale = 1, logoOffX = 0, logoOffY = 0, logoDragging = false, logoDragStart = {x:0,y:0};
+    const logoImg = document.getElementById('edit_hospital_logo_preview');
+    const logoBox = document.getElementById('logoPreviewBox');
+    const logoSlider = document.getElementById('logoScaleSlider');
+    const logoScaleLabel = document.getElementById('logoScaleValue');
+
+    function updateLogoTransform() {
+        if (logoImg) logoImg.style.transform = `translate(${logoOffX}px, ${logoOffY}px) scale(${logoScale})`;
+        document.getElementById('edit_logo_scale').value = logoScale;
+        document.getElementById('edit_logo_offset_x').value = logoOffX;
+        document.getElementById('edit_logo_offset_y').value = logoOffY;
+        if (logoScaleLabel) logoScaleLabel.textContent = Math.round(logoScale * 100) + '%';
+    }
+
+    logoSlider?.addEventListener('input', function() { logoScale = parseFloat(this.value); updateLogoTransform(); });
+    document.getElementById('logoResetBtn')?.addEventListener('click', () => { logoScale = 1; logoOffX = 0; logoOffY = 0; logoSlider.value = 1; updateLogoTransform(); });
+
+    logoBox?.addEventListener('mousedown', (e) => { logoDragging = true; logoDragStart = {x: e.clientX - logoOffX, y: e.clientY - logoOffY}; e.preventDefault(); });
+    document.addEventListener('mousemove', (e) => { if (!logoDragging) return; logoOffX = e.clientX - logoDragStart.x; logoOffY = e.clientY - logoDragStart.y; updateLogoTransform(); });
+    document.addEventListener('mouseup', () => { logoDragging = false; });
+    // Touch support
+    logoBox?.addEventListener('touchstart', (e) => { logoDragging = true; const t = e.touches[0]; logoDragStart = {x: t.clientX - logoOffX, y: t.clientY - logoOffY}; e.preventDefault(); });
+    document.addEventListener('touchmove', (e) => { if (!logoDragging) return; const t = e.touches[0]; logoOffX = t.clientX - logoDragStart.x; logoOffY = t.clientY - logoDragStart.y; updateLogoTransform(); });
+    document.addEventListener('touchend', () => { logoDragging = false; });
+
+    function showLogoPreview(src) { if (logoImg && src) { logoImg.src = src; } }
+
+    document.getElementById('edit_hospital_logo_file')?.addEventListener('change', function() {
+        const file = this.files[0];
+        if (file) { const reader = new FileReader(); reader.onload = (e) => showLogoPreview(e.target.result); reader.readAsDataURL(file); }
+    });
+
+    document.getElementById('edit_hospital_logo_url')?.addEventListener('input', function() {
+        const url = this.value.trim();
+        if (url) { const testImg = new Image(); testImg.onload = () => showLogoPreview(url); testImg.onerror = () => {}; testImg.src = url; }
+    });
+
     hospitalsTable?.addEventListener('click', (e) => {
         const editBtn = e.target.closest('.btn-edit-hospital');
         const delBtn = e.target.closest('.btn-delete-hospital');
         if (editBtn) {
-            const newNameAr = prompt('اسم المستشفى (عربي):', editBtn.dataset.nameAr);
-            if (newNameAr === null) return;
-            const newNameEn = prompt('Hospital Name (EN):', editBtn.dataset.nameEn);
-            const newLicense = prompt('رقم الترخيص:', editBtn.dataset.license);
-            const newPrefix = prompt('البادئة (GSL أو PSL):', editBtn.dataset.prefix);
-            (async () => {
-                showLoading();
-                const result = await sendAjaxRequest('edit_hospital', {
-                    hospital_id: editBtn.dataset.id,
-                    hospital_name_ar: newNameAr,
-                    hospital_name_en: newNameEn || '',
-                    hospital_license: newLicense || '',
-                    hospital_prefix: newPrefix || 'GSL'
-                });
-                hideLoading();
-                if (result.success) {
-                    showToast(result.message, 'success');
-                    if (result.hospitals) { currentTableData.hospitals = result.hospitals; renderHospitals(); updateHospitalSelects(); }
-                } else { showToast(result.message, 'danger'); }
-            })();
+            document.getElementById('edit_hospital_id').value = editBtn.dataset.id;
+            document.getElementById('edit_hospital_name_ar').value = editBtn.dataset.nameAr || '';
+            document.getElementById('edit_hospital_name_en').value = editBtn.dataset.nameEn || '';
+            document.getElementById('edit_hospital_license').value = editBtn.dataset.license || '';
+            document.getElementById('edit_hospital_prefix').value = editBtn.dataset.prefix || 'GSL';
+            document.getElementById('edit_hospital_logo_url').value = '';
+            document.getElementById('edit_hospital_logo_file').value = '';
+            // Load saved logo scale/offset
+            logoScale = parseFloat(editBtn.dataset.logoScale || 1);
+            logoOffX = parseFloat(editBtn.dataset.logoOffsetX || 0);
+            logoOffY = parseFloat(editBtn.dataset.logoOffsetY || 0);
+            logoSlider.value = logoScale;
+            updateLogoTransform();
+            const logoData = editBtn.dataset.logo || '';
+            if (logoData === 'has_logo') {
+                showLogoPreview(REQUEST_URL + '?action=get_hospital_logo&hospital_id=' + editBtn.dataset.id + '&csrf_token=' + encodeURIComponent(CSRF_TOKEN));
+            } else if (logoData && logoData.startsWith('http')) {
+                showLogoPreview(logoData);
+                document.getElementById('edit_hospital_logo_url').value = logoData;
+            } else {
+                logoImg.src = '';
+            }
+            editHospitalModal.show();
         }
         if (delBtn) {
-            if (!confirm('هل أنت متأكد من حذف هذا المستشفى؟')) return;
-            (async () => {
+            confirmMessage.textContent = 'هل أنت متأكد من حذف هذا المستشفى؟';
+            confirmYesBtn.textContent = 'نعم، احذف';
+            currentConfirmAction = async () => {
                 showLoading();
                 const result = await sendAjaxRequest('delete_hospital', { hospital_id: delBtn.dataset.id });
                 hideLoading();
                 if (result.success) {
                     showToast(result.message, 'success');
                     if (result.hospitals) { currentTableData.hospitals = result.hospitals; renderHospitals(); updateHospitalSelects(); }
-                } else { showToast(result.message, 'danger'); }
-            })();
+                }
+            };
+            confirmModal.show();
         }
+    });
+
+    // حفظ تعديل المستشفى
+    document.getElementById('saveEditHospital')?.addEventListener('click', async () => {
+        showLoading();
+        const formData = new FormData(document.getElementById('editHospitalForm'));
+        formData.append('action', 'edit_hospital');
+        formData.append('csrf_token', CSRF_TOKEN);
+        const res = await fetch(REQUEST_URL, { method: 'POST', body: formData, headers: { 'X-Requested-With': 'XMLHttpRequest' } });
+        const result = await res.json();
+        hideLoading();
+        if (result.success) {
+            showToast(result.message, 'success');
+            editHospitalModal.hide();
+            if (result.hospitals) { currentTableData.hospitals = result.hospitals; renderHospitals(); updateHospitalSelects(); }
+        } else { showToast(result.message, 'danger'); }
     });
 
     // ====== ربط المستشفى بالأطباء + البادئة ======
@@ -9304,18 +9209,7 @@ document.addEventListener('DOMContentLoaded', () => {
         doctorSelect.innerHTML += '<option value="manual">+ إدخال يدوي</option>';
     });
 
-    // ====== حساب الأيام تلقائياً ======
-    function calcDays() {
-        const s = document.getElementById('start_date').value;
-        const e = document.getElementById('end_date').value;
-        if (s && e) {
-            const d1 = new Date(s), d2 = new Date(e);
-            const diff = Math.round((d2 - d1) / (1000*60*60*24)) + 1;
-            document.getElementById('days_count').value = diff > 0 ? diff : 1;
-        }
-    }
-    document.getElementById('start_date')?.addEventListener('change', calcDays);
-    document.getElementById('end_date')?.addEventListener('change', calcDays);
+    // calcDays already defined above with parametric version
 
     // ====== تعبئة بيانات المريض تلقائياً ======
     document.getElementById('patient_select')?.addEventListener('change', function() {
