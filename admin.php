@@ -1099,7 +1099,6 @@ function handleGeneratePdf($pdo, $leave_id, $pdfMode = 'preview') {
     $reportCSS .= '.info-table .blue-row .data-cell{color:rgba(255,255,255,1)}';
     $reportCSS .= '.info-table tr.gray-row td{background-color:#f7f7f7}';
     $reportCSS .= '.en-spaced{letter-spacing:0.3px}';
-    $reportCSS .= ':root{--footer-offset:40px}';
     $reportCSS .= '.group1-thq-staticinfo-elm{top:125px;left:36.65px;width:768.35px;height:811.91px;display:flex;position:absolute;align-items:flex-start;pointer-events:none}';
     $reportCSS .= '.top-right-placeholder{position:absolute;top:36px;left:592px;width:214px;height:107px;display:flex;align-items:center;justify-content:center;font-size:14px;z-index:5}';
     $reportCSS .= '.top-left-placeholder{position:absolute;top:36px;left:36px;width:149.96px;height:65.98px;display:flex;align-items:center;justify-content:center;font-size:14px;z-index:5}';
@@ -1110,11 +1109,11 @@ function handleGeneratePdf($pdo, $leave_id, $pdfMode = 'preview') {
     $reportCSS .= '.group1-thq-hospitallogoandthename-elm{top:760px;left:438.94px;width:403px;height:202.78px;display:flex;position:absolute;align-items:flex-start}';
     $reportCSS .= '.placeholder-logo-hospital{top:-12px;left:133px;width:136px;height:136px;position:absolute;display:flex;align-items:center;justify-content:center;font-size:12px}';
     $reportCSS .= '.group1-thq-text-elm18{top:120px;color:rgba(0,0,0,1);width:403px;height:auto;position:absolute;font-size:12.8px;text-align:center;line-height:22px}';
-    $reportCSS .= '.group1-thq-thedateofissueandalsotimeofissue-elm{top:calc(989.85px + var(--footer-offset));left:37.37px;width:250px;height:56px;display:flex;position:absolute;align-items:flex-start}';
-    $reportCSS .= '.group1-thq-text-elm22{color:rgba(0,0,0,1);font-size:12.5px;font-weight:700;text-align:left;line-height:28px;font-family:"Times New Roman",serif;font-weight:bold;position:absolute;white-space:nowrap}';
-    $reportCSS .= '.group1-thq-text-elm36{top:calc(724.55px + var(--footer-offset));left:29.23px;color:rgba(0,0,0,1);position:absolute;font-size:12px;font-weight:700;text-align:center;font-family:"Noto Sans Arabic";line-height:23px}';
-    $reportCSS .= '.group1-thq-text-elm39{top:calc(775.17px + var(--footer-offset));left:55px;color:rgba(0,0,0,1);position:absolute;font-size:12px;font-weight:700;text-align:left;font-family:"Times New Roman",serif;font-weight:bold}';
-    $reportCSS .= '.group1-thq-text-elm40{top:calc(798.91px + var(--footer-offset));left:108.35px;color:rgba(20,0,255,1);position:absolute;font-size:11px;font-weight:700;text-align:left;text-decoration:underline;pointer-events:auto;font-family:"Times New Roman",serif;font-weight:bold}';
+    $reportCSS .= '.group1-thq-thedateofissueandalsotimeofissue-elm{top:1029.85px;left:37.37px;width:250px;height:56px;display:flex;position:absolute;align-items:flex-start}';
+    $reportCSS .= '.group1-thq-text-elm22{color:rgba(0,0,0,1);font-size:12.5px;font-weight:700;text-align:left;line-height:28px;font-family:"Times New Roman",serif;position:absolute;white-space:nowrap}';
+    $reportCSS .= '.group1-thq-text-elm36{top:764.55px;left:29.23px;color:rgba(0,0,0,1);position:absolute;font-size:12px;font-weight:700;text-align:center;font-family:"Noto Sans Arabic",sans-serif;line-height:23px}';
+    $reportCSS .= '.group1-thq-text-elm39{top:815.17px;left:55px;color:rgba(0,0,0,1);position:absolute;font-size:12px;font-weight:700;text-align:left;font-family:"Times New Roman",serif}';
+    $reportCSS .= '.group1-thq-text-elm40{top:838.91px;left:108.35px;color:rgba(20,0,255,1);position:absolute;font-size:11px;font-weight:700;text-align:left;text-decoration:underline;pointer-events:auto;font-family:"Times New Roman",serif}';
     $reportCSS .= '.placeholder-136{position:absolute;top:620px;left:122px;width:136px;height:136px;display:flex;align-items:center;justify-content:center;font-size:12px;pointer-events:auto}';
     $reportCSS .= '.vertical-divider{position:absolute;top:735px;left:436px;width:1px;height:7cm;background-color:#ddd}';
     $reportCSS .= '.thin-slash{font-weight:300;font-family:"Inter",sans-serif;margin:0 3px;display:inline-block}';
@@ -1126,7 +1125,7 @@ function handleGeneratePdf($pdo, $leave_id, $pdfMode = 'preview') {
     $reportBody .= '<div class="bottom-right-placeholder"><img src="bottomright.svg" style="width:100%;height:100%"/></div>';
     $reportBody .= '<div class="group1-thq-staticinfo-elm">';
     $reportBody .= '<div class="header-placeholder"><img src="header.svg" style="width:100%;height:100%"/></div>';
-    $reportBody .= '<span class="group1-thq-text-elm41"><span style="font-size:22.5px;font-family:\'Noto sans arabic\',serif;font-weight:700;color:#306db5">تقرير إجازة مرضية</span><br/><span style="font-size:18.7px;font-family:\'Times New Roman\',serif;font-weight:700;color:#2c3e77">Sick Leave Report</span></span>';
+    $reportBody .= '<span class="group1-thq-text-elm41"><span style="font-size:22.5px;font-family:\'Noto Sans Arabic\',sans-serif;font-weight:700;color:#306db5">تقرير إجازة مرضية</span><br/><span style="font-size:18.7px;font-family:\'Times New Roman\',serif;font-weight:700;color:#2c3e77">Sick Leave Report</span></span>';
     $reportBody .= '<span class="group1-thq-text-elm44">Kingdom of Saudi Arabia</span>';
     $reportBody .= '<div class="placeholder-136"><img src="qr.svg" style="width:130px;height:130px"/></div>';
     $reportBody .= '<span class="group1-thq-text-elm36" dir="rtl">للتحقق من بيانات التقرير يرجى التأكد من زيارة موقع منصة صحة<br/>الرسمي</span>';
@@ -1204,7 +1203,6 @@ function handleGeneratePdf($pdo, $leave_id, $pdfMode = 'preview') {
         $pdfHtml .= '.info-table .blue-row .data-cell { color: rgba(255, 255, 255, 1); }';
         $pdfHtml .= '.info-table tr.gray-row td { background-color: #f7f7f7; }';
         $pdfHtml .= '.en-spaced { letter-spacing: 0.3px; }';
-        $pdfHtml .= ':root { --footer-offset: 40px; }';
         $pdfHtml .= '.group1-thq-staticinfo-elm { top: 125px; left: 36.65px; width: 768.35px; height: 811.91px; display: flex; position: absolute; align-items: flex-start; }';
         $pdfHtml .= '.top-right-placeholder { position: absolute; top: 36px; left: 592px; width: 214px; height: 107px; display: flex; align-items: center; justify-content: center; }';
         $pdfHtml .= '.top-left-placeholder { position: absolute; top: 36px; left: 36px; width: 149.96px; height: 65.98px; display: flex; align-items: center; justify-content: center; }';
@@ -1215,11 +1213,11 @@ function handleGeneratePdf($pdo, $leave_id, $pdfMode = 'preview') {
         $pdfHtml .= '.group1-thq-hospitallogoandthename-elm { top: 760px; left: 438.94px; width: 403px; height: 202.78px; display: flex; position: absolute; align-items: flex-start; }';
         $pdfHtml .= '.placeholder-logo-hospital { top: -12px; left: 133px; width: 136px; height: 136px; position: absolute; display: flex; align-items: center; justify-content: center; }';
         $pdfHtml .= '.group1-thq-text-elm18 { top: 120px; color: rgba(0, 0, 0, 1); width: 403px; height: auto; position: absolute; font-size: 12.8px; text-align: center; line-height: 22px; }';
-        $pdfHtml .= '.group1-thq-thedateofissueandalsotimeofissue-elm { top: calc(989.85px + var(--footer-offset)); left: 37.37px; width: 250px; height: 56px; display: flex; position: absolute; align-items: flex-start; }';
+        $pdfHtml .= '.group1-thq-thedateofissueandalsotimeofissue-elm { top: 1029.85px; left: 37.37px; width: 250px; height: 56px; display: flex; position: absolute; align-items: flex-start; }';
         $pdfHtml .= '.group1-thq-text-elm22 { color: rgba(0, 0, 0, 1); font-size: 12.5px; font-weight: 700; text-align: left; line-height: 28px; font-family: "Times New Roman", serif; position: absolute; white-space: nowrap; }';
-        $pdfHtml .= '.group1-thq-text-elm36 { top: calc(724.55px + var(--footer-offset)); left: 29.23px; color: rgba(0, 0, 0, 1); position: absolute; font-size: 12px; font-weight: 700; text-align: center; font-family: "Noto Sans Arabic", sans-serif; line-height: 23px; }';
-        $pdfHtml .= '.group1-thq-text-elm39 { top: calc(775.17px + var(--footer-offset)); left: 55px; color: rgba(0, 0, 0, 1); position: absolute; font-size: 12px; font-weight: 700; text-align: left; font-family: "Times New Roman", serif; }';
-        $pdfHtml .= '.group1-thq-text-elm40 { top: calc(798.91px + var(--footer-offset)); left: 108.35px; color: rgba(20, 0, 255, 1); position: absolute; font-size: 11px; font-weight: 700; text-align: left; text-decoration: underline; font-family: "Times New Roman", serif; }';
+        $pdfHtml .= '.group1-thq-text-elm36 { top: 764.55px; left: 29.23px; color: rgba(0, 0, 0, 1); position: absolute; font-size: 12px; font-weight: 700; text-align: center; font-family: "Noto Sans Arabic", sans-serif; line-height: 23px; }';
+        $pdfHtml .= '.group1-thq-text-elm39 { top: 815.17px; left: 55px; color: rgba(0, 0, 0, 1); position: absolute; font-size: 12px; font-weight: 700; text-align: left; font-family: "Times New Roman", serif; }';
+        $pdfHtml .= '.group1-thq-text-elm40 { top: 838.91px; left: 108.35px; color: rgba(20, 0, 255, 1); position: absolute; font-size: 11px; font-weight: 700; text-align: left; text-decoration: underline; font-family: "Times New Roman", serif; }';
         $pdfHtml .= '.placeholder-136 { position: absolute; top: 620px; left: 122px; width: 136px; height: 136px; display: flex; align-items: center; justify-content: center; }';
         $pdfHtml .= '.vertical-divider { position: absolute; top: 735px; left: 436px; width: 1px; height: 7cm; background-color: #dddddd; }';
         $pdfHtml .= '.thin-slash { font-weight: 300; font-family: "Inter", sans-serif; margin: 0 3px; display: inline-block; }';
@@ -1247,7 +1245,7 @@ function handleGeneratePdf($pdo, $leave_id, $pdfMode = 'preview') {
             if (is_file($p) && !is_link($p)) { $pythonBin = $p; break; }
             if (is_link($p)) { $real = realpath($p); if ($real && is_file($real)) { $pythonBin = $real; break; } }
         }
-        $cmd = $pythonBin . ' "' . $scriptPath . '" "' . $tmpHtml . '" "' . $tmpPdf . '" 2>&1';
+        $cmd = $pythonBin . ' "' . $scriptPath . '" "' . $tmpHtml . '" "' . $tmpPdf . '" "' . $baseUrl . '" 2>&1';
         $output = shell_exec($cmd);
         
         if (file_exists($tmpPdf) && filesize($tmpPdf) > 0) {
