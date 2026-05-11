@@ -1813,9 +1813,10 @@ if (isset($_POST['action']) && $_POST['action'] !== 'login' && $_POST['action'] 
             $logo_offset_y = max(-500, min(500, floatval($_POST['logo_offset_y'] ?? 0)));
             if ($id <= 0 || empty($name_ar)) { echo json_encode(['success'=>false,'message'=>'بيانات غير صالحة.']); exit; }
 
-            $existsStmt = $pdo->prepare("SELECT id FROM hospitals WHERE id = ? AND deleted_at IS NULL LIMIT 1");
+            $existsStmt = $pdo->prepare("SELECT service_prefix FROM hospitals WHERE id = ? AND deleted_at IS NULL LIMIT 1");
             $existsStmt->execute([$id]);
-            if (!$existsStmt->fetch()) { echo json_encode(['success'=>false,'message'=>'المستشفى غير موجود أو تم حذفه.']); exit; }
+            $oldPrefix = strtoupper((string)($existsStmt->fetchColumn() ?: ''));
+            if ($oldPrefix === '') { echo json_encode(['success'=>false,'message'=>'المستشفى غير موجود أو تم حذفه.']); exit; }
 
             $logo_data = uploadHospitalLogo($_FILES['hospital_logo'] ?? []);
             if (!$logo_data && !empty($logo_url)) $logo_data = downloadLogoFromUrl($logo_url);
@@ -1833,10 +1834,19 @@ if (isset($_POST['action']) && $_POST['action'] !== 'login' && $_POST['action'] 
                     $stmt->execute([$name_ar, $name_en, $license ?: null, $prefix, $logo_scale, $logo_offset_x, $logo_offset_y, $id]);
                 }
 
-                // Keep existing sick leaves printable even if the hospital name changes.
-                // Service codes are intentionally not rewritten here because they are globally unique historical document numbers.
+                // Update all sick leaves linked to this hospital immediately when hospital details change.
                 $cascadeStmt = $pdo->prepare("UPDATE sick_leaves SET hospital_name_ar = ?, hospital_name_en = ? WHERE hospital_id = ?");
                 $cascadeStmt->execute([$name_ar, $name_en, $id]);
+
+                if ($oldPrefix !== $prefix) {
+                    $codeCascadeStmt = $pdo->prepare("
+                        UPDATE sick_leaves
+                        SET service_code = CONCAT(?, SUBSTRING(service_code, 4))
+                        WHERE hospital_id = ?
+                          AND service_code REGEXP '^(GSL|PSL)'
+                    ");
+                    $codeCascadeStmt->execute([$prefix, $id]);
+                }
 
                 $pdo->commit();
             } catch (Throwable $e) {
@@ -8402,27 +8412,50 @@ function refreshSensitiveValuesMask() {
     });
 }
 
-function updateDoctorSelects(doctors) {
-    const selects = ['doctor_select', 'doctor_id_edit', 'dup_doctor_select'];
-    selects.forEach(selId => {
-        const sel = document.getElementById(selId);
-        if (!sel) return;
-        const currentVal = sel.value;
-        // حفظ الخيارات الثابتة
-        const firstOpt = sel.querySelector('option[value=""]');
-        const manualOpt = sel.querySelector('option[value="manual"]');
-        sel.innerHTML = '';
-        if (firstOpt) sel.appendChild(firstOpt);
-        doctors.forEach(d => {
-            const opt = document.createElement('option');
-            opt.value = d.id;
-            opt.textContent = `${d.name_ar || d.name || ''} (${d.title_ar || d.title || ''}) - ${d.note || ''}`;
-            sel.appendChild(opt);
-        });
-        if (manualOpt) sel.appendChild(manualOpt);
-        sel.value = currentVal;
-        refreshSelectQuickSearchData(selId);
+function doctorBelongsToHospital(doctor, hospitalId) {
+    if (!hospitalId) return true;
+    return String(doctor?.hospital_id || '') === String(hospitalId);
+}
+
+function renderDoctorOptionText(doctor) {
+    const name = doctor?.name_ar || doctor?.name || '';
+    const title = doctor?.title_ar || doctor?.title || '';
+    const note = doctor?.note ? ` - ${doctor.note}` : '';
+    return `${name} (${title})${note}`;
+}
+
+function populateDoctorSelectForHospital(selectId, hospitalId, selectedValue = null) {
+    const sel = document.getElementById(selectId);
+    if (!sel) return;
+    const currentVal = selectedValue !== null ? String(selectedValue || '') : String(sel.value || '');
+    sel.innerHTML = '<option value="">-- اختر طبيباً --</option>';
+    (initialDoctors || []).forEach((doctor) => {
+        if (!doctorBelongsToHospital(doctor, hospitalId)) return;
+        const opt = document.createElement('option');
+        opt.value = doctor.id;
+        opt.textContent = renderDoctorOptionText(doctor);
+        if (String(currentVal) === String(doctor.id)) opt.selected = true;
+        sel.appendChild(opt);
     });
+    const manualOpt = document.createElement('option');
+    manualOpt.value = 'manual';
+    manualOpt.textContent = '+ إدخال يدوي';
+    if (currentVal === 'manual') manualOpt.selected = true;
+    sel.appendChild(manualOpt);
+    if (currentVal && currentVal !== 'manual' && !Array.from(sel.options).some(opt => String(opt.value) === currentVal)) {
+        sel.value = '';
+    }
+    refreshSelectQuickSearchData(selectId);
+}
+
+function updateDoctorSelects(doctors) {
+    if (Array.isArray(doctors)) {
+        // Keep the global source in sync for all filtered doctor lists.
+        initialDoctors.splice(0, initialDoctors.length, ...doctors);
+    }
+    populateDoctorSelectForHospital('doctor_select', document.getElementById('hospital_id')?.value || '', document.getElementById('doctor_select')?.value || '');
+    populateDoctorSelectForHospital('doctor_id_edit', document.getElementById('hospital_id_edit')?.value || '', document.getElementById('doctor_id_edit')?.value || '');
+    populateDoctorSelectForHospital('dup_doctor_select', document.getElementById('dup_hospital_id')?.value || document.getElementById('dup_hospital_select')?.value || '', document.getElementById('dup_doctor_select')?.value || '');
 }
 
 function updatePatientSelects(patients) {
@@ -8813,7 +8846,7 @@ setupSelectQuickSearch('batch_hospital_search', 'batch_hospital_id');
         document.getElementById('leave_id_edit').value = leave.id;
         document.getElementById('service_code_edit').value = leave.service_code;
         document.getElementById('hospital_id_edit').value = leave.hospital_id || '';
-        document.getElementById('doctor_id_edit').value = leave.doctor_id || '';
+        populateDoctorSelectForHospital('doctor_id_edit', leave.hospital_id || '', leave.doctor_id || '');
         document.getElementById('doctor_id_edit_search').value = '';
         document.getElementById('editDoctorManualFields').classList.add('hidden-field');
         document.getElementById('issue_date_edit').value = leave.issue_date;
@@ -8840,6 +8873,17 @@ setupSelectQuickSearch('batch_hospital_search', 'batch_hospital_id');
         }
 
         editLeaveModal.show();
+    });
+
+    document.getElementById('hospital_id_edit')?.addEventListener('change', function() {
+        const opt = this.options[this.selectedIndex];
+        const prefix = opt?.dataset?.prefix || 'GSL';
+        const serviceCodeInput = document.getElementById('service_code_edit');
+        if (serviceCodeInput && /^(GSL|PSL)/i.test(serviceCodeInput.value || '')) {
+            serviceCodeInput.value = prefix + String(serviceCodeInput.value || '').substring(3);
+        }
+        populateDoctorSelectForHospital('doctor_id_edit', this.value, '');
+        document.getElementById('editDoctorManualFields')?.classList.add('hidden-field');
     });
 
     document.getElementById('doctor_id_edit').addEventListener('change', function() {
@@ -8907,7 +8951,7 @@ setupSelectQuickSearch('batch_hospital_search', 'batch_hospital_id');
         // Set hospital select
         const dupHospSel = document.getElementById('dup_hospital_select');
         if (dupHospSel) dupHospSel.value = leave.hospital_id || '';
-        document.getElementById('dup_doctor_select').value = leave.doctor_id || '';
+        populateDoctorSelectForHospital('dup_doctor_select', leave.hospital_id || '', leave.doctor_id || '');
         document.getElementById('dup_issue_date').value = leave.issue_date;
         document.getElementById('dup_start_date').value = leave.start_date;
         document.getElementById('dup_end_date').value = leave.end_date;
@@ -8949,17 +8993,7 @@ setupSelectQuickSearch('batch_hospital_search', 'batch_hospital_id');
     document.getElementById('dup_hospital_select')?.addEventListener('change', function() {
         const hospitalId = this.value;
         document.getElementById('dup_hospital_id').value = hospitalId;
-        const doctorSelect = document.getElementById('dup_doctor_select');
-        doctorSelect.innerHTML = '<option value="">-- اختر طبيباً --</option>';
-        (currentTableData.doctors || []).forEach(d => {
-            if (!hospitalId || d.hospital_id == hospitalId || !d.hospital_id) {
-                const opt = document.createElement('option');
-                opt.value = d.id;
-                opt.textContent = `${d.name_ar || d.name || ''} (${d.title_ar || d.title || ''})`;
-                doctorSelect.appendChild(opt);
-            }
-        });
-        doctorSelect.innerHTML += '<option value="manual">+ إدخال يدوي</option>';
+        populateDoctorSelectForHospital('dup_doctor_select', hospitalId, '');
     });
 
     // بحث سريع للمستشفى في التكرار
@@ -11532,17 +11566,7 @@ setupSelectQuickSearch('batch_hospital_search', 'batch_hospital_id');
         document.getElementById('service_prefix').value = prefix;
         // تصفية الأطباء حسب المستشفى
         const hospitalId = this.value;
-        const doctorSelect = document.getElementById('doctor_select');
-        doctorSelect.innerHTML = '<option value="">-- اختر طبيباً --</option>';
-        (currentTableData.doctors || []).forEach(d => {
-            if (!hospitalId || d.hospital_id == hospitalId || !d.hospital_id) {
-                const opt = document.createElement('option');
-                opt.value = d.id;
-                opt.textContent = `${d.name_ar || d.name || ''} (${d.title_ar || d.title || ''})`;
-                doctorSelect.appendChild(opt);
-            }
-        });
-        doctorSelect.innerHTML += '<option value="manual">+ إدخال يدوي</option>';
+        populateDoctorSelectForHospital('doctor_select', hospitalId, '');
     });
 
     // calcDays already defined above with parametric version
