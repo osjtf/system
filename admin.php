@@ -424,9 +424,13 @@ function normalizeUsernameText(string $value): string {
 }
 
 function makePatientFirstNameUsername(array $patient): string {
-    $source = trim((string)($patient['name_ar'] ?? $patient['name'] ?? $patient['name_en'] ?? 'patient'));
+    $source = trim((string)($patient['name_en'] ?? $patient['name_ar'] ?? $patient['name'] ?? 'patient'));
     $parts = preg_split('/\s+/u', $source, -1, PREG_SPLIT_NO_EMPTY);
     return normalizeUsernameText($parts[0] ?? 'patient');
+}
+
+function getNextPatientAccountNumber(PDO $pdo): int {
+    return ((int)$pdo->query("SELECT COUNT(*) FROM patient_accounts")->fetchColumn()) + 1;
 }
 
 function makeUniqueUsername(PDO $pdo, string $baseUsername): string {
@@ -3619,7 +3623,7 @@ if (isset($_POST['action']) && $_POST['action'] !== 'login' && $_POST['action'] 
                 $patientForUsername = $patientStmt->fetch();
                 if ($patientForUsername) {
                     $patientFirstName = makePatientFirstNameUsername($patientForUsername);
-                    $username = makeUniqueUsername($pdo, $patientFirstName);
+                    $username = makeUniqueUsername($pdo, $patientFirstName . getNextPatientAccountNumber($pdo));
                 }
             }
             if (empty($username) || empty($password) || empty($display_name)) { echo json_encode(['success'=>false,'message'=>'يرجى تعبئة جميع الحقول.']); exit; }
@@ -7047,7 +7051,7 @@ if (!in_array($uiDataViewMode, ['table','compact','cards','zebra','glass','minim
             </div>
             <div class="modal-footer">
                 <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">إلغاء</button>
-                <button type="button" class="btn btn-success-custom" id="saveEditHospital">حفظ</button>
+                <button type="submit" form="editHospitalForm" class="btn btn-success-custom" id="saveEditHospital">حفظ</button>
             </div>
         </div>
     </div>
@@ -9910,9 +9914,10 @@ setupSelectQuickSearch('batch_hospital_search', 'batch_hospital_id');
                 if (pt) {
                     document.getElementById('acctNewDisplayName').value = pt.name_ar || pt.name || '';
 
-                    const nameSource = (pt.name_ar || pt.name || pt.name_en || 'patient').trim();
-                    const firstName = (nameSource.split(/\s+/)[0] || 'patient').replace(/[^\p{L}\p{N}._-]+/gu, '').toLowerCase();
-                    document.getElementById('acctNewUsername').value = firstName || 'patient';
+                    const nameSource = (pt.name_en || pt.name_ar || pt.name || 'patient').trim();
+                    const firstName = (nameSource.split(/\s+/)[0] || 'patient').replace(/[^\p{L}\p{N}._-]+/gu, '').toLowerCase() || 'patient';
+                    const nextAccountNo = (Array.isArray(acctAllData) ? acctAllData.length : 0) + 1;
+                    document.getElementById('acctNewUsername').value = `${firstName}${nextAccountNo}`;
 
                     const passInput = document.getElementById('acctNewPassword');
                     passInput.value = generateStrongPassword(12);
@@ -11250,13 +11255,14 @@ setupSelectQuickSearch('batch_hospital_search', 'batch_hospital_id');
     });
 
 // ====== التقاط أحداث أزرار المستشفيات (تعديل وحذف) عبر Event Delegation على مستوى المستند ======
-    document.addEventListener('click', (e) => {
+    hospitalsTable?.addEventListener('click', (e) => {
         const editBtn = e.target.closest('.btn-edit-hospital');
         const delBtn = e.target.closest('.btn-delete-hospital');
         
         // 1. معالجة زر التعديل
         if (editBtn) {
             e.preventDefault();
+            e.stopPropagation();
             
             const hid = editBtn.dataset.id || '';
             const elId = document.getElementById('edit_hospital_id');
@@ -11309,6 +11315,7 @@ setupSelectQuickSearch('batch_hospital_search', 'batch_hospital_id');
         // 2. معالجة زر الحذف
         if (delBtn) {
             e.preventDefault();
+            e.stopPropagation();
             
             const hid = delBtn.dataset.id;
             const confirmMsgEl = document.getElementById('confirmMessage');
@@ -11350,10 +11357,12 @@ setupSelectQuickSearch('batch_hospital_search', 'batch_hospital_id');
     });
 
     // حفظ تعديل المستشفى
-    document.getElementById('saveEditHospital')?.addEventListener('click', async () => {
+    document.getElementById('editHospitalForm')?.addEventListener('submit', async (e) => {
+        e.preventDefault();
+        e.stopPropagation();
         showLoading();
         try {
-            const formData = new FormData(document.getElementById('editHospitalForm'));
+            const formData = new FormData(e.currentTarget);
             formData.append('action', 'edit_hospital');
             formData.append('csrf_token', CSRF_TOKEN);
             const res = await fetch(REQUEST_URL, { method: 'POST', body: formData, headers: { 'X-Requested-With': 'XMLHttpRequest' } });

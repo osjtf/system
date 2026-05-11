@@ -405,7 +405,7 @@ if ($action === 'generate_pdf' && isPatientLoggedIn()) {
     $leaveId = (int)($_GET['leave_id'] ?? 0);
     $userId  = (int)$_SESSION['patient_user_id'];
     $patientId = (int)$_SESSION['patient_id'];
-    $pdfMode = $_GET['pdf_mode'] ?? 'preview';
+    $pdfMode = $_GET['pdf_mode'] ?? 'download';
 
     $stmt = $pdo->prepare("
         SELECT sl.*,
@@ -1546,7 +1546,7 @@ body {
                 <td><?= htmlspecialchars($lv['d_name_ar'] ?? '') ?></td>
                 <td style="font-family:var(--font-en);font-weight:800"><?= (int)$lv['days_count'] ?> يوم</td>
                 <td style="font-family:var(--font-en)"><?= fmtDateUser($lv['start_date'] ?? '') ?></td>
-                <td><button class="btn-view-leave" onclick="viewLeave(<?= (int)$lv['id'] ?>)"><i class="fas fa-eye"></i> عرض</button></td>
+                <td><button class="btn-view-leave" onclick="viewLeave(<?= (int)$lv['id'] ?>)"><i class="fas fa-download"></i> تحميل</button></td>
               </tr>
             <?php endforeach; ?>
             </tbody>
@@ -1669,7 +1669,7 @@ function submitLeave(e) {
 
 // ═══ View Leave ═══
 function viewLeave(id) {
-  window.open('user.php?action=generate_pdf&leave_id=' + id + '&pdf_mode=preview', '_blank');
+  window.open('user.php?action=generate_pdf&leave_id=' + encodeURIComponent(id) + '&pdf_mode=download', '_blank');
 }
 
 // ═══ Toast ═══
