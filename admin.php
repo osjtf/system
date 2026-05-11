@@ -38,6 +38,7 @@ header('X-Frame-Options: DENY');
 header('X-Content-Type-Options: nosniff');
 header('Referrer-Policy: strict-origin-when-cross-origin');
 header('Permissions-Policy: geolocation=(), microphone=(self), camera=()');
+header('X-Robots-Tag: noindex, nofollow, noarchive');
 header('Content-Security-Policy: default-src \'self\'; script-src \'self\' \'unsafe-inline\' https://cdn.jsdelivr.net https://cdnjs.cloudflare.com; style-src \'self\' \'unsafe-inline\' https://cdn.jsdelivr.net https://cdnjs.cloudflare.com https://fonts.googleapis.com; font-src \'self\' https://fonts.gstatic.com https://cdnjs.cloudflare.com https://cdn.jsdelivr.net; img-src \'self\' data: https: blob:; connect-src \'self\'; worker-src blob:;');
 
 // ======================== إعدادات قاعدة البيانات ========================
@@ -63,6 +64,16 @@ try {
 }
 
 $pdo->exec("SET time_zone = '+03:00'");
+$pdo->exec("CREATE TABLE IF NOT EXISTS patient_employers (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    patient_id INT NOT NULL,
+    employer_ar VARCHAR(200) NULL,
+    employer_en VARCHAR(200) NULL,
+    is_default TINYINT(1) DEFAULT 0,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (patient_id) REFERENCES patients(id) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci");
+
 
 // ======================== إنشاء جداول المستخدمين والجلسات ========================
 $pdo->exec("CREATE TABLE IF NOT EXISTS admin_users (
@@ -123,6 +134,8 @@ ensureColumn($pdo, 'hospitals', 'logo_data', "LONGTEXT NULL AFTER logo_url");
 ensureColumn($pdo, 'hospitals', 'logo_scale', "FLOAT DEFAULT 1.0 AFTER logo_data");
 ensureColumn($pdo, 'hospitals', 'logo_offset_x', "FLOAT DEFAULT 0 AFTER logo_scale");
 ensureColumn($pdo, 'hospitals', 'logo_offset_y', "FLOAT DEFAULT 0 AFTER logo_offset_x");
+ensureColumn($pdo, 'hospitals', 'deleted_at', "DATETIME NULL AFTER updated_at");
+try { ensureIndex($pdo, 'hospitals', 'idx_hospitals_deleted_name', 'deleted_at, name_ar'); } catch(Exception $e) {}
 
 $pdo->exec("CREATE TABLE IF NOT EXISTS doctors (
     id INT AUTO_INCREMENT PRIMARY KEY,
@@ -331,6 +344,14 @@ $pdo->exec("CREATE TABLE IF NOT EXISTS patient_accounts (
 // أعمدة patient_accounts الجديدة
 ensureColumn($pdo, 'patient_accounts', 'expiry_date', "DATE NULL AFTER allowed_days");
 ensureColumn($pdo, 'patient_accounts', 'notes', "TEXT NULL AFTER expiry_date");
+ensureColumn($pdo, 'account_payments', 'days_count', "INT NOT NULL DEFAULT 0 AFTER amount");
+ensureColumn($pdo, 'account_payments', 'is_paid', "TINYINT(1) NOT NULL DEFAULT 1 AFTER days_count");
+ensureColumn($pdo, 'account_payments', 'paid_by', "INT NULL AFTER created_by");
+ensureColumn($pdo, 'account_payments', 'updated_at', "DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP AFTER paid_at");
+try { ensureIndex($pdo, 'account_payments', 'idx_account_payments_user_paid', 'user_id, is_paid, paid_at'); } catch(Exception $e) {}
+ensureColumn($pdo, 'notifications', 'account_payment_id', "INT NULL AFTER leave_id");
+try { $pdo->exec("ALTER TABLE notifications MODIFY COLUMN leave_id INT NULL"); } catch(Throwable $e) {}
+try { ensureIndex($pdo, 'notifications', 'idx_notifications_account_payment', 'account_payment_id'); } catch(Exception $e) {}
 
 // ======================== جدول إشعارات المستخدمين (المرضى) ========================
 $pdo->exec("CREATE TABLE IF NOT EXISTS user_notifications (
@@ -391,6 +412,66 @@ function is_ajax_request() {
 }
 
 // ======================== دوال مساعدة ========================
+
+function parseEmployerLines(string $raw): array {
+    $rows = [];
+    foreach (preg_split('/\R/u', trim($raw)) as $line) {
+        $line = trim($line);
+        if ($line === '') continue;
+        $parts = array_map('trim', explode('|', $line, 2));
+        $ar = $parts[0] ?? '';
+        $en = $parts[1] ?? '';
+        if ($ar !== '' || $en !== '') $rows[] = ['ar' => $ar, 'en' => $en];
+    }
+    return $rows;
+}
+
+function savePatientEmployerOptions(PDO $pdo, int $patientId, string $raw, string $primaryAr = '', string $primaryEn = ''): void {
+    $pdo->prepare("DELETE FROM patient_employers WHERE patient_id = ?")->execute([$patientId]);
+    $ins = $pdo->prepare("INSERT INTO patient_employers (patient_id, employer_ar, employer_en, is_default) VALUES (?, ?, ?, ?)");
+    if (trim($primaryAr) !== '' || trim($primaryEn) !== '') {
+        $ins->execute([$patientId, trim($primaryAr), trim($primaryEn), 1]);
+    }
+    foreach (parseEmployerLines($raw) as $row) {
+        if ($row['ar'] === trim($primaryAr) && $row['en'] === trim($primaryEn)) continue;
+        $ins->execute([$patientId, $row['ar'], $row['en'], 0]);
+    }
+}
+
+function getPatientEmployerChoices(PDO $pdo, int $patientId): array {
+    $choices = [
+        ['value' => 'default', 'ar' => 'الى من يهمه الامر', 'en' => 'TO WHOM IT MAY CONCERN', 'label' => 'الافتراضي: الى من يهمه الامر'],
+        ['value' => 'none', 'ar' => '', 'en' => '', 'label' => 'بدون جهة عمل']
+    ];
+    $stmt = $pdo->prepare("SELECT id, employer_ar, employer_en FROM patient_employers WHERE patient_id = ? ORDER BY is_default DESC, id ASC");
+    $stmt->execute([$patientId]);
+    foreach ($stmt->fetchAll() as $row) {
+        $ar = trim((string)($row['employer_ar'] ?? ''));
+        $en = trim((string)($row['employer_en'] ?? ''));
+        if ($ar === '' && $en === '') continue;
+        $choices[] = ['value' => 'emp:' . $row['id'], 'ar' => $ar, 'en' => $en, 'label' => trim($ar . ($en ? ' | ' . $en : ''))];
+    }
+    return $choices;
+}
+
+function resolveEmployerChoice(PDO $pdo, int $patientId, string $choice): array {
+    if ($choice === 'none') return ['', ''];
+    if (preg_match('/^emp:(\d+)$/', $choice, $m)) {
+        $stmt = $pdo->prepare("SELECT employer_ar, employer_en FROM patient_employers WHERE id = ? AND patient_id = ? LIMIT 1");
+        $stmt->execute([(int)$m[1], $patientId]);
+        if ($row = $stmt->fetch()) return [$row['employer_ar'] ?? '', $row['employer_en'] ?? ''];
+    }
+    return ['الى من يهمه الامر', 'TO WHOM IT MAY CONCERN'];
+}
+
+function enrichPatientsWithEmployers(PDO $pdo, array $patients): array {
+    foreach ($patients as &$p) {
+        $p['employer_options'] = getPatientEmployerChoices($pdo, (int)($p['id'] ?? 0));
+    }
+    unset($p);
+    return $patients;
+}
+
 function getStats($pdo) {
     $stats = [];
     $stats['total'] = $pdo->query("SELECT COUNT(*) FROM sick_leaves WHERE deleted_at IS NULL")->fetchColumn();
@@ -400,14 +481,61 @@ function getStats($pdo) {
     $stats['doctors'] = $pdo->query("SELECT COUNT(*) FROM doctors")->fetchColumn();
     $stats['paid'] = $pdo->query("SELECT COUNT(*) FROM sick_leaves WHERE is_paid = 1 AND deleted_at IS NULL")->fetchColumn();
     $stats['unpaid'] = $pdo->query("SELECT COUNT(*) FROM sick_leaves WHERE is_paid = 0 AND deleted_at IS NULL")->fetchColumn();
-    $stats['paid_amount'] = $pdo->query("SELECT COALESCE(SUM(payment_amount), 0) FROM sick_leaves WHERE is_paid = 1 AND deleted_at IS NULL")->fetchColumn();
-    $stats['unpaid_amount'] = $pdo->query("SELECT COALESCE(SUM(payment_amount), 0) FROM sick_leaves WHERE is_paid = 0 AND deleted_at IS NULL")->fetchColumn();
-    $stats['hospitals'] = $pdo->query("SELECT COUNT(*) FROM hospitals")->fetchColumn();
+    $stats['paid_amount'] = $pdo->query("SELECT COALESCE(SUM(amount), 0) FROM (SELECT payment_amount AS amount FROM sick_leaves WHERE is_paid = 1 AND deleted_at IS NULL UNION ALL SELECT amount FROM account_payments WHERE is_paid = 1) paid_totals")->fetchColumn();
+    $stats['unpaid_amount'] = $pdo->query("SELECT COALESCE(SUM(amount), 0) FROM (SELECT payment_amount AS amount FROM sick_leaves WHERE is_paid = 0 AND deleted_at IS NULL UNION ALL SELECT amount FROM account_payments WHERE is_paid = 0) unpaid_totals")->fetchColumn();
+    $stats['hospitals'] = $pdo->query("SELECT COUNT(*) FROM hospitals WHERE deleted_at IS NULL")->fetchColumn();
     return $stats;
+}
+
+function getHospitalsList(PDO $pdo): array {
+    return $pdo->query("
+        SELECT id, name_ar, name_en, license_number, logo_path, logo_url,
+               service_prefix, logo_scale, logo_offset_x, logo_offset_y,
+               created_at, updated_at,
+               CASE WHEN logo_data IS NOT NULL AND logo_data != '' THEN 'has_logo' ELSE '' END AS has_logo_data
+        FROM hospitals
+        WHERE deleted_at IS NULL
+        ORDER BY name_ar
+    ")->fetchAll();
+}
+
+function normalizeUsernameText(string $value): string {
+    $value = preg_replace('/[^\p{L}\p{N}._-]+/u', '', trim($value));
+    if ($value === '') return 'patient';
+    return function_exists('mb_strtolower') ? mb_strtolower($value, 'UTF-8') : strtolower($value);
+}
+
+function makePatientFirstNameUsername(array $patient): string {
+    $source = trim((string)($patient['name_en'] ?? $patient['name_ar'] ?? $patient['name'] ?? 'patient'));
+    $parts = preg_split('/\s+/u', $source, -1, PREG_SPLIT_NO_EMPTY);
+    return normalizeUsernameText($parts[0] ?? 'patient');
+}
+
+function getNextPatientAccountNumber(PDO $pdo): int {
+    return ((int)$pdo->query("SELECT COUNT(*) FROM patient_accounts")->fetchColumn()) + 1;
+}
+
+function makeUniqueUsername(PDO $pdo, string $baseUsername): string {
+    $baseUsername = normalizeUsernameText($baseUsername);
+    $candidate = $baseUsername;
+    $counter = 2;
+    $stmt = $pdo->prepare("SELECT id FROM admin_users WHERE username = ? LIMIT 1");
+    while (true) {
+        $stmt->execute([$candidate]);
+        if (!$stmt->fetch()) return $candidate;
+        $candidate = $baseUsername . $counter;
+        $counter++;
+    }
 }
 
 function nowSaudi(): string {
     return (new DateTime('now', new DateTimeZone('Asia/Riyadh')))->format('Y-m-d H:i:s');
+}
+
+function getUsedPatientAccountDays(PDO $pdo, int $patientId, int $userId): int {
+    $stmt = $pdo->prepare("SELECT COALESCE(SUM(days_count),0) FROM sick_leaves WHERE patient_id = ? AND created_by_user_id = ? AND deleted_at IS NULL");
+    $stmt->execute([$patientId, $userId]);
+    return (int)$stmt->fetchColumn();
 }
 
 function getSetting(PDO $pdo, string $key, ?string $default = null): ?string {
@@ -900,7 +1028,7 @@ function fetchAllData($pdo) {
     ")->fetchAll();
 
     // المستشفيات
-    $hospitals_data = $pdo->query("SELECT id, name_ar, name_en, license_number, logo_path, logo_url, service_prefix, logo_scale, logo_offset_x, logo_offset_y, created_at, updated_at, CASE WHEN logo_data IS NOT NULL AND logo_data != '' THEN 'has_logo' ELSE '' END AS has_logo_data FROM hospitals ORDER BY name_ar")->fetchAll();
+    $hospitals_data = getHospitalsList($pdo);
 
     return compact('leaves', 'archived', 'queries', 'notifications_payment', 'payments', 'hospitals_data');
 }
@@ -962,16 +1090,67 @@ function ensureDelayedUnpaidNotifications($pdo): void {
     ");
     $stmt->execute();
     $rows = $stmt->fetchAll();
-    if (!$rows) return;
 
-    $ins = $pdo->prepare("INSERT INTO notifications (type, leave_id, message, created_at) VALUES ('payment', ?, ?, ?)");
+    $accountRows = [];
+    if (tableExists($pdo, 'account_payments')) {
+        $accountStmt = $pdo->prepare("
+            SELECT ap.id, ap.user_id, ap.amount, ap.days_count, COALESCE(u.display_name, u.username, 'مريض') AS account_name
+            FROM account_payments ap
+            LEFT JOIN admin_users u ON u.id = ap.user_id
+            LEFT JOIN notifications n ON n.account_payment_id = ap.id AND n.type = 'payment'
+            WHERE ap.is_paid = 0
+              AND ap.amount > 0
+              AND n.id IS NULL
+        ");
+        $accountStmt->execute();
+        $accountRows = $accountStmt->fetchAll();
+    }
+
+    if (!$rows && !$accountRows) return;
+
+    $ins = $pdo->prepare("INSERT INTO notifications (type, leave_id, account_payment_id, message, created_at) VALUES ('payment', ?, ?, ?, ?)");
     foreach ($rows as $row) {
         $ins->execute([
             $row['id'],
+            null,
             "إجازة غير مدفوعة منذ أكثر من 5 دقائق برمز {$row['service_code']} بمبلغ {$row['payment_amount']}",
             nowSaudi()
         ]);
     }
+    foreach ($accountRows as $row) {
+        $ins->execute([
+            null,
+            $row['id'],
+            "إضافة أيام غير مدفوعة لحساب {$row['account_name']} ({$row['days_count']} يوم) بمبلغ {$row['amount']}",
+            nowSaudi()
+        ]);
+    }
+}
+
+function fetchPatientAccountRecords(PDO $pdo, int $userId): array {
+    $accountStmt = $pdo->prepare("SELECT pa.patient_id FROM patient_accounts pa WHERE pa.user_id = ? LIMIT 1");
+    $accountStmt->execute([$userId]);
+    $patientId = (int)($accountStmt->fetchColumn() ?: 0);
+
+    $leaves = [];
+    if ($patientId > 0) {
+        $leaveStmt = $pdo->prepare("
+            SELECT sl.*, COALESCE(d.name_ar, d.name, '') AS doctor_name, COALESCE(d.title_ar, d.title, '') AS doctor_title,
+                   COALESCE(h.name_ar, sl.hospital_name_ar, '') AS hospital_name
+            FROM sick_leaves sl
+            LEFT JOIN doctors d ON d.id = sl.doctor_id
+            LEFT JOIN hospitals h ON h.id = sl.hospital_id
+            WHERE sl.patient_id = ? AND sl.deleted_at IS NULL
+            ORDER BY sl.created_at DESC
+        ");
+        $leaveStmt->execute([$patientId]);
+        $leaves = $leaveStmt->fetchAll();
+    }
+
+    $paymentStmt = $pdo->prepare("SELECT ap.*, au.display_name AS created_by_name, payer.display_name AS paid_by_name FROM account_payments ap LEFT JOIN admin_users au ON ap.created_by = au.id LEFT JOIN admin_users payer ON ap.paid_by = payer.id WHERE ap.user_id = ? ORDER BY ap.paid_at DESC, ap.id DESC");
+    $paymentStmt->execute([$userId]);
+
+    return ['leaves' => $leaves, 'payments' => $paymentStmt->fetchAll()];
 }
 
 // ======================== دالة توليد PDF ========================
@@ -1024,8 +1203,10 @@ function handleGeneratePdf($pdo, $leave_id, $pdfMode = 'preview') {
     $startEn = $fmtEn($startG);
     $endEn = $fmtEn($endG);
     $issueEn = $fmtEn($issueG);
+    $dischargeEn = $fmtEn($startG);
     $startHj = $toHijriStr($startG);
     $endHj = $toHijriStr($endG);
+    $dischargeHj = $toHijriStr($startG);
 
     $patNameAr = htmlspecialchars($lv['p_name_ar'] ?? '', ENT_QUOTES);
     $patNameEn = strtoupper(htmlspecialchars($lv['p_name_en'] ?? $lv['patient_name_en'] ?? '', ENT_QUOTES));
@@ -1142,7 +1323,7 @@ function handleGeneratePdf($pdo, $leave_id, $pdfMode = 'preview') {
     $reportBody .= '<tr><td class="en-title">Leave ID</td><td class="data-cell" colspan="2">' . $sc . '</td><td class="ar-title">رمز الإجازة</td></tr>';
     $reportBody .= '<tr class="blue-row"><td class="en-title" style="color:white">Leave Duration</td><td class="data-cell">' . $durationEn . '</td><td class="data-cell ar-text" dir="rtl">' . $durationAr . '</td><td class="ar-title" style="color:white">مدة الإجازة</td></tr>';
     $reportBody .= '<tr><td class="en-title">Admission Date</td><td class="data-cell date-cell">' . $startEn . '</td><td class="data-cell date-cell" dir="ltr">' . $startHj . '</td><td class="ar-title">تاريخ الدخول</td></tr>';
-    $reportBody .= '<tr class="gray-row"><td class="en-title">Discharge Date</td><td class="data-cell date-cell">' . $endEn . '</td><td class="data-cell date-cell" dir="ltr">' . $endHj . '</td><td class="ar-title">تاريخ الخروج</td></tr>';
+    $reportBody .= '<tr class="gray-row"><td class="en-title">Discharge Date</td><td class="data-cell date-cell">' . $dischargeEn . '</td><td class="data-cell date-cell" dir="ltr">' . $dischargeHj . '</td><td class="ar-title">تاريخ الخروج</td></tr>';
     $reportBody .= '<tr><td class="en-title">Issue Date</td><td class="data-cell" colspan="2">' . $issueEn . '</td><td class="ar-title">تاريخ الإصدار</td></tr>';
     $reportBody .= '<tr class="gray-row"><td class="en-title">Patient Name</td><td class="data-cell en-spaced">' . $patNameEn . '</td><td class="data-cell ar-text">' . $patNameAr . '</td><td class="ar-title">الاسم</td></tr>';
     $reportBody .= '<tr><td class="en-title">National ID / Iqama</td><td class="data-cell" colspan="2">' . $patId . '</td><td class="ar-title">رقم الهوية<span class="thin-slash">/</span>الإقامة</td></tr>';
@@ -1298,7 +1479,7 @@ if ($pdfMode === 'download') {
         if (is_link($p)) { $real = realpath($p); if ($real && is_file($real)) { $pythonBin = $real; break; } }
     }
     
-    $cmd = $pythonBin . ' "' . $scriptPath . '" "' . $tmpHtml . '" "' . $tmpPdf . '" 2>&1';
+    $cmd = escapeshellarg($pythonBin) . ' ' . escapeshellarg($scriptPath) . ' ' . escapeshellarg($tmpHtml) . ' ' . escapeshellarg($tmpPdf) . ' 2>&1';
     $output = shell_exec($cmd);
     
     if (file_exists($tmpPdf) && filesize($tmpPdf) > 0) {
@@ -1434,7 +1615,7 @@ if ($pdfMode === 'download') {
     $html .= '      <tr><td class="en-title">Leave ID</td><td class="data-cell" colspan="2">' . $sc . '</td><td class="ar-title">رمز الإجازة</td></tr>' . "\n";
     $html .= '      <tr class="blue-row"><td class="en-title" style="color: white;">Leave Duration</td><td class="data-cell">' . $durationEn . '</td><td class="data-cell ar-text" dir="rtl">' . $durationAr . '</td><td class="ar-title" style="color: white;">مدة الإجازة</td></tr>' . "\n";
     $html .= '      <tr><td class="en-title">Admission Date</td><td class="data-cell date-cell">' . $startEn . '</td><td class="data-cell date-cell" dir="ltr">' . $startHj . '</td><td class="ar-title">تاريخ الدخول</td></tr>' . "\n";
-    $html .= '      <tr class="gray-row"><td class="en-title">Discharge Date</td><td class="data-cell date-cell">' . $endEn . '</td><td class="data-cell date-cell" dir="ltr">' . $endHj . '</td><td class="ar-title">تاريخ الخروج</td></tr>' . "\n";
+    $html .= '      <tr class="gray-row"><td class="en-title">Discharge Date</td><td class="data-cell date-cell">' . $dischargeEn . '</td><td class="data-cell date-cell" dir="ltr">' . $dischargeHj . '</td><td class="ar-title">تاريخ الخروج</td></tr>' . "\n";
     $html .= '      <tr><td class="en-title">Issue Date</td><td class="data-cell" colspan="2">' . $issueEn . '</td><td class="ar-title">تاريخ الإصدار</td></tr>' . "\n";
     $html .= '      <tr class="gray-row"><td class="en-title">Patient Name</td><td class="data-cell en-spaced">' . $patNameEn . '</td><td class="data-cell ar-text">' . $patNameAr . '</td><td class="ar-title">الاسم</td></tr>' . "\n";
     $html .= '      <tr><td class="en-title">National ID / Iqama</td><td class="data-cell" colspan="2">' . $patId . '</td><td class="ar-title">رقم الهوية<span class="thin-slash">/</span>الإقامة</td></tr>' . "\n";
@@ -1618,8 +1799,14 @@ if (isset($_GET['action']) && in_array($_GET['action'], $_GET_AJAX_ACTIONS) && !
                        pa.patient_id AS linked_patient_id, pa.allowed_days AS patient_allowed_days,
                        pa.expiry_date, pa.notes AS account_notes,
                        p.name_ar AS linked_patient_name, p.identity_number AS patient_identity,
-                       COALESCE((SELECT SUM(amount) FROM account_payments WHERE user_id = u.id), 0) AS total_paid,
-                       COALESCE((SELECT COUNT(*) FROM account_payments WHERE user_id = u.id), 0) AS payment_count
+                       COALESCE((SELECT SUM(amount) FROM account_payments WHERE user_id = u.id AND is_paid = 1), 0) AS total_paid,
+                       COALESCE((SELECT COUNT(*) FROM account_payments WHERE user_id = u.id), 0) AS payment_count,
+                       COALESCE((SELECT COUNT(*) FROM sick_leaves sl WHERE sl.patient_id = pa.patient_id AND sl.deleted_at IS NULL AND sl.created_by_user_id = u.id), 0) AS portal_leave_count,
+                       COALESCE((SELECT SUM(sl.days_count) FROM sick_leaves sl WHERE sl.patient_id = pa.patient_id AND sl.deleted_at IS NULL AND sl.created_by_user_id = u.id), 0) AS portal_used_days,
+                       GREATEST(pa.allowed_days - COALESCE((SELECT SUM(sl.days_count) FROM sick_leaves sl WHERE sl.patient_id = pa.patient_id AND sl.deleted_at IS NULL AND sl.created_by_user_id = u.id), 0), 0) AS portal_remaining_days,
+                       COALESCE((SELECT SUM(CASE WHEN ap.is_paid = 1 THEN 1 ELSE 0 END) FROM account_payments ap WHERE ap.user_id = u.id), 0) AS account_paid_count,
+                       COALESCE((SELECT SUM(CASE WHEN ap.is_paid = 0 THEN 1 ELSE 0 END) FROM account_payments ap WHERE ap.user_id = u.id), 0) AS account_unpaid_count,
+                       COALESCE((SELECT SUM(CASE WHEN ap.is_paid = 0 THEN ap.amount ELSE 0 END) FROM account_payments ap WHERE ap.user_id = u.id), 0) AS total_unpaid
                 FROM admin_users u
                 INNER JOIN patient_accounts pa ON pa.user_id = u.id
                 LEFT JOIN patients p ON pa.patient_id = p.id
@@ -1680,10 +1867,19 @@ if (isset($_GET['action']) && in_array($_GET['action'], $_GET_AJAX_ACTIONS) && !
         case 'fetch_notifications':
             ensureDelayedUnpaidNotifications($pdo);
             $notifications = $pdo->query("
-                SELECT n.*, sl.payment_amount, sl.service_code, sl.patient_id, COALESCE(p.name_ar, p.name, '') AS patient_name, p.phone AS patient_phone
+                SELECT n.*, COALESCE(sl.payment_amount, ap.amount, 0) AS payment_amount,
+                       COALESCE(sl.service_code, CONCAT('ACC-', ap.id), '-') AS service_code,
+                       sl.patient_id,
+                       COALESCE(p.name_ar, p.name, au.display_name, au.username, '') AS patient_name,
+                       p.phone AS patient_phone,
+                       ap.user_id AS account_user_id,
+                       ap.days_count AS account_days_count,
+                       ap.is_paid AS account_is_paid
                 FROM notifications n
                 LEFT JOIN sick_leaves sl ON n.leave_id = sl.id
                 LEFT JOIN patients p ON sl.patient_id = p.id
+                LEFT JOIN account_payments ap ON n.account_payment_id = ap.id
+                LEFT JOIN admin_users au ON ap.user_id = au.id
                 WHERE n.type = 'payment'
                 ORDER BY n.created_at DESC
             ")->fetchAll();
@@ -1733,8 +1929,8 @@ if (isset($_POST['action']) && $_POST['action'] !== 'login' && $_POST['action'] 
         case 'fetch_all_leaves':
             $data = fetchAllData($pdo);
             $data['doctors'] = $pdo->query("SELECT d.*, h.name_ar AS hospital_name_ar FROM doctors d LEFT JOIN hospitals h ON d.hospital_id = h.id ORDER BY d.name_ar")->fetchAll();
-            $data['patients'] = $pdo->query("SELECT * FROM patients ORDER BY name_ar")->fetchAll();
-            $data['hospitals'] = $pdo->query("SELECT id, name_ar, name_en, license_number, logo_path, logo_url, service_prefix, logo_scale, logo_offset_x, logo_offset_y, created_at, updated_at, CASE WHEN logo_data IS NOT NULL AND logo_data != '' THEN 'has_logo' ELSE '' END AS has_logo_data FROM hospitals ORDER BY name_ar")->fetchAll();
+            $data['patients'] = enrichPatientsWithEmployers($pdo, $pdo->query("SELECT * FROM patients ORDER BY name_ar")->fetchAll());
+            $data['hospitals'] = getHospitalsList($pdo);
             $data['stats'] = getStats($pdo);
             $data['unread_messages_count'] = getUnreadMessagesCount($pdo, intval($_SESSION['admin_user_id'] ?? 0));
             $data['success'] = true;
@@ -1753,7 +1949,7 @@ if (isset($_POST['action']) && $_POST['action'] !== 'login' && $_POST['action'] 
             if (!$logo_data && !empty($logo_url)) $logo_data = downloadLogoFromUrl($logo_url);
             $stmt = $pdo->prepare("INSERT INTO hospitals (name_ar, name_en, license_number, logo_path, logo_url, logo_data, service_prefix) VALUES (?,?,?,?,?,?,?)");
             $stmt->execute([$name_ar, $name_en, $license ?: null, null, $logo_url ?: null, $logo_data, $prefix]);
-            $hospitals = $pdo->query("SELECT id, name_ar, name_en, license_number, logo_path, logo_url, service_prefix, logo_scale, logo_offset_x, logo_offset_y, created_at, updated_at, CASE WHEN logo_data IS NOT NULL AND logo_data != '' THEN 'has_logo' ELSE '' END AS has_logo_data FROM hospitals ORDER BY name_ar")->fetchAll();
+            $hospitals = getHospitalsList($pdo);
             echo json_encode(['success'=>true,'message'=>'تمت إضافة المستشفى بنجاح.','hospitals'=>$hospitals,'stats'=>getStats($pdo)]);
             break;
 
@@ -1764,54 +1960,99 @@ if (isset($_POST['action']) && $_POST['action'] !== 'login' && $_POST['action'] 
             $license = trim($_POST['hospital_license'] ?? '');
             $prefix = in_array(strtoupper(trim($_POST['hospital_prefix'] ?? 'GSL')), ['GSL','PSL']) ? strtoupper(trim($_POST['hospital_prefix'])) : 'GSL';
             $logo_url = trim($_POST['hospital_logo_url'] ?? '');
-            $logo_scale = floatval($_POST['logo_scale'] ?? 1.0);
-            $logo_offset_x = floatval($_POST['logo_offset_x'] ?? 0);
-            $logo_offset_y = floatval($_POST['logo_offset_y'] ?? 0);
+            $logo_scale = max(0.2, min(3.0, floatval($_POST['logo_scale'] ?? 1.0)));
+            $logo_offset_x = max(-500, min(500, floatval($_POST['logo_offset_x'] ?? 0)));
+            $logo_offset_y = max(-500, min(500, floatval($_POST['logo_offset_y'] ?? 0)));
             if ($id <= 0 || empty($name_ar)) { echo json_encode(['success'=>false,'message'=>'بيانات غير صالحة.']); exit; }
-            $oldPrefixStmt = $pdo->prepare("SELECT service_prefix FROM hospitals WHERE id = ?");
-            $oldPrefixStmt->execute([$id]);
-            $oldPrefix = strtoupper((string)($oldPrefixStmt->fetchColumn() ?: ''));
+
+            $existsStmt = $pdo->prepare("SELECT service_prefix FROM hospitals WHERE id = ? AND deleted_at IS NULL LIMIT 1");
+            $existsStmt->execute([$id]);
+            $oldPrefix = strtoupper((string)($existsStmt->fetchColumn() ?: ''));
+            if ($oldPrefix === '') { echo json_encode(['success'=>false,'message'=>'المستشفى غير موجود أو تم حذفه.']); exit; }
+
             $logo_data = uploadHospitalLogo($_FILES['hospital_logo'] ?? []);
             if (!$logo_data && !empty($logo_url)) $logo_data = downloadLogoFromUrl($logo_url);
-            if ($logo_data) {
-                $stmt = $pdo->prepare("UPDATE hospitals SET name_ar=?, name_en=?, license_number=?, logo_data=?, logo_url=?, service_prefix=?, logo_scale=?, logo_offset_x=?, logo_offset_y=? WHERE id=?");
-                $stmt->execute([$name_ar, $name_en, $license ?: null, $logo_data, $logo_url ?: null, $prefix, $logo_scale, $logo_offset_x, $logo_offset_y, $id]);
-            } elseif (!empty($logo_url)) {
-                $downloaded = downloadLogoFromUrl($logo_url);
-                if ($downloaded) {
+
+            $pdo->beginTransaction();
+            try {
+                if ($logo_data) {
                     $stmt = $pdo->prepare("UPDATE hospitals SET name_ar=?, name_en=?, license_number=?, logo_data=?, logo_url=?, service_prefix=?, logo_scale=?, logo_offset_x=?, logo_offset_y=? WHERE id=?");
-                    $stmt->execute([$name_ar, $name_en, $license ?: null, $downloaded, $logo_url, $prefix, $logo_scale, $logo_offset_x, $logo_offset_y, $id]);
-                } else {
+                    $stmt->execute([$name_ar, $name_en, $license ?: null, $logo_data, $logo_url ?: null, $prefix, $logo_scale, $logo_offset_x, $logo_offset_y, $id]);
+                } elseif (!empty($logo_url)) {
                     $stmt = $pdo->prepare("UPDATE hospitals SET name_ar=?, name_en=?, license_number=?, logo_url=?, service_prefix=?, logo_scale=?, logo_offset_x=?, logo_offset_y=? WHERE id=?");
                     $stmt->execute([$name_ar, $name_en, $license ?: null, $logo_url, $prefix, $logo_scale, $logo_offset_x, $logo_offset_y, $id]);
+                } else {
+                    $stmt = $pdo->prepare("UPDATE hospitals SET name_ar=?, name_en=?, license_number=?, logo_url=NULL, service_prefix=?, logo_scale=?, logo_offset_x=?, logo_offset_y=? WHERE id=?");
+                    $stmt->execute([$name_ar, $name_en, $license ?: null, $prefix, $logo_scale, $logo_offset_x, $logo_offset_y, $id]);
                 }
-            } else {
-                $stmt = $pdo->prepare("UPDATE hospitals SET name_ar=?, name_en=?, license_number=?, service_prefix=?, logo_scale=?, logo_offset_x=?, logo_offset_y=? WHERE id=?");
-                $stmt->execute([$name_ar, $name_en, $license ?: null, $prefix, $logo_scale, $logo_offset_x, $logo_offset_y, $id]);
+
+                // Update all sick leaves linked to this hospital immediately when hospital details change.
+                $cascadeStmt = $pdo->prepare("UPDATE sick_leaves SET hospital_name_ar = ?, hospital_name_en = ? WHERE hospital_id = ?");
+                $cascadeStmt->execute([$name_ar, $name_en, $id]);
+
+                if ($oldPrefix !== $prefix) {
+                    $codeCascadeStmt = $pdo->prepare("
+                        UPDATE sick_leaves
+                        SET service_code = CONCAT(?, SUBSTRING(service_code, 4))
+                        WHERE hospital_id = ?
+                          AND service_code REGEXP '^(GSL|PSL)'
+                    ");
+                    $codeCascadeStmt->execute([$prefix, $id]);
+                }
+
+                $pdo->commit();
+            } catch (Throwable $e) {
+                if ($pdo->inTransaction()) $pdo->rollBack();
+                echo json_encode(['success'=>false,'message'=>'تعذّر تعديل المستشفى: ' . $e->getMessage()]);
+                exit;
             }
-            // Cascade update to leaves
-            $cascadeStmt = $pdo->prepare("UPDATE sick_leaves SET hospital_name_ar = ?, hospital_name_en = ? WHERE hospital_id = ?");
-            $cascadeStmt->execute([$name_ar, $name_en, $id]);
-            if ($oldPrefix !== $prefix) {
-                // Update service codes for all leaves linked to this hospital
-                // Replace the first 3 characters (prefix) with the new prefix
-                $codeCascadeStmt = $pdo->prepare("UPDATE sick_leaves SET service_code = CONCAT(?, SUBSTRING(service_code, 4)) WHERE hospital_id = ?");
-                $codeCascadeStmt->execute([$prefix, $id]);
-            }
-            $hospitals = $pdo->query("SELECT id, name_ar, name_en, license_number, logo_path, logo_url, service_prefix, logo_scale, logo_offset_x, logo_offset_y, created_at, updated_at, CASE WHEN logo_data IS NOT NULL AND logo_data != '' THEN 'has_logo' ELSE '' END AS has_logo_data FROM hospitals ORDER BY name_ar")->fetchAll();
+
+            $hospitals = getHospitalsList($pdo);
             echo json_encode(['success'=>true,'message'=>'تم تعديل المستشفى بنجاح.','hospitals'=>$hospitals,'stats'=>getStats($pdo)]);
             break;
 
         case 'delete_hospital':
             $id = intval($_POST['hospital_id'] ?? 0);
-            $pdo->prepare("UPDATE doctors SET hospital_id = NULL WHERE hospital_id = ?")->execute([$id]);
-            $pdo->prepare("DELETE FROM hospitals WHERE id = ?")->execute([$id]);
-            $hospitals = $pdo->query("SELECT id, name_ar, name_en, license_number, logo_path, logo_url, service_prefix, logo_scale, logo_offset_x, logo_offset_y, created_at, updated_at, CASE WHEN logo_data IS NOT NULL AND logo_data != '' THEN 'has_logo' ELSE '' END AS has_logo_data FROM hospitals ORDER BY name_ar")->fetchAll();
+            if ($id <= 0) { echo json_encode(['success'=>false,'message'=>'معرّف المستشفى غير صالح.']); exit; }
+
+            $existsStmt = $pdo->prepare("SELECT id FROM hospitals WHERE id = ? AND deleted_at IS NULL LIMIT 1");
+            $existsStmt->execute([$id]);
+            if (!$existsStmt->fetch()) { echo json_encode(['success'=>false,'message'=>'المستشفى غير موجود أو تم حذفه مسبقاً.']); exit; }
+
+            $deletedPhysically = false;
+            $pdo->beginTransaction();
+            try {
+                // Clear every known hospital_id reference first, so foreign keys cannot block deletion.
+                foreach (['doctors', 'sick_leaves'] as $refTable) {
+                    if (tableExists($pdo, $refTable)) {
+                        $colCheck = $pdo->prepare("SELECT COUNT(*) FROM information_schema.columns WHERE table_schema = DATABASE() AND table_name = ? AND column_name = 'hospital_id'");
+                        $colCheck->execute([$refTable]);
+                        if ((int)$colCheck->fetchColumn() > 0) {
+                            $pdo->prepare("UPDATE {$refTable} SET hospital_id = NULL WHERE hospital_id = ?")->execute([$id]);
+                        }
+                    }
+                }
+                $pdo->prepare("DELETE FROM hospitals WHERE id = ?")->execute([$id]);
+                $pdo->commit();
+                $deletedPhysically = true;
+            } catch (Throwable $e) {
+                if ($pdo->inTransaction()) $pdo->rollBack();
+                // Final guaranteed admin behavior: hide the hospital even if an unknown FK blocks physical deletion.
+                try {
+                    $softStmt = $pdo->prepare("UPDATE hospitals SET deleted_at = NOW() WHERE id = ?");
+                    $softStmt->execute([$id]);
+                } catch (Throwable $softDeleteError) {
+                    echo json_encode(['success'=>false,'message'=>'تعذّر حذف المستشفى: ' . $softDeleteError->getMessage()]);
+                    exit;
+                }
+            }
+
+            $hospitals = getHospitalsList($pdo);
             echo json_encode(['success'=>true,'message'=>'تم حذف المستشفى بنجاح.','hospitals'=>$hospitals,'stats'=>getStats($pdo)]);
             break;
 
         case 'fetch_hospitals':
-            $hospitals = $pdo->query("SELECT id, name_ar, name_en, license_number, logo_path, logo_url, service_prefix, logo_scale, logo_offset_x, logo_offset_y, created_at, updated_at, CASE WHEN logo_data IS NOT NULL AND logo_data != '' THEN 'has_logo' ELSE '' END AS has_logo_data FROM hospitals ORDER BY name_ar")->fetchAll();
+            $hospitals = getHospitalsList($pdo);
             echo json_encode(['success'=>true,'hospitals'=>$hospitals]);
             break;
 
@@ -1928,6 +2169,12 @@ if (isset($_POST['action']) && $_POST['action'] !== 'login' && $_POST['action'] 
 
             $start_date = $_POST['start_date'] ?? '';
             $end_date = $_POST['end_date'] ?? '';
+            if (!empty($start_date)) {
+                $issue_date = $start_date;
+                if (empty($service_code_manual)) {
+                    $service_code = generateServiceCode($pdo, $service_prefix, $issue_date);
+                }
+            }
             $days_count = intval($_POST['days_count'] ?? 0);
             $is_companion = isset($_POST['is_companion']) ? 1 : 0;
             $companion_name = trim($_POST['companion_name'] ?? '');
@@ -1941,6 +2188,10 @@ if (isset($_POST['action']) && $_POST['action'] !== 'login' && $_POST['action'] 
             $hospital_name_en = trim($_POST['hospital_name_en'] ?? '');
             $employer_ar = trim($_POST['employer_ar'] ?? '');
             $employer_en = trim($_POST['employer_en'] ?? '');
+            $employer_choice = trim($_POST['employer_choice'] ?? 'manual');
+            if ($employer_choice !== 'manual') {
+                [$employer_ar, $employer_en] = resolveEmployerChoice($pdo, (int)$patient_id, $employer_choice);
+            }
             $logo_path = uploadLeaveLogo($_FILES['leave_logo'] ?? []);
             // إذا لم يتم رفع شعار، نأخذه من المستشفى
             if (!$logo_path && $hospital_id && isset($hData) && !empty($hData['logo_path'])) {
@@ -1956,6 +2207,14 @@ if (isset($_POST['action']) && $_POST['action'] !== 'login' && $_POST['action'] 
             if (empty($issue_date) || empty($start_date) || empty($end_date) || $days_count <= 0 || $patient_id <= 0 || $doctor_id <= 0) {
                 echo json_encode(['success' => false, 'message' => 'يرجى تعبئة جميع الحقول المطلوبة.']);
                 exit;
+            }
+            if ($hospital_id && $doctor_select !== 'manual') {
+                $doctorHospitalCheck = $pdo->prepare("SELECT hospital_id FROM doctors WHERE id = ? LIMIT 1");
+                $doctorHospitalCheck->execute([$doctor_id]);
+                if ((string)($doctorHospitalCheck->fetchColumn() ?: '') !== (string)$hospital_id) {
+                    echo json_encode(['success' => false, 'message' => 'الطبيب المختار غير مرتبط بالمستشفى المحدد.']);
+                    exit;
+                }
             }
 
             $stmt = $pdo->prepare("INSERT INTO sick_leaves 
@@ -1978,7 +2237,7 @@ if (isset($_POST['action']) && $_POST['action'] !== 'login' && $_POST['action'] 
 
             $data = fetchActiveOperationalData($pdo);
             $data['doctors'] = $pdo->query("SELECT d.*, h.name_ar AS hospital_name_ar FROM doctors d LEFT JOIN hospitals h ON d.hospital_id = h.id ORDER BY d.name_ar")->fetchAll();
-            $data['patients'] = $pdo->query("SELECT * FROM patients ORDER BY name_ar")->fetchAll();
+            $data['patients'] = enrichPatientsWithEmployers($pdo, $pdo->query("SELECT * FROM patients ORDER BY name_ar")->fetchAll());
             $data['stats'] = getStats($pdo);
             $data['success'] = true;
             $data['message'] = "تمت إضافة الإجازة بنجاح. رمز الخدمة: $service_code";
@@ -2014,49 +2273,60 @@ if (isset($_POST['action']) && $_POST['action'] !== 'login' && $_POST['action'] 
                     echo json_encode(['success' => false, 'message' => 'يرجى إدخال اسم الطبيب ومسمّاه الوظيفي.']);
                     exit;
                 }
-                $stmt = $pdo->prepare("INSERT INTO doctors (name, name_ar, title, title_ar, note) VALUES (?, ?, ?, ?, ?)");
-                $stmt->execute([$dName, $dName, $dTitle, $dTitle, $dNote]);
+                $stmt = $pdo->prepare("INSERT INTO doctors (name, name_ar, title, title_ar, note, hospital_id) VALUES (?, ?, ?, ?, ?, ?)");
+                $stmt->execute([$dName, $dName, $dTitle, $dTitle, $dNote, $hospital_id_edit]);
                 $doctor_id_edit = intval($pdo->lastInsertId());
             } else {
                 $doctor_id_edit = intval($doctor_id_edit_raw ?: 0);
             }
 
+            if (!empty($start_date)) {
+                $issue_date = $start_date;
+            }
             if ($leave_id <= 0 || empty($service_code) || empty($issue_date) || empty($start_date) || empty($end_date) || $days_count <= 0) {
                 echo json_encode(['success' => false, 'message' => 'يرجى تعبئة جميع الحقول المطلوبة.']);
                 exit;
+            }
+            if ($hospital_id_edit && $doctor_id_edit && $doctor_id_edit_raw !== 'manual') {
+                $doctorHospitalCheck = $pdo->prepare("SELECT hospital_id FROM doctors WHERE id = ? LIMIT 1");
+                $doctorHospitalCheck->execute([$doctor_id_edit]);
+                if ((string)($doctorHospitalCheck->fetchColumn() ?: '') !== (string)$hospital_id_edit) {
+                    echo json_encode(['success' => false, 'message' => 'الطبيب المختار غير مرتبط بالمستشفى المحدد.']);
+                    exit;
+                }
             }
 
             if ($doctor_id_edit && $doctor_id_edit > 0) {
                 $stmt = $pdo->prepare("UPDATE sick_leaves SET 
                     service_code = ?, issue_date = ?, start_date = ?, end_date = ?, days_count = ?,
                     is_companion = ?, companion_name = ?, companion_relation = ?,
-                    is_paid = ?, payment_amount = ?, doctor_id = ?, hospital_id = COALESCE(?, hospital_id),
+                    is_paid = ?, payment_amount = ?, doctor_id = ?, hospital_id = COALESCE(?, hospital_id), employer_ar = ?, employer_en = ?,
                     issue_time = ?, issue_period = ?, updated_at = ?
                     WHERE id = ?");
                 $stmt->execute([
                     $service_code, $issue_date, $start_date, $end_date, $days_count,
                     $is_companion, $companion_name, $companion_relation,
-                    $is_paid, $payment_amount, $doctor_id_edit, $hospital_id_edit,
+                    $is_paid, $payment_amount, $doctor_id_edit, $hospital_id_edit, $employer_ar_edit, $employer_en_edit,
                     $issue_time ?: null, $issue_period, nowSaudi(), $leave_id
                 ]);
             } else {
                 $stmt = $pdo->prepare("UPDATE sick_leaves SET 
                     service_code = ?, issue_date = ?, start_date = ?, end_date = ?, days_count = ?,
                     is_companion = ?, companion_name = ?, companion_relation = ?,
-                    is_paid = ?, payment_amount = ?, hospital_id = COALESCE(?, hospital_id),
+                    is_paid = ?, payment_amount = ?, hospital_id = COALESCE(?, hospital_id), employer_ar = ?, employer_en = ?,
                     issue_time = ?, issue_period = ?, updated_at = ?
                     WHERE id = ?");
                 $stmt->execute([
                     $service_code, $issue_date, $start_date, $end_date, $days_count,
                     $is_companion, $companion_name, $companion_relation,
-                    $is_paid, $payment_amount, $hospital_id_edit,
+                    $is_paid, $payment_amount, $hospital_id_edit, $employer_ar_edit, $employer_en_edit,
                     $issue_time ?: null, $issue_period, nowSaudi(), $leave_id
                 ]);
             }
 
             $data = fetchActiveOperationalData($pdo);
             $data['doctors'] = $pdo->query("SELECT d.*, h.name_ar AS hospital_name_ar FROM doctors d LEFT JOIN hospitals h ON d.hospital_id = h.id ORDER BY d.name_ar")->fetchAll();
-            $data['patients'] = $pdo->query("SELECT * FROM patients ORDER BY name_ar")->fetchAll();
+            $data['patients'] = enrichPatientsWithEmployers($pdo, $pdo->query("SELECT * FROM patients ORDER BY name_ar")->fetchAll());
             $data['stats'] = getStats($pdo);
             $data['success'] = true;
             $data['message'] = 'تم تعديل الإجازة بنجاح.';
@@ -2066,6 +2336,7 @@ if (isset($_POST['action']) && $_POST['action'] !== 'login' && $_POST['action'] 
         case 'duplicate_leave':
             // خاصية تكرار الإجازة
             $patient_id = intval($_POST['dup_patient_id'] ?? 0);
+            $hospital_id = intval($_POST['dup_hospital_id'] ?? 0) ?: null;
             $doctor_select = $_POST['dup_doctor_select'] ?? '';
             $doctor_id = null;
 
@@ -2077,8 +2348,8 @@ if (isset($_POST['action']) && $_POST['action'] !== 'login' && $_POST['action'] 
                     echo json_encode(['success' => false, 'message' => 'يرجى إدخال اسم الطبيب ومسمّاه الوظيفي.']);
                     exit;
                 }
-                $stmt = $pdo->prepare("INSERT INTO doctors (name, name_ar, title, title_ar, note) VALUES (?, ?, ?, ?, ?)");
-                $stmt->execute([$dName, $dName, $dTitle, $dTitle, $dNote]);
+                $stmt = $pdo->prepare("INSERT INTO doctors (name, name_ar, title, title_ar, note, hospital_id) VALUES (?, ?, ?, ?, ?, ?)");
+                $stmt->execute([$dName, $dName, $dTitle, $dTitle, $dNote, $hospital_id]);
                 $doctor_id = $pdo->lastInsertId();
             } else {
                 $doctor_id = intval($doctor_select);
@@ -2097,13 +2368,18 @@ if (isset($_POST['action']) && $_POST['action'] !== 'login' && $_POST['action'] 
 
             $start_date = $_POST['dup_start_date'] ?? '';
             $end_date = $_POST['dup_end_date'] ?? '';
+            if (!empty($start_date)) {
+                $issue_date = $start_date;
+                if (empty($service_code_manual)) {
+                    $service_code = generateServiceCode($pdo, $service_prefix, $issue_date);
+                }
+            }
             $days_count = intval($_POST['dup_days_count'] ?? 0);
             $is_companion = isset($_POST['dup_is_companion']) ? 1 : 0;
             $companion_name = trim($_POST['dup_companion_name'] ?? '');
             $companion_relation = trim($_POST['dup_companion_relation'] ?? '');
             $is_paid = isset($_POST['dup_is_paid']) ? 1 : 0;
             $payment_amount = floatval($_POST['dup_payment_amount'] ?? 0);
-            $hospital_id = intval($_POST['dup_hospital_id'] ?? 0) ?: null;
             $issue_time = trim($_POST['dup_issue_time'] ?? '');
             $issue_period = in_array(strtoupper(trim($_POST['dup_issue_period'] ?? '')), ['AM','PM']) ? strtoupper(trim($_POST['dup_issue_period'])) : null;
             $issue_time = normalizeIssueTimeForStorage($issue_time, $issue_period);
@@ -2143,6 +2419,14 @@ if (isset($_POST['action']) && $_POST['action'] !== 'login' && $_POST['action'] 
                 echo json_encode(['success' => false, 'message' => 'يرجى تعبئة جميع الحقول المطلوبة.']);
                 exit;
             }
+            if ($hospital_id && $doctor_select !== 'manual') {
+                $doctorHospitalCheck = $pdo->prepare("SELECT hospital_id FROM doctors WHERE id = ? LIMIT 1");
+                $doctorHospitalCheck->execute([$doctor_id]);
+                if ((string)($doctorHospitalCheck->fetchColumn() ?: '') !== (string)$hospital_id) {
+                    echo json_encode(['success' => false, 'message' => 'الطبيب المختار غير مرتبط بالمستشفى المحدد.']);
+                    exit;
+                }
+            }
 
             $stmt = $pdo->prepare("INSERT INTO sick_leaves 
                 (service_code, patient_id, doctor_id, hospital_id, created_by_user_id, issue_date, issue_time, issue_period, start_date, end_date, days_count, 
@@ -2163,7 +2447,7 @@ if (isset($_POST['action']) && $_POST['action'] !== 'login' && $_POST['action'] 
 
             $data = fetchActiveOperationalData($pdo);
             $data['doctors'] = $pdo->query("SELECT d.*, h.name_ar AS hospital_name_ar FROM doctors d LEFT JOIN hospitals h ON d.hospital_id = h.id ORDER BY d.name_ar")->fetchAll();
-            $data['patients'] = $pdo->query("SELECT * FROM patients ORDER BY name_ar")->fetchAll();
+            $data['patients'] = enrichPatientsWithEmployers($pdo, $pdo->query("SELECT * FROM patients ORDER BY name_ar")->fetchAll());
             $data['stats'] = getStats($pdo);
             $data['success'] = true;
             $data['message'] = "تم تكرار الإجازة بنجاح. رمز الخدمة الجديد: $service_code";
@@ -2228,7 +2512,7 @@ if (isset($_POST['action']) && $_POST['action'] !== 'login' && $_POST['action'] 
             $pdo->prepare("DELETE FROM notifications WHERE leave_id = ? AND type = 'payment'")->execute([$leave_id]);
             $data = fetchActiveOperationalData($pdo);
             $data['doctors'] = $pdo->query("SELECT d.*, h.name_ar AS hospital_name_ar FROM doctors d LEFT JOIN hospitals h ON d.hospital_id = h.id ORDER BY d.name_ar")->fetchAll();
-            $data['patients'] = $pdo->query("SELECT * FROM patients ORDER BY name_ar")->fetchAll();
+            $data['patients'] = enrichPatientsWithEmployers($pdo, $pdo->query("SELECT * FROM patients ORDER BY name_ar")->fetchAll());
             $data['stats'] = getStats($pdo);
             $data['success'] = true;
             $data['message'] = 'تم تأكيد الدفع بنجاح.';
@@ -2400,6 +2684,7 @@ if (isset($_POST['action']) && $_POST['action'] !== 'login' && $_POST['action'] 
             $employer_en = trim($_POST['patient_employer_en'] ?? '');
             $nationality_ar = trim($_POST['patient_nationality_ar'] ?? '');
             $nationality_en = trim($_POST['patient_nationality_en'] ?? '');
+            $employers_extra = trim($_POST['patient_employers_extra'] ?? '');
             if (empty($name) && !empty($name_ar)) $name = $name_ar;
             if (empty($name) || empty($identity)) {
                 echo json_encode(['success' => false, 'message' => 'يرجى إدخال اسم المريض ورقم هويته.']);
@@ -2419,10 +2704,11 @@ if (isset($_POST['action']) && $_POST['action'] !== 'login' && $_POST['action'] 
                 $patientId = $pdo->lastInsertId();
                 $message = 'تمت إضافة المريض بنجاح.';
             }
+            savePatientEmployerOptions($pdo, (int)$patientId, $employers_extra, $employer_ar, $employer_en);
             $patient = $pdo->prepare("SELECT * FROM patients WHERE id = ?");
             $patient->execute([$patientId]);
-            $patientData = $patient->fetch();
-            $patients = $pdo->query("SELECT * FROM patients ORDER BY name_ar")->fetchAll();
+            $patientData = enrichPatientsWithEmployers($pdo, [$patient->fetch()])[0] ?? null;
+            $patients = enrichPatientsWithEmployers($pdo, $pdo->query("SELECT * FROM patients ORDER BY name_ar")->fetchAll());
             echo json_encode([
                 'success' => true,
                 'message' => $message,
@@ -2444,6 +2730,7 @@ if (isset($_POST['action']) && $_POST['action'] !== 'login' && $_POST['action'] 
             $employer_en = trim($_POST['patient_employer_en'] ?? '');
             $nationality_ar = trim($_POST['patient_nationality_ar'] ?? '');
             $nationality_en = trim($_POST['patient_nationality_en'] ?? '');
+            $employers_extra = trim($_POST['patient_employers_extra'] ?? '');
             if (empty($name) && !empty($name_ar)) $name = $name_ar;
             if ($id <= 0 || empty($name) || empty($identity)) {
                 echo json_encode(['success' => false, 'message' => 'بيانات غير صالحة.']);
@@ -2457,13 +2744,14 @@ if (isset($_POST['action']) && $_POST['action'] !== 'login' && $_POST['action'] 
             }
             $stmt = $pdo->prepare("UPDATE patients SET name = ?, identity_number = ?, phone = ?, folder_link = ?, name_ar = ?, name_en = ?, employer_ar = ?, employer_en = ?, nationality_ar = ?, nationality_en = ? WHERE id = ?");
             $stmt->execute([$name, $identity, $phone, $folder_link, $name_ar, $name_en, $employer_ar, $employer_en, $nationality_ar, $nationality_en, $id]);
+            savePatientEmployerOptions($pdo, $id, $employers_extra, $employer_ar, $employer_en);
             // Cascade update to leaves
             $cascadeStmt = $pdo->prepare("UPDATE sick_leaves SET patient_name_en = ?, employer_ar = ?, employer_en = ? WHERE patient_id = ?");
             $cascadeStmt->execute([$name_en, $employer_ar, $employer_en, $id]);
             $patient = $pdo->prepare("SELECT * FROM patients WHERE id = ?");
             $patient->execute([$id]);
-            $patientData = $patient->fetch();
-            $patients = $pdo->query("SELECT * FROM patients ORDER BY name_ar")->fetchAll();
+            $patientData = enrichPatientsWithEmployers($pdo, [$patient->fetch()])[0] ?? null;
+            $patients = enrichPatientsWithEmployers($pdo, $pdo->query("SELECT * FROM patients ORDER BY name_ar")->fetchAll());
             echo json_encode([
                 'success' => true,
                 'message' => 'تم تعديل المريض بنجاح.',
@@ -2476,7 +2764,7 @@ if (isset($_POST['action']) && $_POST['action'] !== 'login' && $_POST['action'] 
         case 'delete_patient':
             $id = intval($_POST['patient_id'] ?? 0);
             $pdo->prepare("DELETE FROM patients WHERE id = ?")->execute([$id]);
-            $patients = $pdo->query("SELECT * FROM patients ORDER BY name_ar")->fetchAll();
+            $patients = enrichPatientsWithEmployers($pdo, $pdo->query("SELECT * FROM patients ORDER BY name_ar")->fetchAll());
             echo json_encode([
                 'success' => true,
                 'message' => 'تم حذف المريض بنجاح.',
@@ -2520,7 +2808,7 @@ if (isset($_POST['action']) && $_POST['action'] !== 'login' && $_POST['action'] 
                     $insertedPat++;
                 }
             }
-            $patients = $pdo->query("SELECT * FROM patients ORDER BY name_ar")->fetchAll();
+            $patients = enrichPatientsWithEmployers($pdo, $pdo->query("SELECT * FROM patients ORDER BY name_ar")->fetchAll());
             $summaryPat = "تمت معالجة الدفعة: أضيف {$insertedPat}، تم تحديث {$updatedPat}.";
             if (!empty($errorsPat)) $summaryPat .= " أخطاء: " . implode(' | ', array_slice($errorsPat, 0, 3));
             echo json_encode(['success' => true, 'message' => $summaryPat, 'inserted' => $insertedPat, 'updated' => $updatedPat, 'errors' => $errorsPat, 'patients' => $patients, 'stats' => getStats($pdo)]);
@@ -2533,7 +2821,7 @@ if (isset($_POST['action']) && $_POST['action'] !== 'login' && $_POST['action'] 
                 echo json_encode(['success' => false, 'message' => 'لم يتم التعرّف على أي مستشفى. استخدم صيغة: اسم عربي | اسم إنجليزي | رقم الترخيص | البادئة (GSL/PSL)']);
                 exit;
             }
-            $checkHospStmt = $pdo->prepare("SELECT id FROM hospitals WHERE name_ar = ? LIMIT 1");
+            $checkHospStmt = $pdo->prepare("SELECT id FROM hospitals WHERE name_ar = ? AND deleted_at IS NULL LIMIT 1");
             $insertHospStmt = $pdo->prepare("INSERT INTO hospitals (name_ar, name_en, license_number, service_prefix) VALUES (?, ?, ?, ?)");
             $insertedHosp = 0; $duplicatesHosp = 0; $errorsHosp = [];
             foreach ($lines as $index => $line) {
@@ -2555,7 +2843,7 @@ if (isset($_POST['action']) && $_POST['action'] !== 'login' && $_POST['action'] 
                 $insertHospStmt->execute([$nameAr, $nameEn, $license ?: null, $prefix]);
                 $insertedHosp++;
             }
-            $hospitals = $pdo->query("SELECT id, name_ar, name_en, license_number, logo_path, logo_url, service_prefix, logo_scale, logo_offset_x, logo_offset_y, created_at, updated_at, CASE WHEN logo_data IS NOT NULL AND logo_data != '' THEN 'has_logo' ELSE '' END AS has_logo_data FROM hospitals ORDER BY name_ar")->fetchAll();
+            $hospitals = getHospitalsList($pdo);
             $summaryHosp = "تمت معالجة الدفعة: أضيف {$insertedHosp}، مكرّر {$duplicatesHosp}.";
             if (!empty($errorsHosp)) $summaryHosp .= " أخطاء: " . implode(' | ', array_slice($errorsHosp, 0, 3));
             echo json_encode(['success' => true, 'message' => $summaryHosp, 'inserted' => $insertedHosp, 'duplicates' => $duplicatesHosp, 'errors' => $errorsHosp, 'hospitals' => $hospitals, 'stats' => getStats($pdo)]);
@@ -2756,10 +3044,19 @@ if (isset($_POST['action']) && $_POST['action'] !== 'login' && $_POST['action'] 
         case 'fetch_notifications':
             ensureDelayedUnpaidNotifications($pdo);
             $notifications = $pdo->query(" 
-                SELECT n.*, sl.payment_amount, sl.service_code, sl.patient_id, COALESCE(p.name_ar, p.name, '') AS patient_name, p.phone AS patient_phone
+                SELECT n.*, COALESCE(sl.payment_amount, ap.amount, 0) AS payment_amount,
+                       COALESCE(sl.service_code, CONCAT('ACC-', ap.id), '-') AS service_code,
+                       sl.patient_id,
+                       COALESCE(p.name_ar, p.name, au.display_name, au.username, '') AS patient_name,
+                       p.phone AS patient_phone,
+                       ap.user_id AS account_user_id,
+                       ap.days_count AS account_days_count,
+                       ap.is_paid AS account_is_paid
                 FROM notifications n
                 LEFT JOIN sick_leaves sl ON n.leave_id = sl.id
                 LEFT JOIN patients p ON sl.patient_id = p.id
+                LEFT JOIN account_payments ap ON n.account_payment_id = ap.id
+                LEFT JOIN admin_users au ON ap.user_id = au.id
                 WHERE n.type = 'payment'
                 ORDER BY n.created_at DESC
             ")->fetchAll();
@@ -2797,7 +3094,7 @@ if (isset($_POST['action']) && $_POST['action'] !== 'login' && $_POST['action'] 
             break;
 
         case 'fetch_patients':
-            $patients = $pdo->query("SELECT * FROM patients ORDER BY name_ar")->fetchAll();
+            $patients = enrichPatientsWithEmployers($pdo, $pdo->query("SELECT * FROM patients ORDER BY name_ar")->fetchAll());
             echo json_encode(['success' => true, 'patients' => $patients, 'stats' => getStats($pdo)]);
             break;
 
@@ -3409,8 +3706,14 @@ if (isset($_POST['action']) && $_POST['action'] !== 'login' && $_POST['action'] 
                        pa.patient_id AS linked_patient_id, pa.allowed_days AS patient_allowed_days,
                        pa.expiry_date, pa.notes AS account_notes,
                        p.name_ar AS linked_patient_name, p.identity_number AS patient_identity,
-                       COALESCE((SELECT SUM(amount) FROM account_payments WHERE user_id = u.id), 0) AS total_paid,
-                       COALESCE((SELECT COUNT(*) FROM account_payments WHERE user_id = u.id), 0) AS payment_count
+                       COALESCE((SELECT SUM(amount) FROM account_payments WHERE user_id = u.id AND is_paid = 1), 0) AS total_paid,
+                       COALESCE((SELECT COUNT(*) FROM account_payments WHERE user_id = u.id), 0) AS payment_count,
+                       COALESCE((SELECT COUNT(*) FROM sick_leaves sl WHERE sl.patient_id = pa.patient_id AND sl.deleted_at IS NULL AND sl.created_by_user_id = u.id), 0) AS portal_leave_count,
+                       COALESCE((SELECT SUM(sl.days_count) FROM sick_leaves sl WHERE sl.patient_id = pa.patient_id AND sl.deleted_at IS NULL AND sl.created_by_user_id = u.id), 0) AS portal_used_days,
+                       GREATEST(pa.allowed_days - COALESCE((SELECT SUM(sl.days_count) FROM sick_leaves sl WHERE sl.patient_id = pa.patient_id AND sl.deleted_at IS NULL AND sl.created_by_user_id = u.id), 0), 0) AS portal_remaining_days,
+                       COALESCE((SELECT SUM(CASE WHEN ap.is_paid = 1 THEN 1 ELSE 0 END) FROM account_payments ap WHERE ap.user_id = u.id), 0) AS account_paid_count,
+                       COALESCE((SELECT SUM(CASE WHEN ap.is_paid = 0 THEN 1 ELSE 0 END) FROM account_payments ap WHERE ap.user_id = u.id), 0) AS account_unpaid_count,
+                       COALESCE((SELECT SUM(CASE WHEN ap.is_paid = 0 THEN ap.amount ELSE 0 END) FROM account_payments ap WHERE ap.user_id = u.id), 0) AS total_unpaid
                 FROM admin_users u
                 INNER JOIN patient_accounts pa ON pa.user_id = u.id
                 LEFT JOIN patients p ON pa.patient_id = p.id
@@ -3423,49 +3726,132 @@ if (isset($_POST['action']) && $_POST['action'] !== 'login' && $_POST['action'] 
             if ($_SESSION['admin_role'] !== 'admin') { echo json_encode(['success'=>false,'message'=>'ليس لديك صلاحية.']); exit; }
             ensureColumn($pdo, 'patient_accounts', 'expiry_date', "DATE NULL AFTER allowed_days");
             ensureColumn($pdo, 'patient_accounts', 'notes', "TEXT NULL AFTER expiry_date");
+            ensureColumn($pdo, 'account_payments', 'days_count', "INT NOT NULL DEFAULT 0 AFTER amount");
+            ensureColumn($pdo, 'account_payments', 'is_paid', "TINYINT(1) NOT NULL DEFAULT 1 AFTER days_count");
+            ensureColumn($pdo, 'account_payments', 'paid_by', "INT NULL AFTER created_by");
+            ensureColumn($pdo, 'notifications', 'account_payment_id', "INT NULL AFTER leave_id");
+            try { $pdo->exec("ALTER TABLE notifications MODIFY COLUMN leave_id INT NULL"); } catch(Throwable $e) {}
+
             $uid = intval($_POST['user_id'] ?? 0);
             $days = intval($_POST['days'] ?? 0);
-            $amount = floatval($_POST['amount'] ?? 0);
+            $amount = max(0, floatval($_POST['amount'] ?? 0));
             $note = trim($_POST['note'] ?? '');
             $expiry = trim($_POST['expiry_date'] ?? '');
+            $isPaid = intval($_POST['is_paid'] ?? 1) === 1 ? 1 : 0;
             if ($uid <= 0 || $days <= 0) { echo json_encode(['success'=>false,'message'=>'بيانات غير صالحة.']); exit; }
-            // Check if patient_accounts row exists
-            $checkStmt = $pdo->prepare("SELECT id FROM patient_accounts WHERE user_id = ?");
-            $checkStmt->execute([$uid]);
-            if ($checkStmt->fetch()) {
-                // Update allowed_days
-                $updStmt = $pdo->prepare("UPDATE patient_accounts SET allowed_days = allowed_days + ?" . ($expiry ? ", expiry_date = ?" : "") . " WHERE user_id = ?");
-                if ($expiry) { $updStmt->execute([$days, $expiry, $uid]); }
-                else { $updStmt->execute([$days, $uid]); }
-            } else {
-                // Insert new row (patient_id = 0 means unlinked)
-                $pdo->prepare("INSERT INTO patient_accounts (user_id, patient_id, allowed_days, expiry_date) VALUES (?, 0, ?, ?)")->execute([$uid, $days, $expiry ?: null]);
+
+            $pdo->beginTransaction();
+            try {
+                $checkStmt = $pdo->prepare("SELECT id FROM patient_accounts WHERE user_id = ?");
+                $checkStmt->execute([$uid]);
+                if ($checkStmt->fetch()) {
+                    $updStmt = $pdo->prepare("UPDATE patient_accounts SET allowed_days = allowed_days + ?" . ($expiry ? ", expiry_date = ?" : "") . " WHERE user_id = ?");
+                    if ($expiry) { $updStmt->execute([$days, $expiry, $uid]); }
+                    else { $updStmt->execute([$days, $uid]); }
+                } else {
+                    $pdo->prepare("INSERT INTO patient_accounts (user_id, patient_id, allowed_days, expiry_date) VALUES (?, 0, ?, ?)")->execute([$uid, $days, $expiry ?: null]);
+                }
+
+                if ($amount > 0) {
+                    $payStmt = $pdo->prepare("INSERT INTO account_payments (user_id, amount, days_count, is_paid, note, created_by, paid_by) VALUES (?,?,?,?,?,?,?)");
+                    $payStmt->execute([$uid, $amount, $days, $isPaid, $note ?: "إضافة $days يوم", intval($_SESSION['admin_user_id']), $isPaid ? intval($_SESSION['admin_user_id']) : null]);
+                    $paymentId = intval($pdo->lastInsertId());
+                    if (!$isPaid) {
+                        $userNameStmt = $pdo->prepare("SELECT COALESCE(display_name, username, 'مريض') FROM admin_users WHERE id = ?");
+                        $userNameStmt->execute([$uid]);
+                        $accountName = $userNameStmt->fetchColumn() ?: 'مريض';
+                        $notifStmt = $pdo->prepare("INSERT INTO notifications (type, leave_id, account_payment_id, message, created_at) VALUES ('payment', NULL, ?, ?, ?)");
+                        $notifStmt->execute([$paymentId, "إضافة أيام غير مدفوعة لحساب {$accountName} ({$days} يوم) بمبلغ {$amount}", nowSaudi()]);
+                    }
+                }
+
+                $notifMsg = "🎉 تمت إضافة {$days} يوم إجازة مرضية إلى حسابك." . ($expiry ? " تاريخ الانتهاء: {$expiry}." : "") . ($note ? " ملاحظة: {$note}" : "");
+                $pdo->prepare("INSERT INTO user_notifications (user_id, message) VALUES (?, ?)")->execute([$uid, $notifMsg]);
+                $pdo->commit();
+            } catch(Throwable $e) {
+                if ($pdo->inTransaction()) $pdo->rollBack();
+                echo json_encode(['success'=>false,'message'=>'تعذّرت إضافة الأيام: ' . $e->getMessage()]);
+                exit;
             }
-            // Record payment if amount > 0
-            if ($amount > 0) {
-                $pdo->exec("CREATE TABLE IF NOT EXISTS account_payments (
-                    id INT AUTO_INCREMENT PRIMARY KEY,
-                    user_id INT NOT NULL,
-                    amount DECIMAL(10,2) NOT NULL DEFAULT 0,
-                    note VARCHAR(500) NULL,
-                    paid_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-                    created_by INT NULL,
-                    FOREIGN KEY (user_id) REFERENCES admin_users(id) ON DELETE CASCADE
-                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci");
-                $pdo->prepare("INSERT INTO account_payments (user_id, amount, note, created_by) VALUES (?,?,?,?)")->execute([$uid, $amount, $note ?: "إضافة $days يوم", intval($_SESSION['admin_user_id'])]);
+            echo json_encode(['success'=>true,'message'=> $isPaid ? "تمت إضافة $days يوم وتسجيلها كمدفوعة." : "تمت إضافة $days يوم ونقل المستحقات إلى إشعارات الدفع.", 'stats'=>getStats($pdo)]);
+            break;
+
+        case 'account_fetch_records':
+            if ($_SESSION['admin_role'] !== 'admin') { echo json_encode(['success'=>false,'message'=>'ليس لديك صلاحية.']); exit; }
+            $uid = intval($_POST['user_id'] ?? $_GET['user_id'] ?? 0);
+            if ($uid <= 0) { echo json_encode(['success'=>false,'message'=>'معرّف غير صالح.']); exit; }
+            $records = fetchPatientAccountRecords($pdo, $uid);
+            echo json_encode(['success'=>true,'leaves'=>$records['leaves'],'payments'=>$records['payments']]);
+            break;
+
+        case 'account_mark_payment_paid':
+            if ($_SESSION['admin_role'] !== 'admin') { echo json_encode(['success'=>false,'message'=>'ليس لديك صلاحية.']); exit; }
+            $pid = intval($_POST['payment_id'] ?? 0);
+            $amount = max(0, floatval($_POST['amount'] ?? 0));
+            if ($pid <= 0) { echo json_encode(['success'=>false,'message'=>'معرّف الدفع غير صالح.']); exit; }
+            $params = [intval($_SESSION['admin_user_id']), $pid];
+            $sql = "UPDATE account_payments SET is_paid = 1, paid_by = ?, paid_at = NOW()";
+            if ($amount > 0) { $sql .= ", amount = ?"; $params = [intval($_SESSION['admin_user_id']), $amount, $pid]; }
+            $sql .= " WHERE id = ?";
+            $pdo->prepare($sql)->execute($params);
+            $pdo->prepare("DELETE FROM notifications WHERE account_payment_id = ? AND type = 'payment'")->execute([$pid]);
+            echo json_encode(['success'=>true,'message'=>'تم تأكيد دفع سجل الأيام بنجاح.','stats'=>getStats($pdo)]);
+            break;
+
+        case 'account_create_leave':
+            if ($_SESSION['admin_role'] !== 'admin') { echo json_encode(['success'=>false,'message'=>'ليس لديك صلاحية.']); exit; }
+            $uid = intval($_POST['user_id'] ?? 0);
+            $hospitalId = intval($_POST['hospital_id'] ?? 0);
+            $doctorId = intval($_POST['doctor_id'] ?? 0);
+            $startDate = trim($_POST['start_date'] ?? '');
+            $endDate = trim($_POST['end_date'] ?? '');
+            $daysCount = intval($_POST['days_count'] ?? 0);
+            $issueTime = normalizeIssueTimeForStorage(trim($_POST['issue_time'] ?? ''), in_array(strtoupper(trim($_POST['issue_period'] ?? '')), ['AM','PM']) ? strtoupper(trim($_POST['issue_period'])) : null);
+            $issuePeriod = in_array(strtoupper(trim($_POST['issue_period'] ?? '')), ['AM','PM']) ? strtoupper(trim($_POST['issue_period'])) : null;
+            $employerChoice = trim($_POST['employer_choice'] ?? 'default');
+            if ($uid <= 0 || $hospitalId <= 0 || $doctorId <= 0 || !$startDate || !$endDate || $daysCount <= 0) {
+                echo json_encode(['success'=>false,'message'=>'يرجى تعبئة بيانات الإجازة كاملة.']); exit;
             }
-            // إرسال إشعار للمستخدم بإضافة الأيام
-            $pdo->exec("CREATE TABLE IF NOT EXISTS user_notifications (
-                id INT AUTO_INCREMENT PRIMARY KEY,
-                user_id INT NOT NULL,
-                message TEXT NOT NULL,
-                is_read TINYINT(1) DEFAULT 0,
-                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-                FOREIGN KEY (user_id) REFERENCES admin_users(id) ON DELETE CASCADE
-            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci");
-            $notifMsg = "🎉 تمت إضافة {$days} يوم إجازة مرضية إلى حسابك." . ($expiry ? " تاريخ الانتهاء: {$expiry}." : "") . ($note ? " ملاحظة: {$note}" : "");
-            $pdo->prepare("INSERT INTO user_notifications (user_id, message) VALUES (?, ?)")->execute([$uid, $notifMsg]);
-            echo json_encode(['success'=>true,'message'=>"تمت إضافة $days يوم بنجاح."]);
+            $acctStmt = $pdo->prepare("SELECT pa.*, p.name_en, p.employer_ar, p.employer_en FROM patient_accounts pa LEFT JOIN patients p ON p.id = pa.patient_id WHERE pa.user_id = ? LIMIT 1");
+            $acctStmt->execute([$uid]);
+            $acct = $acctStmt->fetch();
+            if (!$acct || intval($acct['patient_id']) <= 0) { echo json_encode(['success'=>false,'message'=>'الحساب غير مرتبط بمريض.']); exit; }
+            $patientId = intval($acct['patient_id']);
+            $usedDays = getUsedPatientAccountDays($pdo, $patientId, $uid);
+            $remainingDays = intval($acct['allowed_days'] ?? 0) - $usedDays;
+            if ($remainingDays <= 0 || $daysCount > $remainingDays) {
+                echo json_encode(['success'=>false,'message'=>"لا يمكن إنشاء الإجازة؛ الأيام المطلوبة ({$daysCount}) تتجاوز المتبقي ({$remainingDays})."]); exit;
+            }
+            $hStmt = $pdo->prepare("SELECT * FROM hospitals WHERE id = ? AND deleted_at IS NULL LIMIT 1");
+            $hStmt->execute([$hospitalId]);
+            $hosp = $hStmt->fetch();
+            $dStmt = $pdo->prepare("SELECT * FROM doctors WHERE id = ? AND hospital_id = ? LIMIT 1");
+            $dStmt->execute([$doctorId, $hospitalId]);
+            $doc = $dStmt->fetch();
+            if (!$hosp || !$doc) { echo json_encode(['success'=>false,'message'=>'المستشفى أو الطبيب غير صالح، تأكد أن الطبيب تابع للمستشفى.']); exit; }
+            $issueDate = $startDate;
+            [$employerAr, $employerEn] = resolveEmployerChoice($pdo, $patientId, $employerChoice);
+            $serviceCode = generateServiceCode($pdo, $hosp['service_prefix'] ?? 'GSL', $issueDate);
+            $stmt = $pdo->prepare("INSERT INTO sick_leaves
+                (service_code, patient_id, doctor_id, hospital_id, created_by_user_id, issue_date, issue_time, issue_period, start_date, end_date, days_count,
+                 patient_name_en, doctor_name_en, doctor_title_en, hospital_name_ar, hospital_name_en, logo_path, employer_ar, employer_en, is_paid, payment_amount)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)");
+            $stmt->execute([
+                $serviceCode, $patientId, $doctorId, $hospitalId, $uid, $issueDate, $issueTime ?: null, $issuePeriod,
+                $startDate, $endDate, $daysCount,
+                $acct['name_en'] ?? '', $doc['name_en'] ?? '', $doc['title_en'] ?? '',
+                $hosp['name_ar'] ?? '', $hosp['name_en'] ?? '', $hosp['logo_url'] ?? $hosp['logo_path'] ?? '',
+                $employerAr, $employerEn, 1, 0
+            ]);
+            $records = fetchPatientAccountRecords($pdo, $uid);
+            $data = fetchActiveOperationalData($pdo);
+            $data['doctors'] = $pdo->query("SELECT d.*, h.name_ar AS hospital_name_ar FROM doctors d LEFT JOIN hospitals h ON d.hospital_id = h.id ORDER BY d.name_ar")->fetchAll();
+            $data['patients'] = enrichPatientsWithEmployers($pdo, $pdo->query("SELECT * FROM patients ORDER BY name_ar")->fetchAll());
+            $data['stats'] = getStats($pdo);
+            $data['account_records'] = $records;
+            $data['success'] = true;
+            $data['message'] = "تم إنشاء الإجازة للمريض بنجاح. رمز الخدمة: {$serviceCode}";
+            echo json_encode($data);
             break;
 
         case 'account_toggle_status':
@@ -3520,16 +3906,16 @@ if (isset($_POST['action']) && $_POST['action'] !== 'login' && $_POST['action'] 
             // التعديل هنا: قراءة الـ user_id من POST
             $uid = intval($_POST['user_id'] ?? $_GET['user_id'] ?? 0);
             
-            $stmt = $pdo->prepare("SELECT ap.*, au.display_name AS created_by_name FROM account_payments ap LEFT JOIN admin_users au ON ap.created_by = au.id WHERE ap.user_id = ? ORDER BY ap.paid_at DESC");
-            $stmt->execute([$uid]);
-            echo json_encode(['success'=>true,'payments'=>$stmt->fetchAll()]);
+            $records = fetchPatientAccountRecords($pdo, $uid);
+            echo json_encode(['success'=>true,'payments'=>$records['payments'],'leaves'=>$records['leaves']]);
             break;
 
         case 'account_delete_payment':
             if ($_SESSION['admin_role'] !== 'admin') { echo json_encode(['success'=>false,'message'=>'ليس لديك صلاحية.']); exit; }
             $pid = intval($_POST['payment_id'] ?? 0);
+            $pdo->prepare("DELETE FROM notifications WHERE account_payment_id = ?")->execute([$pid]);
             $pdo->prepare("DELETE FROM account_payments WHERE id = ?")->execute([$pid]);
-            echo json_encode(['success'=>true,'message'=>'تم حذف سجل الدفع.']);
+            echo json_encode(['success'=>true,'message'=>'تم حذف سجل الدفع.','stats'=>getStats($pdo)]);
             break;
 
         case 'account_link_patient':
@@ -3558,6 +3944,15 @@ if (isset($_POST['action']) && $_POST['action'] !== 'login' && $_POST['action'] 
             $role = in_array($_POST['role'] ?? '', ['admin','user']) ? $_POST['role'] : 'user';
             $link_patient_id = intval($_POST['link_patient_id'] ?? 0);
             $link_allowed_days = max(0, intval($_POST['link_allowed_days'] ?? 0));
+            if ($link_patient_id > 0) {
+                $patientStmt = $pdo->prepare("SELECT name, name_ar, name_en FROM patients WHERE id = ? LIMIT 1");
+                $patientStmt->execute([$link_patient_id]);
+                $patientForUsername = $patientStmt->fetch();
+                if ($patientForUsername) {
+                    $patientFirstName = makePatientFirstNameUsername($patientForUsername);
+                    $username = makeUniqueUsername($pdo, $patientFirstName . getNextPatientAccountNumber($pdo));
+                }
+            }
             if (empty($username) || empty($password) || empty($display_name)) { echo json_encode(['success'=>false,'message'=>'يرجى تعبئة جميع الحقول.']); exit; }
             $check = $pdo->prepare("SELECT id FROM admin_users WHERE username = ?"); $check->execute([$username]);
             if ($check->fetch()) { echo json_encode(['success'=>false,'message'=>'اسم المستخدم موجود مسبقاً.']); exit; }
@@ -3577,7 +3972,7 @@ if (isset($_POST['action']) && $_POST['action'] !== 'login' && $_POST['action'] 
                 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci");
                 $pdo->prepare("INSERT INTO patient_accounts (user_id, patient_id, allowed_days) VALUES (?,?,?) ON DUPLICATE KEY UPDATE patient_id=VALUES(patient_id), allowed_days=VALUES(allowed_days)")->execute([$newUserId, $link_patient_id, $link_allowed_days]);
             }
-            echo json_encode(['success'=>true,'message'=>'تمت إضافة الحساب بنجاح.']);
+            echo json_encode(['success'=>true,'message'=>'تمت إضافة الحساب بنجاح.','username'=>$username]);
             break;
 
         case 'account_edit_user':
@@ -3629,8 +4024,8 @@ $loggedIn = is_logged_in();
 
 if ($loggedIn) {
     $doctors = $pdo->query("SELECT d.*, h.name_ar AS hospital_name_ar FROM doctors d LEFT JOIN hospitals h ON d.hospital_id = h.id ORDER BY d.name_ar")->fetchAll();
-    $patients = $pdo->query("SELECT * FROM patients ORDER BY name_ar")->fetchAll();
-    $hospitals = $pdo->query("SELECT id, name_ar, name_en, license_number, logo_path, logo_url, service_prefix, logo_scale, logo_offset_x, logo_offset_y, created_at, updated_at, CASE WHEN logo_data IS NOT NULL AND logo_data != '' THEN 'has_logo' ELSE '' END AS has_logo_data FROM hospitals ORDER BY name_ar")->fetchAll();
+    $patients = enrichPatientsWithEmployers($pdo, $pdo->query("SELECT * FROM patients ORDER BY name_ar")->fetchAll());
+    $hospitals = getHospitalsList($pdo);
     
     $data = fetchAllData($pdo);
     $leaves = $data['leaves'];
@@ -5947,6 +6342,14 @@ if (!in_array($uiDataViewMode, ['table','compact','cards','zebra','glass','minim
                         </div>
 
                         <!-- جهة العمل -->
+                        <div class="col-md-12">
+                            <label class="form-label">اختيار جهة العمل</label>
+                            <select class="form-select" name="employer_choice" id="employer_choice">
+                                <option value="default">الافتراضي: الى من يهمه الامر</option>
+                                <option value="none">بدون جهة عمل</option>
+                                <option value="manual">إدخال يدوي</option>
+                            </select>
+                        </div>
                         <div class="col-md-6">
                             <label class="form-label">جهة العمل (عربي)</label>
                             <input type="text" class="form-control" name="employer_ar" id="employer_ar" placeholder="الى من يهمه الامر">
@@ -6009,6 +6412,22 @@ if (!in_array($uiDataViewMode, ['table','compact','cards','zebra','glass','minim
                                 <input class="form-check-input" type="checkbox" name="is_paid" id="is_paid">
                                 <label class="form-check-label" for="is_paid">مدفوعة</label>
                             </div>
+                        </div>
+                        <div class="col-md-12">
+                            <label class="form-label">اختيار جهة العمل</label>
+                            <select class="form-select" name="employer_choice_edit" id="employer_choice_edit">
+                                <option value="current">الحالية في الإجازة</option>
+                                <option value="default">الافتراضي: الى من يهمه الامر</option>
+                                <option value="none">بدون جهة عمل</option>
+                            </select>
+                        </div>
+                        <div class="col-md-6">
+                            <label class="form-label">جهة العمل (عربي)</label>
+                            <input type="text" class="form-control" name="employer_ar_edit" id="employer_ar_edit">
+                        </div>
+                        <div class="col-md-6">
+                            <label class="form-label">Employer (English)</label>
+                            <input type="text" class="form-control" name="employer_en_edit" id="employer_en_edit">
                         </div>
                         <div class="col-md-6">
                             <label class="form-label">المبلغ</label>
@@ -6858,6 +7277,7 @@ if (!in_array($uiDataViewMode, ['table','compact','cards','zebra','glass','minim
                     <div class="mb-3"><label class="form-label">الهاتف</label><input type="text" class="form-control" name="phone" id="quick_patient_phone"></div>
                     <div class="mb-3"><label class="form-label">جهة العمل (عربي)</label><input type="text" class="form-control" name="patient_employer_ar" id="quick_patient_employer_ar"></div>
                     <div class="mb-3"><label class="form-label">Employer (EN)</label><input type="text" class="form-control" name="patient_employer_en" id="quick_patient_employer_en"></div>
+                    <div class="mb-3"><label class="form-label">جهات عمل إضافية</label><textarea class="form-control" name="patient_employers_extra" id="quick_patient_employers_extra" rows="3" placeholder="كل سطر: عربي | English"></textarea><div class="form-text">يمكن إدخال عربي فقط أو English فقط أو عربي | English.</div></div>
                     <div class="mb-3"><label class="form-label">الجنسية (عربي)</label><input type="text" class="form-control" name="patient_nationality_ar" id="quick_patient_nationality_ar"></div>
                     <div class="mb-3"><label class="form-label">Nationality (EN)</label><input type="text" class="form-control" name="patient_nationality_en" id="quick_patient_nationality_en"></div>
                     <div class="mb-3"><label class="form-label">رابط المجلد</label><input type="url" class="form-control" name="folder_link" id="quick_patient_folder_link" placeholder="https://..."></div>
@@ -6931,6 +7351,7 @@ if (!in_array($uiDataViewMode, ['table','compact','cards','zebra','glass','minim
                     <div class="mb-3"><label class="form-label">الهاتف</label><input type="text" class="form-control" name="phone" id="edit_patient_phone"></div>
                     <div class="mb-3"><label class="form-label">جهة العمل (عربي)</label><input type="text" class="form-control" name="patient_employer_ar" id="edit_patient_employer_ar"></div>
                     <div class="mb-3"><label class="form-label">Employer (EN)</label><input type="text" class="form-control" name="patient_employer_en" id="edit_patient_employer_en"></div>
+                    <div class="mb-3"><label class="form-label">جهات عمل إضافية</label><textarea class="form-control" name="patient_employers_extra" id="edit_patient_employers_extra" rows="3" placeholder="كل سطر: عربي | English"></textarea><div class="form-text">الجهة الأساسية بالأعلى + هذه الخيارات ستظهر عند إنشاء/تعديل الإجازة.</div></div>
                     <div class="mb-3"><label class="form-label">الجنسية (عربي)</label><input type="text" class="form-control" name="patient_nationality_ar" id="edit_patient_nationality_ar"></div>
                     <div class="mb-3"><label class="form-label">Nationality (EN)</label><input type="text" class="form-control" name="patient_nationality_en" id="edit_patient_nationality_en"></div>
                     <div class="mb-3"><label class="form-label">رابط المجلد</label><input type="url" class="form-control" name="folder_link" id="edit_patient_folder_link"></div>
@@ -6983,7 +7404,7 @@ if (!in_array($uiDataViewMode, ['table','compact','cards','zebra','glass','minim
             </div>
             <div class="modal-footer">
                 <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">إلغاء</button>
-                <button type="button" class="btn btn-success-custom" id="saveEditHospital">حفظ</button>
+                <button type="button" class="btn btn-success-custom" id="saveEditHospital" onclick="window.saveEditHospitalDirect && window.saveEditHospitalDirect()">حفظ</button>
             </div>
         </div>
     </div>
@@ -7232,8 +7653,15 @@ if (!in_array($uiDataViewMode, ['table','compact','cards','zebra','glass','minim
                         <input type="number" class="form-control" id="acctAddDaysCount" min="1" max="3650" placeholder="مثال: 30">
                     </div>
                     <div class="col-6">
-                        <label class="form-label fw-bold">المبلغ المدفوع (ريال)</label>
+                        <label class="form-label fw-bold">مبلغ العملية (ريال)</label>
                         <input type="number" class="form-control" id="acctAddDaysAmount" min="0" step="0.01" placeholder="0.00">
+                    </div>
+                    <div class="col-12">
+                        <label class="form-label fw-bold">حالة الدفع</label>
+                        <select class="form-select" id="acctAddDaysPaidStatus">
+                            <option value="1">مدفوع الآن</option>
+                            <option value="0">غير مدفوع — إرساله إلى إشعارات لوحة التحكم</option>
+                        </select>
                     </div>
                     <div class="col-12">
                         <label class="form-label fw-bold">تاريخ انتهاء الصلاحية</label>
@@ -7249,6 +7677,76 @@ if (!in_array($uiDataViewMode, ['table','compact','cards','zebra','glass','minim
             <div class="modal-footer">
                 <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">إلغاء</button>
                 <button type="button" class="btn btn-gradient" id="acctAddDaysSave"><i class="bi bi-plus-circle"></i> إضافة الأيام</button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- ======================== مودال إنشاء إجازة لحساب المريض ======================== -->
+<div class="modal fade" id="acctCreateLeaveModal" tabindex="-1" aria-hidden="true">
+    <div class="modal-dialog modal-dialog-centered modal-lg">
+        <div class="modal-content">
+            <div class="modal-header" style="background:linear-gradient(135deg,#0ea5e9,#2563eb);color:#fff;">
+                <h5 class="modal-title"><i class="bi bi-file-earmark-medical-fill"></i> إنشاء إجازة للمريض</h5>
+                <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body">
+                <input type="hidden" id="acctLeaveUserId">
+                <div class="alert alert-info py-2" id="acctLeaveInfo" style="font-size:13px"></div>
+                <div class="row g-3">
+                    <div class="col-md-6">
+                        <label class="form-label fw-bold">المستشفى</label>
+                        <select class="form-select" id="acct_leave_hospital_id" required>
+                            <option value="">-- اختر مستشفى --</option>
+                            <?php if (isset($hospitals)) foreach ($hospitals as $h): ?>
+                            <option value="<?php echo $h['id']; ?>" data-prefix="<?php echo htmlspecialchars($h['service_prefix'] ?? 'GSL'); ?>"><?php echo htmlspecialchars($h['name_ar']); ?></option>
+                            <?php endforeach; ?>
+                        </select>
+                    </div>
+                    <div class="col-md-6">
+                        <label class="form-label fw-bold">الطبيب</label>
+                        <select class="form-select" id="acct_leave_doctor_id" required disabled>
+                            <option value="">-- اختر المستشفى أولاً --</option>
+                        </select>
+                    </div>
+                    <div class="col-md-12">
+                        <label class="form-label fw-bold">جهة العمل</label>
+                        <select class="form-select" id="acct_leave_employer_choice">
+                            <option value="default">الافتراضي: الى من يهمه الامر</option>
+                            <option value="none">بدون جهة عمل</option>
+                        </select>
+                    </div>
+                    <div class="col-md-4">
+                        <label class="form-label fw-bold">بداية الإجازة</label>
+                        <input type="date" class="form-control" id="acct_leave_start_date" required>
+                    </div>
+                    <div class="col-md-4">
+                        <label class="form-label fw-bold">نهاية الإجازة</label>
+                        <input type="date" class="form-control" id="acct_leave_end_date" required>
+                    </div>
+                    <div class="col-md-4">
+                        <label class="form-label fw-bold">عدد الأيام</label>
+                        <input type="number" class="form-control" id="acct_leave_days_count" min="1" readonly>
+                    </div>
+                    <div class="col-md-6">
+                        <label class="form-label fw-bold">وقت الإصدار (اختياري)</label>
+                        <input type="time" class="form-control" id="acct_leave_issue_time">
+                    </div>
+                    <div class="col-md-6">
+                        <label class="form-label fw-bold">الفترة</label>
+                        <select class="form-select" id="acct_leave_issue_period">
+                            <option value="AM">صباحاً (AM)</option>
+                            <option value="PM">مساءً (PM)</option>
+                        </select>
+                    </div>
+                </div>
+                <div class="alert alert-success mt-3 mb-0 py-2" style="font-size:13px">
+                    <i class="bi bi-check2-circle"></i> سيتم إنشاء الإجازة كأنها من بوابة المريض، وستظهر له في حسابه، وتكون مدفوعة دائماً.
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">إلغاء</button>
+                <button type="button" class="btn btn-gradient" id="acctCreateLeaveSave"><i class="bi bi-send-check"></i> إنشاء الإجازة</button>
             </div>
         </div>
     </div>
@@ -7319,23 +7817,37 @@ if (!in_array($uiDataViewMode, ['table','compact','cards','zebra','glass','minim
     </div>
 </div>
 
-<!-- ======================== مودال سجل المدفوعات ======================== -->
+<!-- ======================== مودال سجلات حساب المريض ======================== -->
 <div class="modal fade" id="acctPaymentsModal" tabindex="-1" aria-hidden="true">
-    <div class="modal-dialog modal-lg modal-dialog-centered modal-dialog-scrollable">
+    <div class="modal-dialog modal-dialog-centered modal-xl">
         <div class="modal-content">
             <div class="modal-header" style="background:linear-gradient(135deg,#10b981,#34d399);color:#fff;">
-                <h5 class="modal-title"><i class="bi bi-receipt-cutoff"></i> سجل المدفوعات</h5>
+                <h5 class="modal-title"><i class="bi bi-journal-text"></i> سجلات حساب المريض</h5>
                 <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
             </div>
             <div class="modal-body">
-                <div class="d-flex justify-content-between align-items-center mb-3">
+                <div class="d-flex justify-content-between align-items-center mb-3 flex-wrap gap-2">
                     <div>
                         <strong id="acctPaymentsUserName"></strong>
-                        <div class="text-muted small" id="acctPaymentsTotalWrap">الإجمالي: <strong id="acctPaymentsTotal">0</strong> ريال</div>
+                        <div class="text-muted small" id="acctPaymentsTotalWrap">إجمالي المدفوع: <strong id="acctPaymentsTotal">0</strong> ريال</div>
                     </div>
+                    <select class="form-select form-select-sm" id="acctPaymentStatusFilter" style="max-width:180px">
+                        <option value="all">كل المدفوعات</option>
+                        <option value="paid">المدفوعة فقط</option>
+                        <option value="unpaid">غير المدفوعة فقط</option>
+                    </select>
                 </div>
-                <div id="acctPaymentsList">
-                    <div class="text-center py-4 text-muted"><div class="spinner-border spinner-border-sm"></div> جارٍ التحميل...</div>
+                <ul class="nav nav-pills mb-3" id="acctRecordsTabs" role="tablist">
+                    <li class="nav-item" role="presentation"><button class="nav-link active" data-bs-toggle="pill" data-bs-target="#acctLeavesPane" type="button">الإجازات</button></li>
+                    <li class="nav-item" role="presentation"><button class="nav-link" data-bs-toggle="pill" data-bs-target="#acctPaymentsPane" type="button">المدفوعات</button></li>
+                </ul>
+                <div class="tab-content">
+                    <div class="tab-pane fade show active" id="acctLeavesPane">
+                        <div id="acctLeavesList"><div class="text-center py-4 text-muted"><div class="spinner-border spinner-border-sm"></div> جارٍ التحميل...</div></div>
+                    </div>
+                    <div class="tab-pane fade" id="acctPaymentsPane">
+                        <div id="acctPaymentsList"><div class="text-center py-4 text-muted"><div class="spinner-border spinner-border-sm"></div> جارٍ التحميل...</div></div>
+                    </div>
                 </div>
             </div>
             <div class="modal-footer">
@@ -7454,6 +7966,33 @@ const INITIAL_UI_PREFERENCES = {
 const IS_LOGGED_IN = <?php echo $loggedIn ? 'true' : 'false'; ?>;
 const REQUEST_URL = window.location.pathname;
 
+function isIgnorableIterableMessage(value) {
+    const message = String(value || '');
+    return message.includes('undefined is not iterable') || message.includes('Symbol(Symbol.iterator)');
+}
+const nativeAlert = window.alert?.bind(window);
+window.alert = function(message) {
+    if (isIgnorableIterableMessage(message)) {
+        console.warn('Suppressed non-critical iterable alert:', message);
+        return;
+    }
+    return nativeAlert ? nativeAlert(message) : undefined;
+};
+window.addEventListener('error', (event) => {
+    const message = String(event?.message || event?.error?.message || '');
+    if (isIgnorableIterableMessage(message)) {
+        console.warn('Suppressed non-critical iterable error:', message);
+        event.preventDefault();
+    }
+});
+window.addEventListener('unhandledrejection', (event) => {
+    const message = String(event?.reason?.message || event?.reason || '');
+    if (isIgnorableIterableMessage(message)) {
+        console.warn('Suppressed non-critical iterable rejection:', message);
+        event.preventDefault();
+    }
+});
+
 <?php if ($loggedIn): ?>
 const initialLeaves = <?php echo json_encode($leaves); ?>;
 const initialArchived = <?php echo json_encode($archived); ?>;
@@ -7501,6 +8040,11 @@ function formatSaudiDateTime(dateValue) {
 }
 
 function showToast(msg, type = 'success') {
+    const msgText = String(msg ?? '');
+    if (typeof isIgnorableIterableMessage === 'function' && isIgnorableIterableMessage(msgText)) {
+        console.warn('Suppressed non-critical iterable notification:', msgText);
+        return;
+    }
     const container = document.getElementById('alert-container');
     const icons = { success: 'bi-check-circle-fill', danger: 'bi-x-circle-fill', warning: 'bi-exclamation-triangle-fill', info: 'bi-info-circle-fill' };
     const alert = document.createElement('div');
@@ -7902,7 +8446,7 @@ function generateLeaveRow(lv) {
                     <button class="btn btn-sm btn-outline-primary action-btn btn-add-query" data-leave-id="${lv.id}" title="تسجيل استعلام"><i class="bi bi-plus-circle btn-add-query" data-leave-id="${lv.id}"></i></button>
                     <button class="btn btn-sm btn-danger-custom action-btn btn-delete-leave" data-id="${lv.id}" title="أرشفة"><i class="bi bi-archive btn-delete-leave" data-id="${lv.id}"></i></button>
                     <button class="btn btn-sm btn-outline-danger action-btn btn-force-delete-active" data-id="${lv.id}" title="حذف نهائي"><i class="bi bi-trash3 btn-force-delete-active" data-id="${lv.id}"></i></button>
-                    <button class="btn btn-sm btn-success action-btn btn-print-leave" data-id="${lv.id}" title="طباعة PDF"><i class="bi bi-printer btn-print-leave" data-id="${lv.id}"></i></button>
+                    <a class="btn btn-sm btn-success action-btn btn-print-leave" href="${REQUEST_URL}?action=generate_pdf&leave_id=${encodeURIComponent(lv.id)}&pdf_mode=preview&csrf_token=${encodeURIComponent(CSRF_TOKEN)}" target="_blank" rel="noopener" data-id="${lv.id}" title="طباعة PDF"><i class="bi bi-printer"></i></a>
                 </div>
             </td>
         </tr>`;
@@ -8048,7 +8592,7 @@ function updatePaymentNotifications(notifications) {
     }
 
     list.innerHTML = notifications.map(n => `
-        <li class="list-group-item d-flex justify-content-between align-items-center flex-wrap gap-2" data-id="${n.id}" data-leave="${n.leave_id}" data-amount="${n.payment_amount || 0}">
+        <li class="list-group-item d-flex justify-content-between align-items-center flex-wrap gap-2" data-id="${n.id}" data-leave="${n.leave_id || ''}" data-account-payment="${n.account_payment_id || ''}" data-amount="${n.payment_amount || 0}">
             <div>
                 <i class="bi bi-bell-fill text-warning"></i>
                 <span class="badge bg-light text-dark ms-1">${htmlspecialchars(n.service_code || '-')}</span>
@@ -8057,7 +8601,7 @@ function updatePaymentNotifications(notifications) {
                 <br><small class="text-muted">${formatSaudiDateTime(n.created_at)}</small>
             </div>
             <div class="d-flex gap-1">
-                <button class="btn btn-sm btn-gradient btn-view-leave" title="عرض"><i class="bi bi-eye"></i></button>
+                ${n.leave_id ? '<button class="btn btn-sm btn-gradient btn-view-leave" title="عرض"><i class="bi bi-eye"></i></button>' : '<span class="badge bg-info text-dark align-self-center"><i class="bi bi-person-vcard"></i> حساب مريض</span>'}
                 <button class="btn btn-sm btn-success-custom btn-pay-notif" title="تأكيد الدفع"><i class="bi bi-cash-coin"></i></button>
                 <button class="btn btn-sm btn-danger-custom btn-del-notif" title="حذف"><i class="bi bi-trash3"></i></button>
             </div>
@@ -8170,7 +8714,12 @@ function renderAdminStats(data) {
         );
     }
 
-    cards.innerHTML = cardItems.map(([label,val,color]) => `
+    cards.innerHTML = cardItems.map((item) => {
+        item = Array.isArray(item) ? item : ['', '', 'secondary'];
+        const label = item[0] ?? '';
+        const val = item[1] ?? '';
+        const color = item[2] ?? 'secondary';
+        return `
         <div class="col-md-4 col-lg-3">
             <div class="card border-${color} h-100 shadow-sm stats-pro-card">
                 <div class="card-body py-2">
@@ -8178,7 +8727,8 @@ function renderAdminStats(data) {
                     <div class="h5 mb-0">${val}</div>
                 </div>
             </div>
-        </div>`).join('');
+        </div>`;
+    }).join('');
 
     dailyTbody.innerHTML = (data.daily || []).map(r => `
         <tr><td>${htmlspecialchars(r.day_date || '')}</td><td>${r.total_count || 0}</td><td>${r.paid_count || 0}</td><td>${r.unpaid_count || 0}</td></tr>
@@ -8276,27 +8826,104 @@ function refreshSensitiveValuesMask() {
     });
 }
 
-function updateDoctorSelects(doctors) {
-    const selects = ['doctor_select', 'doctor_id_edit', 'dup_doctor_select'];
-    selects.forEach(selId => {
-        const sel = document.getElementById(selId);
-        if (!sel) return;
-        const currentVal = sel.value;
-        // حفظ الخيارات الثابتة
-        const firstOpt = sel.querySelector('option[value=""]');
-        const manualOpt = sel.querySelector('option[value="manual"]');
-        sel.innerHTML = '';
-        if (firstOpt) sel.appendChild(firstOpt);
-        doctors.forEach(d => {
-            const opt = document.createElement('option');
-            opt.value = d.id;
-            opt.textContent = `${d.name_ar || d.name || ''} (${d.title_ar || d.title || ''}) - ${d.note || ''}`;
-            sel.appendChild(opt);
-        });
-        if (manualOpt) sel.appendChild(manualOpt);
-        sel.value = currentVal;
-        refreshSelectQuickSearchData(selId);
+function doctorBelongsToHospital(doctor, hospitalId) {
+    if (!hospitalId) return false;
+    return String(doctor?.hospital_id || '') === String(hospitalId);
+}
+
+function renderDoctorOptionText(doctor) {
+    const name = doctor?.name_ar || doctor?.name || '';
+    const title = doctor?.title_ar || doctor?.title || '';
+    const note = doctor?.note ? ` - ${doctor.note}` : '';
+    return `${name} (${title})${note}`;
+}
+
+function populateDoctorSelectForHospital(selectId, hospitalId, selectedValue = null) {
+    const sel = document.getElementById(selectId);
+    if (!sel) return;
+    const currentVal = selectedValue !== null ? String(selectedValue || '') : String(sel.value || '');
+    sel.innerHTML = hospitalId ? '<option value="">-- اختر طبيباً --</option>' : '<option value="">-- اختر المستشفى أولاً --</option>';
+    if (selectId === 'acct_leave_doctor_id') sel.disabled = !hospitalId;
+    let matchedDoctors = 0;
+    (initialDoctors || []).forEach((doctor) => {
+        if (!doctorBelongsToHospital(doctor, hospitalId)) return;
+        matchedDoctors++;
+        const opt = document.createElement('option');
+        opt.value = doctor.id;
+        opt.textContent = renderDoctorOptionText(doctor);
+        if (String(currentVal) === String(doctor.id)) opt.selected = true;
+        sel.appendChild(opt);
     });
+    if (hospitalId && matchedDoctors === 0) {
+        const emptyOpt = document.createElement('option');
+        emptyOpt.value = '';
+        emptyOpt.textContent = 'لا يوجد أطباء مرتبطون بهذا المستشفى';
+        emptyOpt.disabled = true;
+        sel.appendChild(emptyOpt);
+    }
+    if (selectId !== 'acct_leave_doctor_id') {
+        const manualOpt = document.createElement('option');
+        manualOpt.value = 'manual';
+        manualOpt.textContent = '+ إدخال يدوي';
+        if (currentVal === 'manual') manualOpt.selected = true;
+        sel.appendChild(manualOpt);
+    }
+    if (currentVal && currentVal !== 'manual' && !Array.from(sel.options).some(opt => String(opt.value) === currentVal)) {
+        sel.value = '';
+    }
+    refreshSelectQuickSearchData(selectId);
+}
+
+function updateDoctorSelects(doctors) {
+    if (Array.isArray(doctors)) {
+        // Keep the global source in sync for all filtered doctor lists.
+        initialDoctors.splice(0, initialDoctors.length, ...doctors);
+    }
+    populateDoctorSelectForHospital('doctor_select', document.getElementById('hospital_id')?.value || '', document.getElementById('doctor_select')?.value || '');
+    populateDoctorSelectForHospital('doctor_id_edit', document.getElementById('hospital_id_edit')?.value || '', document.getElementById('doctor_id_edit')?.value || '');
+    populateDoctorSelectForHospital('dup_doctor_select', document.getElementById('dup_hospital_id')?.value || document.getElementById('dup_hospital_select')?.value || '', document.getElementById('dup_doctor_select')?.value || '');
+    populateDoctorSelectForHospital('acct_leave_doctor_id', document.getElementById('acct_leave_hospital_id')?.value || '', document.getElementById('acct_leave_doctor_id')?.value || '');
+}
+
+async function fetchAndPopulateDoctorsForHospital(selectId, hospitalId, selectedValue = '') {
+    populateDoctorSelectForHospital(selectId, hospitalId, selectedValue);
+    const sel = document.getElementById(selectId);
+    const hasMatches = sel && Array.from(sel.options).some(opt => opt.value && opt.value !== 'manual');
+    if (!hospitalId || hasMatches) return;
+    const result = await sendAjaxRequest('get_doctors_by_hospital', { hospital_id: hospitalId });
+    if (result.success && Array.isArray(result.doctors) && result.doctors.length) {
+        const known = new Map((initialDoctors || []).map(d => [String(d.id), d]));
+        result.doctors.forEach(d => known.set(String(d.id), d));
+        initialDoctors.splice(0, initialDoctors.length, ...Array.from(known.values()));
+        populateDoctorSelectForHospital(selectId, hospitalId, selectedValue);
+    }
+}
+
+function employerOptionsHtml(patient, current = 'default') {
+    const opts = Array.isArray(patient?.employer_options) && patient.employer_options.length ? patient.employer_options : [
+        { value: 'default', label: 'الافتراضي: الى من يهمه الامر', ar: 'الى من يهمه الامر', en: 'TO WHOM IT MAY CONCERN' },
+        { value: 'none', label: 'بدون جهة عمل', ar: '', en: '' }
+    ];
+    return opts.map(o => `<option value="${htmlspecialchars(o.value || '')}" data-ar="${htmlspecialchars(o.ar || '')}" data-en="${htmlspecialchars(o.en || '')}" ${String(current) === String(o.value) ? 'selected' : ''}>${htmlspecialchars(o.label || o.ar || o.en || o.value || '')}</option>`).join('');
+}
+
+function populateEmployerChoice(selectId, patient, current = 'default') {
+    const sel = document.getElementById(selectId);
+    if (!sel) return;
+    sel.innerHTML = employerOptionsHtml(patient, current);
+    if (selectId === 'employer_choice') {
+        sel.insertAdjacentHTML('beforeend', '<option value="manual">إدخال يدوي</option>');
+    }
+}
+
+function applyEmployerChoice(selectId, arId, enId) {
+    const sel = document.getElementById(selectId);
+    if (!sel) return;
+    const opt = sel.options[sel.selectedIndex];
+    const ar = document.getElementById(arId);
+    const en = document.getElementById(enId);
+    if (ar) ar.value = opt?.dataset?.ar || '';
+    if (en) en.value = opt?.dataset?.en || '';
 }
 
 function updatePatientSelects(patients) {
@@ -8403,7 +9030,7 @@ document.addEventListener('DOMContentLoaded', () => {
         });
     }
 
-    ['editLeaveModal','duplicateLeaveModal','confirmModal','leaveDetailsModal','viewQueriesModal','paymentNotifsModal','payConfirmModal','editDoctorModal','editPatientModal','settingsModal','addUserModal','editUserModal','sessionsModal'].forEach(setupModalStacking);
+    ['editLeaveModal','duplicateLeaveModal','confirmModal','leaveDetailsModal','viewQueriesModal','paymentNotifsModal','payConfirmModal','editDoctorModal','editPatientModal','settingsModal','addUserModal','editUserModal','sessionsModal','acctCreateLeaveModal','acctAddDaysModal','acctPaymentsModal'].forEach(setupModalStacking);
 
     const confirmMessage = document.getElementById('confirmMessage');
     const confirmYesBtn = document.getElementById('confirmYesBtn');
@@ -8629,11 +9256,16 @@ setupSelectQuickSearch('batch_hospital_search', 'batch_hospital_id');
             if (diff > 0) document.getElementById(daysId).value = diff;
         }
     }
-    document.getElementById('start_date').addEventListener('change', () => calcDays('start_date', 'end_date', 'days_count'));
+    function syncIssueDateFromStart(startId, issueId) {
+        const startValue = document.getElementById(startId)?.value || '';
+        const issueInput = document.getElementById(issueId);
+        if (issueInput && startValue) issueInput.value = startValue;
+    }
+    document.getElementById('start_date').addEventListener('change', () => { syncIssueDateFromStart('start_date', 'issue_date'); calcDays('start_date', 'end_date', 'days_count'); });
     document.getElementById('end_date').addEventListener('change', () => calcDays('start_date', 'end_date', 'days_count'));
-    document.getElementById('start_date_edit').addEventListener('change', () => calcDays('start_date_edit', 'end_date_edit', 'days_count_edit'));
+    document.getElementById('start_date_edit').addEventListener('change', () => { syncIssueDateFromStart('start_date_edit', 'issue_date_edit'); calcDays('start_date_edit', 'end_date_edit', 'days_count_edit'); });
     document.getElementById('end_date_edit').addEventListener('change', () => calcDays('start_date_edit', 'end_date_edit', 'days_count_edit'));
-    document.getElementById('dup_start_date').addEventListener('change', () => calcDays('dup_start_date', 'dup_end_date', 'dup_days_count'));
+    document.getElementById('dup_start_date').addEventListener('change', () => { syncIssueDateFromStart('dup_start_date', 'dup_issue_date'); calcDays('dup_start_date', 'dup_end_date', 'dup_days_count'); });
     document.getElementById('dup_end_date').addEventListener('change', () => calcDays('dup_start_date', 'dup_end_date', 'dup_days_count'));
 
 
@@ -8687,7 +9319,7 @@ setupSelectQuickSearch('batch_hospital_search', 'batch_hospital_id');
         document.getElementById('leave_id_edit').value = leave.id;
         document.getElementById('service_code_edit').value = leave.service_code;
         document.getElementById('hospital_id_edit').value = leave.hospital_id || '';
-        document.getElementById('doctor_id_edit').value = leave.doctor_id || '';
+        populateDoctorSelectForHospital('doctor_id_edit', leave.hospital_id || '', leave.doctor_id || '');
         document.getElementById('doctor_id_edit_search').value = '';
         document.getElementById('editDoctorManualFields').classList.add('hidden-field');
         document.getElementById('issue_date_edit').value = leave.issue_date;
@@ -8699,6 +9331,15 @@ setupSelectQuickSearch('batch_hospital_search', 'batch_hospital_id');
         document.getElementById('companion_relation_edit').value = leave.companion_relation || '';
         document.getElementById('is_paid_edit').checked = leave.is_paid == 1;
         document.getElementById('payment_amount_edit').value = leave.payment_amount;
+        const editPatientForEmployer = (currentTableData.patients || []).find(p => String(p.id) === String(leave.patient_id));
+        populateEmployerChoice('employer_choice_edit', editPatientForEmployer, 'current');
+        const editEmployerSelect = document.getElementById('employer_choice_edit');
+        if (editEmployerSelect && !Array.from(editEmployerSelect.options).some(o => o.value === 'current')) {
+            editEmployerSelect.insertAdjacentHTML('afterbegin', '<option value="current">الحالية في الإجازة</option>');
+        }
+        if (editEmployerSelect) editEmployerSelect.value = 'current';
+        document.getElementById('employer_ar_edit').value = leave.employer_ar || '';
+        document.getElementById('employer_en_edit').value = leave.employer_en || '';
         document.getElementById('issue_time_edit').value = leave.issue_time || '';
         document.getElementById('issue_period_edit').value = leave.issue_period || 'AM';
 
@@ -8714,6 +9355,17 @@ setupSelectQuickSearch('batch_hospital_search', 'batch_hospital_id');
         }
 
         editLeaveModal.show();
+    });
+
+    document.getElementById('hospital_id_edit')?.addEventListener('change', function() {
+        const opt = this.options[this.selectedIndex];
+        const prefix = opt?.dataset?.prefix || 'GSL';
+        const serviceCodeInput = document.getElementById('service_code_edit');
+        if (serviceCodeInput && /^(GSL|PSL)/i.test(serviceCodeInput.value || '')) {
+            serviceCodeInput.value = prefix + String(serviceCodeInput.value || '').substring(3);
+        }
+        fetchAndPopulateDoctorsForHospital('doctor_id_edit', this.value, '').catch(() => populateDoctorSelectForHospital('doctor_id_edit', this.value, ''));
+        document.getElementById('editDoctorManualFields')?.classList.add('hidden-field');
     });
 
     document.getElementById('doctor_id_edit').addEventListener('change', function() {
@@ -8781,7 +9433,7 @@ setupSelectQuickSearch('batch_hospital_search', 'batch_hospital_id');
         // Set hospital select
         const dupHospSel = document.getElementById('dup_hospital_select');
         if (dupHospSel) dupHospSel.value = leave.hospital_id || '';
-        document.getElementById('dup_doctor_select').value = leave.doctor_id || '';
+        populateDoctorSelectForHospital('dup_doctor_select', leave.hospital_id || '', leave.doctor_id || '');
         document.getElementById('dup_issue_date').value = leave.issue_date;
         document.getElementById('dup_start_date').value = leave.start_date;
         document.getElementById('dup_end_date').value = leave.end_date;
@@ -8823,17 +9475,7 @@ setupSelectQuickSearch('batch_hospital_search', 'batch_hospital_id');
     document.getElementById('dup_hospital_select')?.addEventListener('change', function() {
         const hospitalId = this.value;
         document.getElementById('dup_hospital_id').value = hospitalId;
-        const doctorSelect = document.getElementById('dup_doctor_select');
-        doctorSelect.innerHTML = '<option value="">-- اختر طبيباً --</option>';
-        (currentTableData.doctors || []).forEach(d => {
-            if (!hospitalId || d.hospital_id == hospitalId || !d.hospital_id) {
-                const opt = document.createElement('option');
-                opt.value = d.id;
-                opt.textContent = `${d.name_ar || d.name || ''} (${d.title_ar || d.title || ''})`;
-                doctorSelect.appendChild(opt);
-            }
-        });
-        doctorSelect.innerHTML += '<option value="manual">+ إدخال يدوي</option>';
+        fetchAndPopulateDoctorsForHospital('dup_doctor_select', hospitalId, '').catch(() => populateDoctorSelectForHospital('dup_doctor_select', hospitalId, ''));
     });
 
     // بحث سريع للمستشفى في التكرار
@@ -9131,6 +9773,7 @@ setupSelectQuickSearch('batch_hospital_search', 'batch_hospital_id');
         const listItem = targetBtn.closest('li');
         if (!listItem) return;
         const leaveId = listItem.dataset.leave;
+        const accountPaymentId = listItem.dataset.accountPayment;
         const notificationId = listItem.dataset.id;
 
         if (targetBtn.classList.contains('btn-view-leave')) {
@@ -9156,16 +9799,20 @@ setupSelectQuickSearch('batch_hospital_search', 'batch_hospital_id');
                 leaveDetailsModal.show();
             }
         } else if (targetBtn.classList.contains('btn-pay-notif')) {
-            document.getElementById('payConfirmMessage').textContent = `هل تريد تأكيد دفع الإجازة؟`;
+            const isAccountPayment = !!accountPaymentId;
+            document.getElementById('payConfirmMessage').textContent = isAccountPayment ? `هل تريد تأكيد دفع سجل إضافة الأيام؟` : `هل تريد تأكيد دفع الإجازة؟`;
             document.getElementById('confirmPayAmount').value = listItem.dataset.amount;
             currentConfirmAction = async () => {
                 const amount = document.getElementById('confirmPayAmount').value;
                 showLoading();
-                const result = await sendAjaxRequest('mark_leave_paid', { leave_id: leaveId, amount: amount });
+                const result = isAccountPayment
+                    ? await sendAjaxRequest('account_mark_payment_paid', { payment_id: accountPaymentId, amount: amount })
+                    : await sendAjaxRequest('mark_leave_paid', { leave_id: leaveId, amount: amount });
                 hideLoading();
                 if (result.success) {
                     showToast(result.message, 'success');
                     await fetchAllLeaves();
+                    if (result.stats) updateStats(result.stats);
                     const notifs = await sendAjaxRequest('fetch_notifications', {});
                     if (notifs.success) { currentTableData.notifications_payment = notifs.data; applyNotificationsFilters(); }
                 }
@@ -9415,6 +10062,10 @@ setupSelectQuickSearch('batch_hospital_search', 'batch_hospital_id');
             document.getElementById('edit_patient_nationality_ar').value = editBtn.dataset.nationalityAr || '';
             document.getElementById('edit_patient_nationality_en').value = editBtn.dataset.nationalityEn || '';
             document.getElementById('edit_patient_folder_link').value = editBtn.dataset.folder || '';
+            const patientRow = (currentTableData.patients || []).find(p => String(p.id) === String(editBtn.dataset.id));
+            const extras = (patientRow?.employer_options || []).filter(o => !['default','none'].includes(String(o.value))).map(o => `${o.ar || ''}${o.en ? ' | ' + o.en : ''}`).join('
+');
+            document.getElementById('edit_patient_employers_extra').value = extras;
             editPatientModal.show();
         }
         if (delBtn) {
@@ -9597,6 +10248,7 @@ setupSelectQuickSearch('batch_hospital_search', 'batch_hospital_id');
         let acctPatientsCache = [];
 
         const acctAddDaysModal = new bootstrap.Modal(document.getElementById('acctAddDaysModal'));
+        const acctCreateLeaveModal = new bootstrap.Modal(document.getElementById('acctCreateLeaveModal'));
         const acctLinkPatientModal = new bootstrap.Modal(document.getElementById('acctLinkPatientModal'));
         const acctChangePassModal = new bootstrap.Modal(document.getElementById('acctChangePassModal'));
         const acctPaymentsModal = new bootstrap.Modal(document.getElementById('acctPaymentsModal'));
@@ -9629,7 +10281,9 @@ setupSelectQuickSearch('batch_hospital_search', 'batch_hospital_id');
             const initials = (u.display_name || u.username || '?').charAt(0).toUpperCase();
             const expiry = acctGetExpiryStatus(u.expiry_date);
             const allowedDays = parseInt(u.patient_allowed_days) || 0;
-            const daysStatus = acctGetDaysStatus(allowedDays, 0);
+            const usedDays = parseInt(u.portal_used_days || 0);
+            const remainingDays = parseInt(u.portal_remaining_days || Math.max(allowedDays - usedDays, 0));
+            const daysStatus = acctGetDaysStatus(allowedDays, usedDays);
             const totalPaid = parseFloat(u.total_paid || 0).toFixed(2);
             const payCount = parseInt(u.payment_count || 0);
 
@@ -9646,7 +10300,7 @@ setupSelectQuickSearch('batch_hospital_search', 'batch_hospital_id');
                 <div class="acct-days-wrap">
                     <div class="acct-days-header">
                         <span class="acct-days-label"><i class="bi bi-calendar-check"></i> الأيام المتاحة</span>
-                        <span class="acct-days-count ${daysStatus.cls}">${allowedDays} يوم</span>
+                        <span class="acct-days-count ${daysStatus.cls}">${remainingDays} / ${allowedDays} يوم</span>
                     </div>
                     <div class="acct-progress">
                         <div class="acct-progress-bar ${daysStatus.cls}" style="width:${daysStatus.pct}%"></div>
@@ -9657,7 +10311,7 @@ setupSelectQuickSearch('batch_hospital_search', 'batch_hospital_id');
             const expiredClass = (expiry && expiry.cls === 'expired') ? ' acct-expired' : '';
 
             return `
-            <div class="col-12 col-md-6 col-xl-4 acct-card-col" data-id="${u.id}" data-active="${u.is_active}" data-username="${(u.username||'').toLowerCase()}" data-patient="${(u.linked_patient_name||'').toLowerCase()}">
+            <div class="col-12 col-md-6 col-xl-4 acct-card-col" data-id="${u.id}" data-active="${u.is_active}" data-username="${(u.username||'').toLowerCase()}" data-patient="${(u.linked_patient_name||'').toLowerCase()}" data-patient-id="${u.linked_patient_id || ''}" data-remaining-days="${parseInt(u.portal_remaining_days || 0)}" data-display-name="${htmlspecialchars(u.display_name || '')}">
                 <div class="acct-card${disabledClass}${expiredClass}">
                     <div class="acct-card-header">
                         <div class="acct-avatar ${roleClass}">${htmlspecialchars(initials)}</div>
@@ -9676,7 +10330,10 @@ setupSelectQuickSearch('batch_hospital_search', 'batch_hospital_id');
                         </div>
                         ${daysHtml}
                         <div class="d-flex flex-wrap gap-2 align-items-center mt-2">
-                            <span class="acct-payment-badge"><i class="bi bi-cash-coin"></i> ${totalPaid} ريال (${payCount} دفعة)</span>
+                            <span class="acct-payment-badge"><i class="bi bi-cash-coin"></i> ${totalPaid} ريال (${payCount} عملية)</span>
+                            <span class="badge bg-primary-subtle text-primary border"><i class="bi bi-file-earmark-medical"></i> إجازات البوابة: ${parseInt(u.portal_leave_count || 0)}</span>
+                            <span class="badge bg-success-subtle text-success border"><i class="bi bi-check2-circle"></i> مدفوعة: ${parseInt(u.account_paid_count || 0)}</span>
+                            <span class="badge bg-danger-subtle text-danger border"><i class="bi bi-exclamation-circle"></i> غير مدفوعة: ${parseInt(u.account_unpaid_count || 0)}</span>
                             ${expiryHtml}
                         </div>
                         ${u.account_notes ? `<div class="mt-2 text-muted small"><i class="bi bi-sticky"></i> ${htmlspecialchars(u.account_notes)}</div>` : ''}
@@ -9685,11 +10342,14 @@ setupSelectQuickSearch('batch_hospital_search', 'batch_hospital_id');
                         <button class="btn btn-sm btn-gradient acct-btn-add-days" data-id="${u.id}" data-name="${htmlspecialchars(u.display_name)}" data-username="${htmlspecialchars(u.username)}" title="إضافة أيام">
                             <i class="bi bi-calendar-plus"></i> إضافة أيام
                         </button>
+                        <button class="btn btn-sm btn-outline-secondary acct-btn-create-leave" data-id="${u.id}" data-name="${htmlspecialchars(u.display_name)}" data-patient-id="${u.linked_patient_id || ''}" data-remaining="${remainingDays}" title="إنشاء إجازة للمريض" ${remainingDays <= 0 || !u.linked_patient_id ? 'disabled' : ''}>
+                            <i class="bi bi-file-earmark-medical"></i> إضافة إجازة
+                        </button>
                         <button class="btn btn-sm btn-outline-primary acct-btn-link-patient" data-id="${u.id}" title="ربط بمريض">
                             <i class="bi bi-person-badge"></i> ربط مريض
                         </button>
-                        <button class="btn btn-sm btn-outline-success acct-btn-payments" data-id="${u.id}" data-name="${htmlspecialchars(u.display_name)}" title="سجل المدفوعات">
-                            <i class="bi bi-receipt"></i> المدفوعات
+                        <button class="btn btn-sm btn-outline-success acct-btn-payments" data-id="${u.id}" data-name="${htmlspecialchars(u.display_name)}" title="السجلات">
+                            <i class="bi bi-journal-text"></i> السجلات
                         </button>
                         <button class="btn btn-sm btn-outline-info acct-btn-edit" data-id="${u.id}" data-username="${htmlspecialchars(u.username)}" data-display="${htmlspecialchars(u.display_name)}" title="تعديل بيانات الحساب">
                             <i class="bi bi-pencil"></i> تعديل
@@ -9740,6 +10400,57 @@ setupSelectQuickSearch('batch_hospital_search', 'batch_hospital_id');
                 return;
             }
             grid.innerHTML = filtered.map(renderAccountCard).join('');
+        }
+
+        let acctCurrentRecords = { leaves: [], payments: [] };
+
+        function renderAcctLeaves(leaves) {
+            const box = document.getElementById('acctLeavesList');
+            if (!box) return;
+            if (!leaves || leaves.length === 0) {
+                box.innerHTML = '<div class="text-center py-4 text-muted"><i class="bi bi-inbox" style="font-size:36px;opacity:.35"></i><p>لا توجد إجازات لهذا المريض.</p></div>';
+                return;
+            }
+            box.innerHTML = `<div class="table-responsive"><table class="table table-sm align-middle"><thead><tr><th>رمز الخدمة</th><th>المستشفى</th><th>الطبيب</th><th>البداية</th><th>النهاية</th><th>الأيام</th><th>الدفع</th><th>المبلغ</th></tr></thead><tbody>${leaves.map(lv => `
+                <tr>
+                    <td><span class="badge bg-light text-dark border">${htmlspecialchars(lv.service_code || '-')}</span></td>
+                    <td>${htmlspecialchars(lv.hospital_name || lv.hospital_name_ar || '-')}</td>
+                    <td>${htmlspecialchars(lv.doctor_name || '-')} <small class="text-muted">${htmlspecialchars(lv.doctor_title || '')}</small></td>
+                    <td>${htmlspecialchars(lv.start_date || '')}</td>
+                    <td>${htmlspecialchars(lv.end_date || '')}</td>
+                    <td>${parseInt(lv.days_count || 0)}</td>
+                    <td>${lv.is_paid == 1 ? '<span class="badge bg-success">مدفوعة</span>' : '<span class="badge bg-danger">غير مدفوعة</span>'}</td>
+                    <td>${parseFloat(lv.payment_amount || 0).toFixed(2)}</td>
+                </tr>`).join('')}</tbody></table></div>`;
+        }
+
+        function renderAcctPayments() {
+            const box = document.getElementById('acctPaymentsList');
+            if (!box) return;
+            const mode = document.getElementById('acctPaymentStatusFilter')?.value || 'all';
+            let payments = [...(acctCurrentRecords.payments || [])];
+            if (mode === 'paid') payments = payments.filter(p => p.is_paid == 1);
+            if (mode === 'unpaid') payments = payments.filter(p => p.is_paid == 0);
+            const totalPaid = (acctCurrentRecords.payments || []).filter(p => p.is_paid == 1).reduce((sum, p) => sum + parseFloat(p.amount || 0), 0);
+            const totalEl = document.getElementById('acctPaymentsTotal');
+            if (totalEl) totalEl.textContent = totalPaid.toFixed(2);
+            if (payments.length === 0) {
+                box.innerHTML = '<div class="text-center py-4 text-muted"><i class="bi bi-inbox" style="font-size:36px;opacity:0.3;"></i><p>لا توجد سجلات مطابقة</p></div>';
+                return;
+            }
+            box.innerHTML = payments.map(p => `
+                <div class="payment-history-item">
+                    <div>
+                        <div class="ph-amount"><i class="bi bi-cash-coin"></i> ${parseFloat(p.amount || 0).toFixed(2)} ريال ${p.is_paid == 1 ? '<span class="badge bg-success ms-1">مدفوع</span>' : '<span class="badge bg-danger ms-1">غير مدفوع</span>'}</div>
+                        <div class="ph-note">${parseInt(p.days_count || 0)} يوم — ${htmlspecialchars(p.note || '—')}</div>
+                        <div class="ph-date"><i class="bi bi-clock"></i> ${htmlspecialchars(p.paid_at || '')} ${p.created_by_name ? '— أضيف بواسطة: ' + htmlspecialchars(p.created_by_name) : ''} ${p.paid_by_name ? '— دُفع بواسطة: ' + htmlspecialchars(p.paid_by_name) : ''}</div>
+                    </div>
+                    <div class="d-flex gap-1">
+                        ${p.is_paid == 0 ? `<button class="btn btn-sm btn-success acct-pay-account-payment" data-pid="${p.id}" data-amount="${p.amount}"><i class="bi bi-cash-coin"></i> دفع</button>` : ''}
+                        <button class="btn btn-sm btn-outline-danger acct-del-payment" data-pid="${p.id}" title="حذف"><i class="bi bi-trash3"></i></button>
+                    </div>
+                </div>
+            `).join('');
         }
 
         async function acctLoadData() {
@@ -9846,9 +10557,10 @@ setupSelectQuickSearch('batch_hospital_search', 'batch_hospital_id');
                 if (pt) {
                     document.getElementById('acctNewDisplayName').value = pt.name_ar || pt.name || '';
 
-                    let baseUser = pt.name_en ? pt.name_en.trim().split(/\s+/)[0].replace(/[^a-zA-Z0-9]/g, '').toLowerCase() : 'patient';
-                    const rnd = Math.floor(Math.random() * 900 + 100);
-                    document.getElementById('acctNewUsername').value = baseUser + '.' + rnd;
+                    const nameSource = (pt.name_en || pt.name_ar || pt.name || 'patient').trim();
+                    const firstName = (nameSource.split(/\s+/)[0] || 'patient').replace(/[^\p{L}\p{N}._-]+/gu, '').toLowerCase() || 'patient';
+                    const nextAccountNo = (Array.isArray(acctAllData) ? acctAllData.length : 0) + 1;
+                    document.getElementById('acctNewUsername').value = `${firstName}${nextAccountNo}`;
 
                     const passInput = document.getElementById('acctNewPassword');
                     passInput.value = generateStrongPassword(12);
@@ -9934,6 +10646,7 @@ setupSelectQuickSearch('batch_hospital_search', 'batch_hospital_id');
         // Grid click delegation
         document.getElementById('accountsGrid')?.addEventListener('click', async (e) => {
             const addDaysBtn = e.target.closest('.acct-btn-add-days');
+            const createLeaveBtn = e.target.closest('.acct-btn-create-leave');
             const linkBtn = e.target.closest('.acct-btn-link-patient');
             const paymentsBtn = e.target.closest('.acct-btn-payments');
             const passBtn = e.target.closest('.acct-btn-pass');
@@ -9949,7 +10662,30 @@ setupSelectQuickSearch('batch_hospital_search', 'batch_hospital_id');
                 document.getElementById('acctAddDaysAmount').value = '';
                 document.getElementById('acctAddDaysNote').value = '';
                 document.getElementById('acctAddDaysExpiry').value = '';
+                document.getElementById('acctAddDaysPaidStatus').value = '1';
                 acctAddDaysModal.show();
+            }
+
+            if (createLeaveBtn) {
+                const remaining = parseInt(createLeaveBtn.dataset.remaining || 0, 10);
+                if (remaining <= 0 || !createLeaveBtn.dataset.patientId) {
+                    showToast('لا يمكن إنشاء إجازة قبل ربط المريض وإضافة أيام متاحة.', 'warning');
+                    return;
+                }
+                document.getElementById('acctLeaveUserId').value = createLeaveBtn.dataset.id;
+                document.getElementById('acctLeaveInfo').textContent = `${createLeaveBtn.dataset.name} — الأيام المتبقية: ${remaining}`;
+                document.getElementById('acct_leave_hospital_id').value = '';
+                document.getElementById('acct_leave_doctor_id').innerHTML = '<option value="">-- اختر المستشفى أولاً --</option>';
+                document.getElementById('acct_leave_doctor_id').disabled = true;
+                document.getElementById('acct_leave_start_date').value = '';
+                document.getElementById('acct_leave_end_date').value = '';
+                document.getElementById('acct_leave_days_count').value = '';
+                document.getElementById('acct_leave_issue_time').value = '';
+                document.getElementById('acct_leave_issue_period').value = 'AM';
+                const accountPatient = (acctAllData || []).find(u => String(u.id) === String(createLeaveBtn.dataset.id));
+                const patientObj = (currentTableData.patients || []).find(p => String(p.id) === String(accountPatient?.linked_patient_id || createLeaveBtn.dataset.patientId));
+                populateEmployerChoice('acct_leave_employer_choice', patientObj, 'default');
+                acctCreateLeaveModal.show();
             }
 
             if (linkBtn) {
@@ -9995,30 +10731,16 @@ setupSelectQuickSearch('batch_hospital_search', 'batch_hospital_id');
            if (paymentsBtn) {
                 const uid = paymentsBtn.dataset.id;
                 document.getElementById('acctPaymentsUserName').textContent = paymentsBtn.dataset.name;
+                document.getElementById('acctLeavesList').innerHTML = '<div class="text-center py-4"><div class="spinner-border spinner-border-sm text-success"></div></div>';
                 document.getElementById('acctPaymentsList').innerHTML = '<div class="text-center py-4"><div class="spinner-border spinner-border-sm text-success"></div></div>';
+                document.getElementById('acctPaymentStatusFilter').value = 'all';
                 acctPaymentsModal.show();
-                
-                // التعديل هنا: استخدام الدالة الموحدة لإرسال الطلب كـ POST مع توكن الأمان (CSRF)
-                const data = await sendAjaxRequest('account_fetch_payments', { user_id: uid });
-                
+
+                const data = await sendAjaxRequest('account_fetch_records', { user_id: uid });
                 if (data.success) {
-                    const payments = data.payments || [];
-                    const total = payments.reduce((s, p) => s + parseFloat(p.amount || 0), 0);
-                    document.getElementById('acctPaymentsTotal').textContent = total.toFixed(2);
-                    if (payments.length === 0) {
-                        document.getElementById('acctPaymentsList').innerHTML = '<div class="text-center py-4 text-muted"><i class="bi bi-inbox" style="font-size:36px;opacity:0.3;"></i><p>لا توجد مدفوعات مسجلة</p></div>';
-                    } else {
-                        document.getElementById('acctPaymentsList').innerHTML = payments.map(p => `
-                            <div class="payment-history-item">
-                                <div>
-                                    <div class="ph-amount"><i class="bi bi-cash-coin"></i> ${parseFloat(p.amount).toFixed(2)} ريال</div>
-                                    <div class="ph-note">${htmlspecialchars(p.note || '—')}</div>
-                                    <div class="ph-date"><i class="bi bi-clock"></i> ${htmlspecialchars(p.paid_at)} ${p.created_by_name ? '— بواسطة: ' + htmlspecialchars(p.created_by_name) : ''}</div>
-                                </div>
-                                <button class="btn btn-sm btn-outline-danger acct-del-payment" data-pid="${p.id}" title="حذف"><i class="bi bi-trash3"></i></button>
-                            </div>
-                        `).join('');
-                    }
+                    acctCurrentRecords = { leaves: data.leaves || [], payments: data.payments || [] };
+                    renderAcctLeaves(acctCurrentRecords.leaves);
+                    renderAcctPayments();
                 }
             }
 
@@ -10069,6 +10791,30 @@ setupSelectQuickSearch('batch_hospital_search', 'batch_hospital_id');
             }
         });
 
+        document.getElementById('acctPaymentStatusFilter')?.addEventListener('change', renderAcctPayments);
+
+        document.getElementById('acctPaymentsList')?.addEventListener('click', async (e) => {
+            const payBtn = e.target.closest('.acct-pay-account-payment');
+            if (!payBtn) return;
+            document.getElementById('payConfirmMessage').textContent = 'هل تريد تأكيد دفع سجل إضافة الأيام؟';
+            document.getElementById('confirmPayAmount').value = payBtn.dataset.amount || 0;
+            currentConfirmAction = async () => {
+                const amount = document.getElementById('confirmPayAmount').value;
+                const result = await sendAjaxRequest('account_mark_payment_paid', { payment_id: payBtn.dataset.pid, amount });
+                if (result.success) {
+                    showToast(result.message, 'success');
+                    if (result.stats) updateStats(result.stats);
+                    const uid = document.querySelector('.acct-btn-payments[data-id]')?.dataset?.id;
+                    payBtn.closest('.payment-history-item')?.querySelector('.badge')?.classList.remove('bg-danger');
+                    payBtn.remove();
+                    acctLoadData();
+                    const notifs = await sendAjaxRequest('fetch_notifications', {});
+                    if (notifs.success) { currentTableData.notifications_payment = notifs.data; applyNotificationsFilters(); }
+                }
+            };
+            payConfirmModal.show();
+        });
+
         // Delete payment from history
         document.getElementById('acctPaymentsList')?.addEventListener('click', async (e) => {
             const btn = e.target.closest('.acct-del-payment');
@@ -10080,8 +10826,62 @@ setupSelectQuickSearch('batch_hospital_search', 'batch_hospital_id');
             fd.append('payment_id', pid);
             const res = await fetch(REQUEST_URL, { method: 'POST', body: fd, headers: { 'X-Requested-With': 'XMLHttpRequest' } });
             const result = await res.json(); hideLoading();
-            if (result.success) { showToast(result.message, 'success'); btn.closest('.payment-history-item')?.remove(); acctLoadData(); }
+            if (result.success) { showToast(result.message, 'success'); if (result.stats) updateStats(result.stats); btn.closest('.payment-history-item')?.remove(); acctLoadData(); }
             else { showToast(result.message, 'danger'); }
+        });
+
+        function calcAcctLeaveDays() {
+            const s = document.getElementById('acct_leave_start_date')?.value;
+            const e = document.getElementById('acct_leave_end_date')?.value;
+            const out = document.getElementById('acct_leave_days_count');
+            if (!out) return;
+            if (s && e) {
+                const diff = Math.ceil((new Date(e) - new Date(s)) / 86400000) + 1;
+                out.value = diff > 0 ? diff : 1;
+            } else {
+                out.value = '';
+            }
+        }
+
+        document.getElementById('acct_leave_hospital_id')?.addEventListener('change', function() {
+            fetchAndPopulateDoctorsForHospital('acct_leave_doctor_id', this.value, '').catch(() => populateDoctorSelectForHospital('acct_leave_doctor_id', this.value, ''));
+        });
+        document.getElementById('acct_leave_start_date')?.addEventListener('change', calcAcctLeaveDays);
+        document.getElementById('acct_leave_end_date')?.addEventListener('change', calcAcctLeaveDays);
+
+        document.getElementById('acctCreateLeaveSave')?.addEventListener('click', async () => {
+            calcAcctLeaveDays();
+            const uid = document.getElementById('acctLeaveUserId').value;
+            const hospitalId = document.getElementById('acct_leave_hospital_id').value;
+            const doctorId = document.getElementById('acct_leave_doctor_id').value;
+            const startDate = document.getElementById('acct_leave_start_date').value;
+            const endDate = document.getElementById('acct_leave_end_date').value;
+            const days = document.getElementById('acct_leave_days_count').value;
+            if (!uid || !hospitalId || !doctorId || !startDate || !endDate || !days) {
+                showToast('يرجى تعبئة جميع بيانات الإجازة.', 'warning');
+                return;
+            }
+            showLoading();
+            const result = await sendAjaxRequest('account_create_leave', {
+                user_id: uid,
+                hospital_id: hospitalId,
+                doctor_id: doctorId,
+                start_date: startDate,
+                end_date: endDate,
+                days_count: days,
+                issue_time: document.getElementById('acct_leave_issue_time').value,
+                issue_period: document.getElementById('acct_leave_issue_period').value,
+                employer_choice: document.getElementById('acct_leave_employer_choice').value
+            });
+            hideLoading();
+            if (result.success) {
+                showToast(result.message, 'success');
+                acctCreateLeaveModal.hide();
+                syncTableDataFromResult(result);
+                applyAllCurrentFilters();
+                if (result.stats) updateStats(result.stats);
+                acctLoadData();
+            }
         });
 
         // Save add days
@@ -10098,9 +10898,10 @@ setupSelectQuickSearch('batch_hospital_search', 'batch_hospital_id');
             fd.append('user_id', uid); fd.append('days', days);
             fd.append('amount', amount || 0); fd.append('note', note);
             fd.append('expiry_date', expiry);
+            fd.append('is_paid', document.getElementById('acctAddDaysPaidStatus')?.value || '1');
             const res = await fetch(REQUEST_URL, { method: 'POST', body: fd, headers: { 'X-Requested-With': 'XMLHttpRequest' } });
             const result = await res.json(); hideLoading();
-            if (result.success) { showToast(result.message, 'success'); acctAddDaysModal.hide(); acctLoadData(); }
+            if (result.success) { showToast(result.message, 'success'); if (result.stats) updateStats(result.stats); acctAddDaysModal.hide(); acctLoadData(); }
             else { showToast(result.message, 'danger'); }
         });
 
@@ -11076,7 +11877,8 @@ setupSelectQuickSearch('batch_hospital_search', 'batch_hospital_id');
     function generateHospitalRow(h) {
         const hasLogo = h.has_logo_data === 'has_logo';
         const logoImg = hasLogo ? '<span class="badge bg-success"><i class="bi bi-image"></i> موجود</span>' : (h.logo_url ? `<img src="${htmlspecialchars(h.logo_url)}" style="max-height:40px;max-width:80px;" onerror="this.parentElement.innerHTML='افتراضي'">` : 'افتراضي');
-        return `<tr data-id="${h.id}"><td class="row-num"></td><td>${logoImg}</td><td>${htmlspecialchars(h.name_ar || '')}</td><td>${htmlspecialchars(h.name_en || '')}</td><td>${h.license_number || '-'}</td><td><span class="badge ${h.service_prefix === 'PSL' ? 'bg-warning' : 'bg-success'}">${h.service_prefix || 'GSL'}</span></td><td><button class="btn btn-sm btn-gradient action-btn btn-edit-hospital" data-id="${h.id}" data-name-ar="${htmlspecialchars(h.name_ar || '')}" data-name-en="${htmlspecialchars(h.name_en || '')}" data-license="${htmlspecialchars(h.license_number || '')}" data-prefix="${h.service_prefix || 'GSL'}" data-logo="${hasLogo ? 'has_logo' : htmlspecialchars(h.logo_url || '')}" data-logo-scale="${h.logo_scale || 1}" data-logo-offset-x="${h.logo_offset_x || 0}" data-logo-offset-y="${h.logo_offset_y || 0}"><i class="bi bi-pencil"></i></button> <button class="btn btn-sm btn-danger-custom action-btn btn-delete-hospital" data-id="${h.id}"><i class="bi bi-trash3"></i></button></td></tr>`;
+        const hid = encodeURIComponent(h.id || '');
+        return `<tr data-id="${htmlspecialchars(h.id || '')}"><td class="row-num"></td><td>${logoImg}</td><td>${htmlspecialchars(h.name_ar || '')}</td><td>${htmlspecialchars(h.name_en || '')}</td><td>${htmlspecialchars(h.license_number || '-')}</td><td><span class="badge ${h.service_prefix === 'PSL' ? 'bg-warning' : 'bg-success'}">${htmlspecialchars(h.service_prefix || 'GSL')}</span></td><td><button type="button" class="btn btn-sm btn-gradient action-btn" onclick="window.openEditHospital && window.openEditHospital('${hid}')" title="تعديل"><i class="bi bi-pencil"></i></button> <button type="button" class="btn btn-sm btn-danger-custom action-btn" onclick="window.confirmDeleteHospital && window.confirmDeleteHospital('${hid}')" title="حذف"><i class="bi bi-trash3"></i></button></td></tr>`;
     }
   function renderHospitals() {
         if (hospitalsTable && currentTableData.hospitals) {
@@ -11185,14 +11987,79 @@ setupSelectQuickSearch('batch_hospital_search', 'batch_hospital_id');
         if (url) { const testImg = new Image(); testImg.onload = () => showLogoPreview(url); testImg.onerror = () => {}; testImg.src = url; }
     });
 
+// ====== إجراءات المستشفيات المباشرة: مستقلة عن data-attributes حتى لا تتأثر بالترميز أو إعادة رسم الجدول ======
+    window.openEditHospital = function(encodedHospitalId) {
+        const hid = decodeURIComponent(String(encodedHospitalId || ''));
+        const h = (currentTableData.hospitals || []).find(x => String(x.id) === String(hid));
+        if (!h) { showToast('تعذّر العثور على بيانات المستشفى. حدّث الصفحة وحاول مجدداً.', 'danger'); return; }
+
+        const elId = document.getElementById('edit_hospital_id');
+        const elNameAr = document.getElementById('edit_hospital_name_ar');
+        const elNameEn = document.getElementById('edit_hospital_name_en');
+        const elLicense = document.getElementById('edit_hospital_license');
+        const elPrefix = document.getElementById('edit_hospital_prefix');
+        const elLogoUrl = document.getElementById('edit_hospital_logo_url');
+        const elLogoFile = document.getElementById('edit_hospital_logo_file');
+
+        if (elId) elId.value = h.id || '';
+        if (elNameAr) elNameAr.value = h.name_ar || '';
+        if (elNameEn) elNameEn.value = h.name_en || '';
+        if (elLicense) elLicense.value = h.license_number || '';
+        if (elPrefix) elPrefix.value = h.service_prefix || 'GSL';
+        if (elLogoUrl) elLogoUrl.value = h.logo_url || '';
+        if (elLogoFile) elLogoFile.value = '';
+
+        logoScale = parseFloat(h.logo_scale || 1);
+        logoOffX = parseFloat(h.logo_offset_x || 0);
+        logoOffY = parseFloat(h.logo_offset_y || 0);
+        const lSlider = document.getElementById('logoScaleSlider');
+        if (lSlider) lSlider.value = logoScale;
+        if (typeof updateLogoTransform === 'function') updateLogoTransform();
+
+        if (h.has_logo_data === 'has_logo') {
+            showLogoPreview(REQUEST_URL + '?action=get_hospital_logo&hospital_id=' + encodeURIComponent(h.id) + '&csrf_token=' + encodeURIComponent(CSRF_TOKEN));
+        } else if (h.logo_url) {
+            showLogoPreview(h.logo_url);
+        } else {
+            const previewImg = document.getElementById('edit_hospital_logo_preview');
+            if (previewImg) previewImg.removeAttribute('src');
+        }
+
+        bootstrap.Modal.getOrCreateInstance(document.getElementById('editHospitalModal')).show();
+    };
+
+    window.confirmDeleteHospital = function(encodedHospitalId) {
+        const hid = decodeURIComponent(String(encodedHospitalId || ''));
+        if (!hid) { showToast('معرّف المستشفى غير صالح.', 'danger'); return; }
+        if (confirmMessage) confirmMessage.textContent = 'هل أنت متأكد من حذف هذا المستشفى نهائياً؟';
+        if (confirmYesBtn) confirmYesBtn.textContent = 'نعم، احذف';
+        currentConfirmAction = async () => {
+            showLoading();
+            const result = await sendAjaxRequest('delete_hospital', { hospital_id: hid });
+            hideLoading();
+            if (result.success) {
+                showToast(result.message, 'success');
+                if (Array.isArray(result.hospitals)) {
+                    currentTableData.hospitals = result.hospitals;
+                    renderHospitals();
+                    updateHospitalSelects();
+                }
+                if (result.stats) updateStats(result.stats);
+                await fetchAllLeaves();
+            }
+        };
+        confirmModal.show();
+    };
+
 // ====== التقاط أحداث أزرار المستشفيات (تعديل وحذف) عبر Event Delegation على مستوى المستند ======
-    document.addEventListener('click', (e) => {
+    hospitalsTable?.addEventListener('click', (e) => {
         const editBtn = e.target.closest('.btn-edit-hospital');
         const delBtn = e.target.closest('.btn-delete-hospital');
         
         // 1. معالجة زر التعديل
         if (editBtn) {
             e.preventDefault();
+            e.stopPropagation();
             
             const hid = editBtn.dataset.id || '';
             const elId = document.getElementById('edit_hospital_id');
@@ -11245,6 +12112,7 @@ setupSelectQuickSearch('batch_hospital_search', 'batch_hospital_id');
         // 2. معالجة زر الحذف
         if (delBtn) {
             e.preventDefault();
+            e.stopPropagation();
             
             const hid = delBtn.dataset.id;
             const confirmMsgEl = document.getElementById('confirmMessage');
@@ -11286,10 +12154,13 @@ setupSelectQuickSearch('batch_hospital_search', 'batch_hospital_id');
     });
 
     // حفظ تعديل المستشفى
-    document.getElementById('saveEditHospital')?.addEventListener('click', async () => {
+    let editHospitalSubmitting = false;
+    async function submitEditHospitalForm(formEl) {
+        if (!formEl || editHospitalSubmitting) return;
+        editHospitalSubmitting = true;
         showLoading();
         try {
-            const formData = new FormData(document.getElementById('editHospitalForm'));
+            const formData = new FormData(formEl);
             formData.append('action', 'edit_hospital');
             formData.append('csrf_token', CSRF_TOKEN);
             const res = await fetch(REQUEST_URL, { method: 'POST', body: formData, headers: { 'X-Requested-With': 'XMLHttpRequest' } });
@@ -11306,10 +12177,27 @@ setupSelectQuickSearch('batch_hospital_search', 'batch_hospital_id');
                 await fetchAllLeaves();
             } else { showToast(result.message || 'تعذّر تعديل المستشفى.', 'danger'); }
         } catch (err) {
+            console.error('Edit hospital error:', err);
             showToast('تعذّر تعديل المستشفى أو تحديث الإجازات المرتبطة.', 'danger');
         } finally {
+            editHospitalSubmitting = false;
             hideLoading();
         }
+    }
+
+    window.saveEditHospitalDirect = async function() {
+        await submitEditHospitalForm(document.getElementById('editHospitalForm'));
+    };
+
+    document.getElementById('editHospitalForm')?.addEventListener('submit', async (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        await submitEditHospitalForm(e.currentTarget);
+    });
+    document.getElementById('saveEditHospital')?.addEventListener('click', async (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        await submitEditHospitalForm(document.getElementById('editHospitalForm'));
     });
     // ====== ربط المستشفى بالأطباء + البادئة ======
     document.getElementById('hospital_id')?.addEventListener('change', function() {
@@ -11318,22 +12206,16 @@ setupSelectQuickSearch('batch_hospital_search', 'batch_hospital_id');
         document.getElementById('service_prefix').value = prefix;
         // تصفية الأطباء حسب المستشفى
         const hospitalId = this.value;
-        const doctorSelect = document.getElementById('doctor_select');
-        doctorSelect.innerHTML = '<option value="">-- اختر طبيباً --</option>';
-        (currentTableData.doctors || []).forEach(d => {
-            if (!hospitalId || d.hospital_id == hospitalId || !d.hospital_id) {
-                const opt = document.createElement('option');
-                opt.value = d.id;
-                opt.textContent = `${d.name_ar || d.name || ''} (${d.title_ar || d.title || ''})`;
-                doctorSelect.appendChild(opt);
-            }
-        });
-        doctorSelect.innerHTML += '<option value="manual">+ إدخال يدوي</option>';
+        fetchAndPopulateDoctorsForHospital('doctor_select', hospitalId, '').catch(() => populateDoctorSelectForHospital('doctor_select', hospitalId, ''));
     });
 
     // calcDays already defined above with parametric version
 
     // ====== تعبئة بيانات المريض تلقائياً ======
+    document.getElementById('employer_choice')?.addEventListener('change', () => applyEmployerChoice('employer_choice', 'employer_ar', 'employer_en'));
+    document.getElementById('employer_choice_edit')?.addEventListener('change', () => applyEmployerChoice('employer_choice_edit', 'employer_ar_edit', 'employer_en_edit'));
+    document.getElementById('acct_leave_employer_choice')?.addEventListener('change', () => {});
+
     document.getElementById('patient_select')?.addEventListener('change', function() {
         const patientId = this.value;
         if (patientId && patientId !== 'manual') {
@@ -11341,8 +12223,8 @@ setupSelectQuickSearch('batch_hospital_search', 'batch_hospital_id');
             if (p) {
                 const ea = document.getElementById('employer_ar');
                 const ee = document.getElementById('employer_en');
-                if (ea && p.employer_ar) ea.value = p.employer_ar;
-                if (ee && p.employer_en) ee.value = p.employer_en;
+                populateEmployerChoice('employer_choice', p, 'default');
+                applyEmployerChoice('employer_choice', 'employer_ar', 'employer_en');
             }
         }
     });
@@ -11351,12 +12233,18 @@ setupSelectQuickSearch('batch_hospital_search', 'batch_hospital_id');
     document.addEventListener('click', async (e) => {
         const printBtn = e.target.closest('.btn-print-leave');
         if (!printBtn) return;
+        if (printBtn.tagName === 'A' && printBtn.href) return; // الرابط المباشر هو المسار الأساسي الموثوق
         const leaveId = printBtn.dataset.id;
         showLoading();
         try {
-            // Open generate_pdf via GET request in new tab
-            const url = REQUEST_URL + '?action=generate_pdf&leave_id=' + leaveId + '&pdf_mode=preview&csrf_token=' + encodeURIComponent(CSRF_TOKEN);
-            window.open(url, '_blank');
+            if (!leaveId) throw new Error('leave_id مفقود');
+            const url = REQUEST_URL + '?action=generate_pdf&leave_id=' + encodeURIComponent(leaveId) + '&pdf_mode=preview&csrf_token=' + encodeURIComponent(CSRF_TOKEN);
+            const pdfWindow = window.open('about:blank', '_blank');
+            if (pdfWindow) {
+                pdfWindow.location.href = url;
+            } else {
+                window.location.href = url;
+            }
             hideLoading();
         } catch(err) {
             hideLoading();
@@ -11380,6 +12268,271 @@ setupSelectQuickSearch('batch_hospital_search', 'batch_hospital_id');
     }, 60000);
 
 }); // نهاية DOMContentLoaded
+</script>
+
+
+<script>
+(function(){
+    // مدير مستقل بالكامل لتبويب المستشفيات. لا يعتمد على سكربتات الجدول القديمة.
+    const HOSPITAL_SELECT_IDS = [
+        'hospital_id', 'batch_hospital_id', 'edit_doctor_hospital_id', 'quick_doctor_hospital_id',
+        'dup_hospital_id', 'hospital_id_edit', 'dup_hospital_select', 'batchPayHospitalSelect'
+    ];
+    let hospitalRows = [];
+    let editModalInstance = null;
+    let editSubmitting = false;
+
+    function ready(fn) {
+        if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', fn);
+        else fn();
+    }
+    function esc(value) {
+        const div = document.createElement('div');
+        div.textContent = value == null ? '' : String(value);
+        return div.innerHTML;
+    }
+    function toast(message, type = 'success') {
+        const messageText = String(message ?? '');
+        if (typeof isIgnorableIterableMessage === 'function' && isIgnorableIterableMessage(messageText)) {
+            console.warn('Suppressed non-critical hospital notification:', messageText);
+            return;
+        }
+        if (typeof showToast === 'function') showToast(messageText, type);
+        else alert(messageText);
+    }
+    function loading(on) {
+        if (on && typeof showLoading === 'function') showLoading();
+        if (!on && typeof hideLoading === 'function') hideLoading();
+    }
+    function runLegacySafely(fn) {
+        try { if (typeof fn === 'function') fn(); }
+        catch (err) {
+            // Some older global table/search helpers throw this while the hospital action itself succeeds.
+            // Keep the rebuilt hospitals manager authoritative and prevent false danger toasts.
+            console.warn('Ignored legacy hospital helper error:', err);
+        }
+    }
+    async function postHospital(action, data = {}, filesForm = null) {
+        const fd = filesForm ? new FormData(filesForm) : new FormData();
+        fd.set('action', action);
+        fd.set('csrf_token', typeof CSRF_TOKEN !== 'undefined' ? CSRF_TOKEN : '');
+        if (data && typeof data === 'object') {
+            Object.keys(data).forEach((key) => {
+                const value = data[key];
+                fd.set(key, value == null ? '' : value);
+            });
+        }
+        const response = await fetch(typeof REQUEST_URL !== 'undefined' ? REQUEST_URL : window.location.pathname, {
+            method: 'POST',
+            body: fd,
+            headers: { 'X-Requested-With': 'XMLHttpRequest' }
+        });
+        const text = await response.text();
+        try { return JSON.parse(text); }
+        catch (e) { throw new Error('رد الخادم غير صالح: ' + text.slice(0, 180)); }
+    }
+    function renderHospitalTable() {
+        const table = document.getElementById('hospitalsTable');
+        if (!table) return;
+        const tbody = table.querySelector('tbody');
+        const search = (document.getElementById('searchHospitals')?.value || '').trim().toLowerCase();
+        const rows = search ? hospitalRows.filter(h => JSON.stringify(h).toLowerCase().includes(search)) : hospitalRows;
+        if (!rows.length) {
+            tbody.innerHTML = '<tr><td colspan="7" class="text-center py-4 text-muted"><i class="bi bi-inbox"></i><br>لا توجد مستشفيات</td></tr>';
+            return;
+        }
+        tbody.innerHTML = rows.map((h, idx) => {
+            const logo = h.has_logo_data === 'has_logo'
+                ? '<span class="badge bg-success"><i class="bi bi-image"></i> موجود</span>'
+                : (h.logo_url ? `<img src="${esc(h.logo_url)}" style="max-height:40px;max-width:90px" onerror="this.outerHTML='افتراضي'">` : 'افتراضي');
+            const prefix = h.service_prefix || 'GSL';
+            return `<tr data-hospital-id="${esc(h.id)}">
+                <td class="row-num">${idx + 1}</td>
+                <td>${logo}</td>
+                <td>${esc(h.name_ar)}</td>
+                <td>${esc(h.name_en)}</td>
+                <td>${esc(h.license_number || '-')}</td>
+                <td><span class="badge ${prefix === 'PSL' ? 'bg-warning' : 'bg-success'}">${esc(prefix)}</span></td>
+                <td>
+                    <button type="button" class="btn btn-sm btn-gradient action-btn" data-hospital-edit="${esc(h.id)}" title="تعديل"><i class="bi bi-pencil"></i></button>
+                    <button type="button" class="btn btn-sm btn-danger-custom action-btn" data-hospital-delete="${esc(h.id)}" title="حذف"><i class="bi bi-trash3"></i></button>
+                </td>
+            </tr>`;
+        }).join('');
+        runLegacySafely(() => applyTableMobileLabels(table));
+    }
+    function refreshHospitalSelects() {
+        HOSPITAL_SELECT_IDS.forEach(id => {
+            const sel = document.getElementById(id);
+            if (!sel) return;
+            const current = sel.value;
+            const required = ['hospital_id', 'dup_hospital_id', 'hospital_id_edit', 'dup_hospital_select'].includes(id);
+            sel.innerHTML = required ? '<option value="">-- اختر مستشفى --</option>' : '<option value="">المستشفى (اختياري)</option>';
+            hospitalRows.forEach(h => {
+                const opt = document.createElement('option');
+                opt.value = h.id;
+                opt.textContent = h.name_ar || '';
+                opt.dataset.prefix = h.service_prefix || 'GSL';
+                if (String(current) === String(h.id)) opt.selected = true;
+                sel.appendChild(opt);
+            });
+            runLegacySafely(() => refreshSelectQuickSearchData(id));
+        });
+        const doctorHospitalSelect = document.querySelector('#addDoctorForm [name="doctor_hospital_id"]');
+        if (doctorHospitalSelect) {
+            const current = doctorHospitalSelect.value;
+            doctorHospitalSelect.innerHTML = '<option value="">المستشفى (اختياري)</option>';
+            hospitalRows.forEach(h => {
+                const opt = document.createElement('option');
+                opt.value = h.id;
+                opt.textContent = h.name_ar || '';
+                if (String(current) === String(h.id)) opt.selected = true;
+                doctorHospitalSelect.appendChild(opt);
+            });
+        }
+    }
+    async function loadHospitals() {
+        const result = await postHospital('fetch_hospitals');
+        if (!result.success) throw new Error(result.message || 'فشل تحميل المستشفيات');
+        hospitalRows = Array.isArray(result.hospitals) ? result.hospitals : [];
+        renderHospitalTable();
+        refreshHospitalSelects();
+    }
+    function fillEditModal(id) {
+        const h = hospitalRows.find(row => String(row.id) === String(id));
+        if (!h) { toast('لم يتم العثور على المستشفى، اضغط تحديث وحاول مرة أخرى.', 'danger'); return; }
+        document.getElementById('edit_hospital_id').value = h.id || '';
+        document.getElementById('edit_hospital_name_ar').value = h.name_ar || '';
+        document.getElementById('edit_hospital_name_en').value = h.name_en || '';
+        document.getElementById('edit_hospital_license').value = h.license_number || '';
+        document.getElementById('edit_hospital_prefix').value = h.service_prefix || 'GSL';
+        document.getElementById('edit_hospital_logo_url').value = h.logo_url || '';
+        document.getElementById('edit_hospital_logo_file').value = '';
+        document.getElementById('edit_logo_scale').value = h.logo_scale || 1;
+        document.getElementById('edit_logo_offset_x').value = h.logo_offset_x || 0;
+        document.getElementById('edit_logo_offset_y').value = h.logo_offset_y || 0;
+        const preview = document.getElementById('edit_hospital_logo_preview');
+        if (preview) {
+            preview.style.transform = `translate(${parseFloat(h.logo_offset_x || 0)}px, ${parseFloat(h.logo_offset_y || 0)}px) scale(${parseFloat(h.logo_scale || 1)})`;
+            if (h.has_logo_data === 'has_logo') preview.src = `${window.location.pathname}?action=get_hospital_logo&hospital_id=${encodeURIComponent(h.id)}&csrf_token=${encodeURIComponent(CSRF_TOKEN)}`;
+            else if (h.logo_url) preview.src = h.logo_url;
+            else preview.removeAttribute('src');
+        }
+        const slider = document.getElementById('logoScaleSlider');
+        if (slider) slider.value = h.logo_scale || 1;
+        const label = document.getElementById('logoScaleValue');
+        if (label) label.textContent = Math.round(parseFloat(h.logo_scale || 1) * 100) + '%';
+        editModalInstance = bootstrap.Modal.getOrCreateInstance(document.getElementById('editHospitalModal'));
+        editModalInstance.show();
+    }
+    async function saveEditHospital() {
+        const form = document.getElementById('editHospitalForm');
+        if (!form || editSubmitting) return;
+        editSubmitting = true;
+        loading(true);
+        try {
+            const result = await postHospital('edit_hospital', {}, form);
+            if (!result.success) throw new Error(result.message || 'تعذّر تعديل المستشفى');
+            toast(result.message || 'تم تعديل المستشفى بنجاح', 'success');
+            if (editModalInstance) editModalInstance.hide();
+            hospitalRows = Array.isArray(result.hospitals) ? result.hospitals : hospitalRows;
+            renderHospitalTable();
+            refreshHospitalSelects();
+            if (typeof updateStats === 'function' && result.stats) runLegacySafely(() => updateStats(result.stats));
+        } catch (e) {
+            toast(e.message || 'تعذّر تعديل المستشفى', 'danger');
+        } finally {
+            editSubmitting = false;
+            loading(false);
+        }
+    }
+    async function deleteHospital(id) {
+        if (!id || !window.confirm('هل أنت متأكد من حذف هذا المستشفى؟')) return;
+        loading(true);
+        try {
+            const result = await postHospital('delete_hospital', { hospital_id: id });
+            if (!result.success) throw new Error(result.message || 'تعذّر حذف المستشفى');
+            toast(result.message || 'تم حذف المستشفى', 'success');
+            hospitalRows = Array.isArray(result.hospitals) ? result.hospitals : hospitalRows.filter(h => String(h.id) !== String(id));
+            renderHospitalTable();
+            refreshHospitalSelects();
+            if (typeof updateStats === 'function' && result.stats) runLegacySafely(() => updateStats(result.stats));
+        } catch (e) {
+            toast(e.message || 'تعذّر حذف المستشفى', 'danger');
+        } finally {
+            loading(false);
+        }
+    }
+    function initHospitalManager() {
+        const table = document.getElementById('hospitalsTable');
+        if (!table || table.dataset.rebuiltManager === '1') return;
+        table.dataset.rebuiltManager = '1';
+
+        const addForm = document.getElementById('addHospitalForm');
+        addForm?.addEventListener('submit', async (e) => {
+            e.preventDefault();
+            e.stopImmediatePropagation();
+            loading(true);
+            try {
+                const result = await postHospital('add_hospital', {}, addForm);
+                if (!result.success) throw new Error(result.message || 'تعذّر إضافة المستشفى');
+                toast(result.message || 'تمت إضافة المستشفى', 'success');
+                addForm.reset();
+                hospitalRows = Array.isArray(result.hospitals) ? result.hospitals : hospitalRows;
+                renderHospitalTable();
+                refreshHospitalSelects();
+                if (typeof updateStats === 'function' && result.stats) runLegacySafely(() => updateStats(result.stats));
+            } catch (err) { toast(err.message, 'danger'); }
+            finally { loading(false); }
+        }, true);
+
+        document.getElementById('addHospitalsBatchForm')?.addEventListener('submit', async (e) => {
+            e.preventDefault();
+            e.stopImmediatePropagation();
+            const textarea = document.getElementById('hospitals_batch_text');
+            const raw = (textarea?.value || '').trim();
+            if (!raw) { toast('يرجى كتابة الدفعة أولاً.', 'warning'); return; }
+            loading(true);
+            try {
+                const result = await postHospital('add_hospitals_batch', { hospitals_batch_text: raw });
+                if (!result.success) throw new Error(result.message || 'تعذّر إضافة الدفعة');
+                toast(result.message || 'تمت إضافة الدفعة', 'success');
+                textarea.value = '';
+                hospitalRows = Array.isArray(result.hospitals) ? result.hospitals : hospitalRows;
+                renderHospitalTable();
+                refreshHospitalSelects();
+                if (typeof updateStats === 'function' && result.stats) runLegacySafely(() => updateStats(result.stats));
+            } catch (err) { toast(err.message, 'danger'); }
+            finally { loading(false); }
+        }, true);
+
+        table.addEventListener('click', (e) => {
+            const edit = e.target.closest('[data-hospital-edit]');
+            const del = e.target.closest('[data-hospital-delete]');
+            if (edit) { e.preventDefault(); e.stopImmediatePropagation(); fillEditModal(edit.dataset.hospitalEdit); }
+            if (del) { e.preventDefault(); e.stopImmediatePropagation(); deleteHospital(del.dataset.hospitalDelete); }
+        }, true);
+
+        document.getElementById('saveEditHospital')?.addEventListener('click', (e) => {
+            e.preventDefault();
+            e.stopImmediatePropagation();
+            saveEditHospital();
+        }, true);
+        document.getElementById('editHospitalForm')?.addEventListener('submit', (e) => {
+            e.preventDefault();
+            e.stopImmediatePropagation();
+            saveEditHospital();
+        }, true);
+        document.getElementById('searchHospitals')?.addEventListener('input', renderHospitalTable);
+        document.getElementById('btn-search-hospitals')?.addEventListener('click', renderHospitalTable);
+        document.getElementById('tab-hospitals')?.addEventListener('shown.bs.tab', () => loadHospitals().catch(e => toast(e.message, 'danger')));
+        window.openEditHospital = fillEditModal;
+        window.confirmDeleteHospital = deleteHospital;
+        window.saveEditHospitalDirect = saveEditHospital;
+        loadHospitals().catch(e => toast(e.message, 'danger'));
+    }
+    ready(initHospitalManager);
+})();
 </script>
 
 <!-- عرض الصورة بحجم كبير -->
