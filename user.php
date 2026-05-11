@@ -144,13 +144,15 @@ if ($action === 'patient_login') {
     if (empty($username) || empty($password)) {
         $loginError = 'يرجى إدخال اسم المستخدم وكلمة المرور.';
     } else {
-        $stmt = $pdo->prepare("SELECT u.*, pa.patient_id, pa.allowed_days FROM admin_users u LEFT JOIN patient_accounts pa ON pa.user_id = u.id WHERE u.username = ? AND u.is_active = 1");
+        $stmt = $pdo->prepare("SELECT u.*, pa.patient_id, pa.allowed_days, pa.expiry_date FROM admin_users u LEFT JOIN patient_accounts pa ON pa.user_id = u.id WHERE u.username = ? AND u.is_active = 1");
         $stmt->execute([$username]);
         $user = $stmt->fetch();
         
         if ($user && password_verify($password, $user['password_hash'])) {
             if (empty($user['patient_id'])) {
                 $loginError = 'هذا الحساب غير مرتبط بملف مريض. يرجى التواصل مع الإدارة.';
+            } elseif (!empty($user['expiry_date']) && $user['expiry_date'] < date('Y-m-d')) {
+                $loginError = 'انتهت صلاحية هذا الحساب. يرجى التواصل مع الإدارة.';
             } else {
                 $_SESSION['patient_logged_in'] = true;
                 $_SESSION['patient_user_id'] = $user['id'];
