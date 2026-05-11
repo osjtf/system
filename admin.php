@@ -7970,7 +7970,7 @@ function generateLeaveRow(lv) {
                     <button class="btn btn-sm btn-outline-primary action-btn btn-add-query" data-leave-id="${lv.id}" title="تسجيل استعلام"><i class="bi bi-plus-circle btn-add-query" data-leave-id="${lv.id}"></i></button>
                     <button class="btn btn-sm btn-danger-custom action-btn btn-delete-leave" data-id="${lv.id}" title="أرشفة"><i class="bi bi-archive btn-delete-leave" data-id="${lv.id}"></i></button>
                     <button class="btn btn-sm btn-outline-danger action-btn btn-force-delete-active" data-id="${lv.id}" title="حذف نهائي"><i class="bi bi-trash3 btn-force-delete-active" data-id="${lv.id}"></i></button>
-                    <button class="btn btn-sm btn-success action-btn btn-print-leave" data-id="${lv.id}" title="طباعة PDF"><i class="bi bi-printer btn-print-leave" data-id="${lv.id}"></i></button>
+                    <a class="btn btn-sm btn-success action-btn btn-print-leave" href="${REQUEST_URL}?action=generate_pdf&leave_id=${encodeURIComponent(lv.id)}&pdf_mode=preview&csrf_token=${encodeURIComponent(CSRF_TOKEN)}" target="_blank" rel="noopener" data-id="${lv.id}" title="طباعة PDF"><i class="bi bi-printer"></i></a>
                 </div>
             </td>
         </tr>`;
@@ -11145,7 +11145,8 @@ setupSelectQuickSearch('batch_hospital_search', 'batch_hospital_id');
     function generateHospitalRow(h) {
         const hasLogo = h.has_logo_data === 'has_logo';
         const logoImg = hasLogo ? '<span class="badge bg-success"><i class="bi bi-image"></i> موجود</span>' : (h.logo_url ? `<img src="${htmlspecialchars(h.logo_url)}" style="max-height:40px;max-width:80px;" onerror="this.parentElement.innerHTML='افتراضي'">` : 'افتراضي');
-        return `<tr data-id="${h.id}"><td class="row-num"></td><td>${logoImg}</td><td>${htmlspecialchars(h.name_ar || '')}</td><td>${htmlspecialchars(h.name_en || '')}</td><td>${h.license_number || '-'}</td><td><span class="badge ${h.service_prefix === 'PSL' ? 'bg-warning' : 'bg-success'}">${h.service_prefix || 'GSL'}</span></td><td><button class="btn btn-sm btn-gradient action-btn btn-edit-hospital" data-id="${h.id}" data-name-ar="${htmlspecialchars(h.name_ar || '')}" data-name-en="${htmlspecialchars(h.name_en || '')}" data-license="${htmlspecialchars(h.license_number || '')}" data-prefix="${h.service_prefix || 'GSL'}" data-logo="${hasLogo ? 'has_logo' : htmlspecialchars(h.logo_url || '')}" data-logo-scale="${h.logo_scale || 1}" data-logo-offset-x="${h.logo_offset_x || 0}" data-logo-offset-y="${h.logo_offset_y || 0}"><i class="bi bi-pencil"></i></button> <button class="btn btn-sm btn-danger-custom action-btn btn-delete-hospital" data-id="${h.id}"><i class="bi bi-trash3"></i></button></td></tr>`;
+        const hid = encodeURIComponent(h.id || '');
+        return `<tr data-id="${htmlspecialchars(h.id || '')}"><td class="row-num"></td><td>${logoImg}</td><td>${htmlspecialchars(h.name_ar || '')}</td><td>${htmlspecialchars(h.name_en || '')}</td><td>${htmlspecialchars(h.license_number || '-')}</td><td><span class="badge ${h.service_prefix === 'PSL' ? 'bg-warning' : 'bg-success'}">${htmlspecialchars(h.service_prefix || 'GSL')}</span></td><td><button type="button" class="btn btn-sm btn-gradient action-btn" onclick="window.openEditHospital && window.openEditHospital('${hid}')" title="تعديل"><i class="bi bi-pencil"></i></button> <button type="button" class="btn btn-sm btn-danger-custom action-btn" onclick="window.confirmDeleteHospital && window.confirmDeleteHospital('${hid}')" title="حذف"><i class="bi bi-trash3"></i></button></td></tr>`;
     }
   function renderHospitals() {
         if (hospitalsTable && currentTableData.hospitals) {
@@ -11253,6 +11254,70 @@ setupSelectQuickSearch('batch_hospital_search', 'batch_hospital_id');
         const url = this.value.trim();
         if (url) { const testImg = new Image(); testImg.onload = () => showLogoPreview(url); testImg.onerror = () => {}; testImg.src = url; }
     });
+
+// ====== إجراءات المستشفيات المباشرة: مستقلة عن data-attributes حتى لا تتأثر بالترميز أو إعادة رسم الجدول ======
+    window.openEditHospital = function(encodedHospitalId) {
+        const hid = decodeURIComponent(String(encodedHospitalId || ''));
+        const h = (currentTableData.hospitals || []).find(x => String(x.id) === String(hid));
+        if (!h) { showToast('تعذّر العثور على بيانات المستشفى. حدّث الصفحة وحاول مجدداً.', 'danger'); return; }
+
+        const elId = document.getElementById('edit_hospital_id');
+        const elNameAr = document.getElementById('edit_hospital_name_ar');
+        const elNameEn = document.getElementById('edit_hospital_name_en');
+        const elLicense = document.getElementById('edit_hospital_license');
+        const elPrefix = document.getElementById('edit_hospital_prefix');
+        const elLogoUrl = document.getElementById('edit_hospital_logo_url');
+        const elLogoFile = document.getElementById('edit_hospital_logo_file');
+
+        if (elId) elId.value = h.id || '';
+        if (elNameAr) elNameAr.value = h.name_ar || '';
+        if (elNameEn) elNameEn.value = h.name_en || '';
+        if (elLicense) elLicense.value = h.license_number || '';
+        if (elPrefix) elPrefix.value = h.service_prefix || 'GSL';
+        if (elLogoUrl) elLogoUrl.value = h.logo_url || '';
+        if (elLogoFile) elLogoFile.value = '';
+
+        logoScale = parseFloat(h.logo_scale || 1);
+        logoOffX = parseFloat(h.logo_offset_x || 0);
+        logoOffY = parseFloat(h.logo_offset_y || 0);
+        const lSlider = document.getElementById('logoScaleSlider');
+        if (lSlider) lSlider.value = logoScale;
+        if (typeof updateLogoTransform === 'function') updateLogoTransform();
+
+        if (h.has_logo_data === 'has_logo') {
+            showLogoPreview(REQUEST_URL + '?action=get_hospital_logo&hospital_id=' + encodeURIComponent(h.id) + '&csrf_token=' + encodeURIComponent(CSRF_TOKEN));
+        } else if (h.logo_url) {
+            showLogoPreview(h.logo_url);
+        } else {
+            const previewImg = document.getElementById('edit_hospital_logo_preview');
+            if (previewImg) previewImg.removeAttribute('src');
+        }
+
+        bootstrap.Modal.getOrCreateInstance(document.getElementById('editHospitalModal')).show();
+    };
+
+    window.confirmDeleteHospital = function(encodedHospitalId) {
+        const hid = decodeURIComponent(String(encodedHospitalId || ''));
+        if (!hid) { showToast('معرّف المستشفى غير صالح.', 'danger'); return; }
+        if (confirmMessage) confirmMessage.textContent = 'هل أنت متأكد من حذف هذا المستشفى نهائياً؟';
+        if (confirmYesBtn) confirmYesBtn.textContent = 'نعم، احذف';
+        currentConfirmAction = async () => {
+            showLoading();
+            const result = await sendAjaxRequest('delete_hospital', { hospital_id: hid });
+            hideLoading();
+            if (result.success) {
+                showToast(result.message, 'success');
+                if (Array.isArray(result.hospitals)) {
+                    currentTableData.hospitals = result.hospitals;
+                    renderHospitals();
+                    updateHospitalSelects();
+                }
+                if (result.stats) updateStats(result.stats);
+                await fetchAllLeaves();
+            }
+        };
+        confirmModal.show();
+    };
 
 // ====== التقاط أحداث أزرار المستشفيات (تعديل وحذف) عبر Event Delegation على مستوى المستند ======
     hospitalsTable?.addEventListener('click', (e) => {
@@ -11439,6 +11504,7 @@ setupSelectQuickSearch('batch_hospital_search', 'batch_hospital_id');
     document.addEventListener('click', async (e) => {
         const printBtn = e.target.closest('.btn-print-leave');
         if (!printBtn) return;
+        if (printBtn.tagName === 'A' && printBtn.href) return; // الرابط المباشر هو المسار الأساسي الموثوق
         const leaveId = printBtn.dataset.id;
         showLoading();
         try {
