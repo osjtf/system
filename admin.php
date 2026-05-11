@@ -8258,7 +8258,12 @@ function renderAdminStats(data) {
         );
     }
 
-    cards.innerHTML = cardItems.map(([label,val,color]) => `
+    cards.innerHTML = cardItems.map((item) => {
+        item = Array.isArray(item) ? item : ['', '', 'secondary'];
+        const label = item[0] ?? '';
+        const val = item[1] ?? '';
+        const color = item[2] ?? 'secondary';
+        return `
         <div class="col-md-4 col-lg-3">
             <div class="card border-${color} h-100 shadow-sm stats-pro-card">
                 <div class="card-body py-2">
@@ -8266,7 +8271,8 @@ function renderAdminStats(data) {
                     <div class="h5 mb-0">${val}</div>
                 </div>
             </div>
-        </div>`).join('');
+        </div>`;
+    }).join('');
 
     dailyTbody.innerHTML = (data.daily || []).map(r => `
         <tr><td>${htmlspecialchars(r.day_date || '')}</td><td>${r.total_count || 0}</td><td>${r.paid_count || 0}</td><td>${r.unpaid_count || 0}</td></tr>
@@ -11597,7 +11603,12 @@ setupSelectQuickSearch('batch_hospital_search', 'batch_hospital_id');
         const fd = filesForm ? new FormData(filesForm) : new FormData();
         fd.set('action', action);
         fd.set('csrf_token', typeof CSRF_TOKEN !== 'undefined' ? CSRF_TOKEN : '');
-        Object.entries(data).forEach(([key, value]) => fd.set(key, value == null ? '' : value));
+        if (data && typeof data === 'object') {
+            Object.keys(data).forEach((key) => {
+                const value = data[key];
+                fd.set(key, value == null ? '' : value);
+            });
+        }
         const response = await fetch(typeof REQUEST_URL !== 'undefined' ? REQUEST_URL : window.location.pathname, {
             method: 'POST',
             body: fd,
