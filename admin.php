@@ -38,7 +38,7 @@ header('X-Frame-Options: DENY');
 header('X-Content-Type-Options: nosniff');
 header('Referrer-Policy: strict-origin-when-cross-origin');
 header('Permissions-Policy: geolocation=(), microphone=(self), camera=()');
-header('Content-Security-Policy: default-src \'self\'; script-src \'self\' \'unsafe-inline\' https://cdn.jsdelivr.net https://cdnjs.cloudflare.com; style-src \'self\' \'unsafe-inline\' https://cdn.jsdelivr.net https://cdnjs.cloudflare.com https://fonts.googleapis.com; font-src \'self\' https://fonts.gstatic.com https://cdnjs.cloudflare.com; img-src \'self\' data: https: blob:; connect-src \'self\'; worker-src blob:;');
+header('Content-Security-Policy: default-src \'self\'; script-src \'self\' \'unsafe-inline\' https://cdn.jsdelivr.net https://cdnjs.cloudflare.com; style-src \'self\' \'unsafe-inline\' https://cdn.jsdelivr.net https://cdnjs.cloudflare.com https://fonts.googleapis.com; font-src \'self\' https://fonts.gstatic.com https://cdnjs.cloudflare.com https://cdn.jsdelivr.net; img-src \'self\' data: https: blob:; connect-src \'self\'; worker-src blob:;');
 
 // ======================== إعدادات قاعدة البيانات ========================
 $db_host = 'mysql.railway.internal';
@@ -246,6 +246,10 @@ ensureColumn($pdo, 'hospitals', 'logo_url', "VARCHAR(500) NULL AFTER logo_path")
 ensureColumn($pdo, 'patients', 'folder_link', "VARCHAR(500) NULL AFTER phone");
 
 // ======================== أعمدة جديدة للمستشفيات والأطباء والمرضى ========================
+// ضمان وجود الأعمدة الأساسية القديمة (name, title) قبل تعديلها
+ensureColumn($pdo, 'doctors', 'name', "VARCHAR(150) NOT NULL DEFAULT ''");
+ensureColumn($pdo, 'doctors', 'title', "VARCHAR(150) NOT NULL DEFAULT ''");
+ensureColumn($pdo, 'patients', 'name', "VARCHAR(150) NOT NULL DEFAULT ''");
 // تعديل الأعمدة القديمة لتكون اختيارية
 try { $pdo->exec("ALTER TABLE doctors MODIFY COLUMN name VARCHAR(150) DEFAULT ''"); } catch(Exception $e) {}
 try { $pdo->exec("ALTER TABLE doctors MODIFY COLUMN title VARCHAR(150) DEFAULT ''"); } catch(Exception $e) {}
@@ -1675,7 +1679,7 @@ if (isset($_GET['action']) && in_array($_GET['action'], $_GET_AJAX_ACTIONS) && !
         case 'fetch_notifications':
             ensureDelayedUnpaidNotifications($pdo);
             $notifications = $pdo->query("
-                SELECT n.*, sl.payment_amount, sl.service_code, sl.patient_id, p.name AS patient_name, p.phone AS patient_phone
+                SELECT n.*, sl.payment_amount, sl.service_code, sl.patient_id, COALESCE(p.name_ar, p.name, '') AS patient_name, p.phone AS patient_phone
                 FROM notifications n
                 LEFT JOIN sick_leaves sl ON n.leave_id = sl.id
                 LEFT JOIN patients p ON sl.patient_id = p.id
@@ -2606,8 +2610,8 @@ if (isset($_POST['action']) && $_POST['action'] !== 'login' && $_POST['action'] 
             }
 
             $stmt = $pdo->prepare("
-                SELECT sl.*, p.name AS patient_name, p.identity_number, p.folder_link AS patient_folder_link,
-                       d.name AS doctor_name, d.title AS doctor_title, d.note AS doctor_note,
+                SELECT sl.*, COALESCE(p.name_ar, p.name, '') AS patient_name, p.identity_number, p.folder_link AS patient_folder_link,
+                       COALESCE(d.name_ar, d.name, '') AS doctor_name, COALESCE(d.title_ar, d.title, '') AS doctor_title, d.note AS doctor_note,
                        (SELECT COUNT(*) FROM leave_queries lq WHERE lq.leave_id = sl.id) AS queries_count
                 FROM sick_leaves sl
                 LEFT JOIN patients p ON sl.patient_id = p.id
@@ -2711,7 +2715,7 @@ if (isset($_POST['action']) && $_POST['action'] !== 'login' && $_POST['action'] 
             $summary['users_productivity'] = $usersProductivityStmt->fetchAll();
 
             $duplicatesStmt = $pdo->prepare("
-                SELECT p.name AS patient_name, p.identity_number, sl.start_date, sl.end_date,
+                SELECT COALESCE(p.name_ar, p.name, '') AS patient_name, p.identity_number, sl.start_date, sl.end_date,
                        COUNT(*) AS repeated_count,
                        GROUP_CONCAT(DISTINCT COALESCE(u.display_name, 'غير محدد') SEPARATOR '، ') AS creators
                 FROM sick_leaves sl
@@ -2742,7 +2746,7 @@ if (isset($_POST['action']) && $_POST['action'] !== 'login' && $_POST['action'] 
         case 'fetch_notifications':
             ensureDelayedUnpaidNotifications($pdo);
             $notifications = $pdo->query(" 
-                SELECT n.*, sl.payment_amount, sl.service_code, sl.patient_id, p.name AS patient_name, p.phone AS patient_phone
+                SELECT n.*, sl.payment_amount, sl.service_code, sl.patient_id, COALESCE(p.name_ar, p.name, '') AS patient_name, p.phone AS patient_phone
                 FROM notifications n
                 LEFT JOIN sick_leaves sl ON n.leave_id = sl.id
                 LEFT JOIN patients p ON sl.patient_id = p.id
@@ -2767,7 +2771,7 @@ if (isset($_POST['action']) && $_POST['action'] !== 'login' && $_POST['action'] 
         case 'fetch_leaves_by_patient':
             $patient_id = intval($_POST['patient_id'] ?? 0);
             $stmt = $pdo->prepare("
-                SELECT sl.*, d.name AS doctor_name, d.title AS doctor_title
+                SELECT sl.*, COALESCE(d.name_ar, d.name, '') AS doctor_name, COALESCE(d.title_ar, d.title, '') AS doctor_title
                 FROM sick_leaves sl
                 LEFT JOIN doctors d ON sl.doctor_id = d.id
                 WHERE sl.patient_id = ? AND sl.deleted_at IS NULL

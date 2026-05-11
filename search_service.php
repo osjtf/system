@@ -108,13 +108,13 @@ function search_active_leave($conn, $code, $id) {
         sl.id                 AS leave_id,
         sl.service_code       AS service_code,
         p.identity_number     AS identity_number,
-        p.name                AS patient_name,
+        COALESCE(p.name_ar, p.name, '')  AS patient_name,
         sl.issue_date         AS issue_date,
         sl.start_date         AS start_date,
         sl.end_date           AS end_date,
         sl.days_count         AS days_count,
-        d.name                AS doctor_name,
-        d.title               AS doctor_title,
+        COALESCE(d.name_ar, d.name, '')  AS doctor_name,
+        COALESCE(d.title_ar, d.title, '') AS doctor_title,
         sl.is_companion       AS is_companion,
         sl.companion_name     AS companion_name,
         sl.companion_relation AS companion_relation
@@ -123,7 +123,7 @@ function search_active_leave($conn, $code, $id) {
       INNER JOIN doctors   AS d ON sl.doctor_id  = d.id
       WHERE sl.service_code   = ?
         AND p.identity_number = ?
-        AND sl.is_deleted     = 0
+        AND sl.deleted_at     IS NULL
       LIMIT 1
     ";
     $stmt = $conn->prepare($sql);
@@ -156,7 +156,7 @@ function search_archived_leave($conn, $code, $id) {
       INNER JOIN patients  AS p ON sl.patient_id = p.id
       WHERE sl.service_code   = ?
         AND p.identity_number = ?
-        AND sl.is_deleted     = 1
+        AND sl.deleted_at     IS NOT NULL
       LIMIT 1
     ";
     $stmt = $conn->prepare($sql);
