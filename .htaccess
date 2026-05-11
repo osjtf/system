@@ -1,0 +1,45 @@
+# ======================== إعدادات الأمان ========================
+
+# منع عرض قائمة الملفات والمجلدات
+Options -Indexes
+Options -MultiViews
+
+# إخفاء معلومات الخادم
+ServerSignature Off
+
+# منع الوصول المباشر لملفات السجلات والملفات الحساسة
+<FilesMatch "\.(log|txt|sql|env|bak|backup|old|orig|tmp|sh|bash)$">
+    Order Allow,Deny
+    Deny from all
+</FilesMatch>
+
+# منع الوصول لملف .htaccess نفسه
+<Files ".htaccess">
+    Order Allow,Deny
+    Deny from all
+</Files>
+
+# منع الوصول لمجلد vendor إن وجد
+<IfModule mod_rewrite.c>
+    RewriteEngine On
+    RewriteRule ^vendor/ - [F,L]
+</IfModule>
+
+# إضافة رؤوس الأمان
+<IfModule mod_headers.c>
+    Header always unset X-Powered-By
+    Header always unset Server
+    Header set X-Content-Type-Options "nosniff"
+    Header set X-Frame-Options "DENY"
+    Header set Referrer-Policy "strict-origin-when-cross-origin"
+    Header set Permissions-Policy "geolocation=(), microphone=(), camera=()"
+</IfModule>
+
+# منع تنفيذ PHP في مجلدات الرفع إن وجدت
+<IfModule mod_rewrite.c>
+    RewriteEngine On
+    RewriteRule ^uploads/.*\.php$ - [F,L]
+</IfModule>
+
+# تعيين charset افتراضي
+AddDefaultCharset UTF-8

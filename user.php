@@ -7,12 +7,26 @@
 
 ini_set('session.use_only_cookies', '1');
 ini_set('session.cookie_httponly', '1');
+ini_set('session.cookie_secure', (!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off') ? '1' : '0');
 ini_set('session.cookie_samesite', 'Strict');
+ini_set('session.use_strict_mode', '1');
 session_start();
 
+// إخفاء معلومات الخادم والمسارات
+header_remove('X-Powered-By');
+header_remove('Server');
+
 date_default_timezone_set('Asia/Riyadh');
-header('X-Frame-Options: SAMEORIGIN');
+header('X-Frame-Options: DENY');
 header('X-Content-Type-Options: nosniff');
+header('Referrer-Policy: strict-origin-when-cross-origin');
+header('Permissions-Policy: geolocation=(), microphone=(), camera=()');
+header('Content-Security-Policy: default-src \'self\'; script-src \'self\' \'unsafe-inline\' https://cdn.jsdelivr.net https://cdnjs.cloudflare.com; style-src \'self\' \'unsafe-inline\' https://cdn.jsdelivr.net https://cdnjs.cloudflare.com https://fonts.googleapis.com; font-src \'self\' https://fonts.gstatic.com https://cdnjs.cloudflare.com; img-src \'self\' data: https:; connect-src \'self\';');
+
+// منع عرض أخطاء PHP للمستخدمين
+ini_set('display_errors', '0');
+ini_set('display_startup_errors', '0');
+error_reporting(0);
 
 // ======================== إعدادات قاعدة البيانات ========================
 $db_host = 'mysql.railway.internal';
@@ -37,6 +51,22 @@ try {
 }
 
 $pdo->exec("SET time_zone = '+03:00'");
+
+// ======================== دوال الأمان ========================
+function patient_csrf_token(): string {
+    if (empty($_SESSION['patient_csrf_token'])) {
+        $_SESSION['patient_csrf_token'] = bin2hex(random_bytes(32));
+    }
+    return $_SESSION['patient_csrf_token'];
+}
+
+function patient_csrf_input(): string {
+    return '<input type="hidden" name="csrf_token" value="' . patient_csrf_token() . '">';
+}
+
+function patient_verify_csrf(string $token): bool {
+    return isset($_SESSION['patient_csrf_token']) && hash_equals($_SESSION['patient_csrf_token'], $token);
+}
 
 // ======================== دوال مساعدة ========================
 function nowSaudiUser(): string {
@@ -143,24 +173,47 @@ $action = $_POST['action'] ?? $_GET['action'] ?? '';
 
 // تسجيل الدخول
 if ($action === 'patient_login') {
+    // التحقق من CSRF
+    if (!patient_verify_csrf($_POST['csrf_token'] ?? '')) {
+        $loginError = 'طلب غير صالح. يرجى إعادة المحاولة.';
+        // إعادة توليد التوكن
+        unset($_SESSION['patient_csrf_token']);
+    } else {
+
     $username = trim($_POST['username'] ?? '');
     $password = $_POST['password'] ?? '';
 
-    if (empty($username) || empty($password)) {
+    // حماية من هجمات القوة الغاشمة
+    $maxAttempts = 5;
+    $lockMinutes = 15;
+    $_SESSION['patient_login_attempts'] = $_SESSION['patient_login_attempts'] ?? 0;
+    $_SESSION['patient_login_lock_until'] = $_SESSION['patient_login_lock_until'] ?? null;
+
+    if (!empty($_SESSION['patient_login_lock_until']) && time() < intval($_SESSION['patient_login_lock_until'])) {
+        $remain = ceil((intval($_SESSION['patient_login_lock_until']) - time()) / 60);
+        $loginError = "تم قفل تسجيل الدخول مؤقتاً. حاول بعد {$remain} دقيقة.";
+    } elseif (empty($username) || empty($password)) {
         $loginError = 'يرجى إدخال اسم المستخدم وكلمة المرور.';
     } else {
-        $stmtCheck = $pdo->prepare("SELECT u.*, pa.patient_id, pa.allowed_days, pa.expiry_date FROM admin_users u LEFT JOIN patient_accounts pa ON pa.user_id = u.id WHERE u.username = ?");
+        // جلب المستخدم مع التحقق من وجود حساب مريض مرتبط به فقط
+        $stmtCheck = $pdo->prepare("SELECT u.*, pa.patient_id, pa.allowed_days, pa.expiry_date FROM admin_users u INNER JOIN patient_accounts pa ON pa.user_id = u.id WHERE u.username = ? AND u.is_active = 1");
         $stmtCheck->execute([$username]);
         $userCheck = $stmtCheck->fetch();
 
         if ($userCheck && password_verify($password, $userCheck['password_hash'])) {
-            if (!$userCheck['is_active']) {
+            // التحقق من أن الحساب مرتبط بمريض فعلاً (INNER JOIN يضمن ذلك لكن نتحقق مجدداً)
+            if (empty($userCheck['patient_id']) || (int)$userCheck['patient_id'] <= 0) {
+                // لا نكشف السبب الحقيقي لأسباب أمنية
+                $_SESSION['patient_login_attempts'] = intval($_SESSION['patient_login_attempts'] ?? 0) + 1;
+                $loginError = 'اسم المستخدم أو كلمة المرور غير صحيحة.';
+            } elseif (!$userCheck['is_active']) {
                 $loginError = 'هذا الحساب معطّل. يرجى التواصل مع الإدارة.';
-            } elseif (empty($userCheck['patient_id']) || (int)$userCheck['patient_id'] <= 0) {
-                $loginError = 'هذا الحساب غير مرتبط بملف مريض. يرجى التواصل مع الإدارة.';
             } elseif (!empty($userCheck['expiry_date']) && $userCheck['expiry_date'] < date('Y-m-d')) {
                 $loginError = 'انتهت صلاحية هذا الحساب. يرجى التواصل مع الإدارة.';
             } else {
+                session_regenerate_id(true);
+                $_SESSION['patient_login_attempts'] = 0;
+                $_SESSION['patient_login_lock_until'] = null;
                 $_SESSION['patient_logged_in'] = true;
                 $_SESSION['patient_user_id'] = $userCheck['id'];
                 $_SESSION['patient_id'] = $userCheck['patient_id'];
@@ -171,9 +224,17 @@ if ($action === 'patient_login') {
                 exit;
             }
         } else {
-            $loginError = 'اسم المستخدم أو كلمة المرور غير صحيحة.';
+            $_SESSION['patient_login_attempts'] = intval($_SESSION['patient_login_attempts'] ?? 0) + 1;
+            if ($_SESSION['patient_login_attempts'] >= $maxAttempts) {
+                $_SESSION['patient_login_lock_until'] = time() + ($lockMinutes * 60);
+                $_SESSION['patient_login_attempts'] = 0;
+                $loginError = 'تم تجاوز عدد المحاولات المسموح. تم القفل مؤقتاً 15 دقيقة.';
+            } else {
+                $loginError = 'اسم المستخدم أو كلمة المرور غير صحيحة.';
+            }
         }
     }
+    } // نهاية التحقق من CSRF
 }
 
 // تسجيل الخروج
@@ -940,6 +1001,7 @@ body { font-family:'Cairo',sans-serif; background:var(--bg); color:var(--text); 
 
     <form method="POST" action="user.php">
       <input type="hidden" name="action" value="patient_login">
+      <?= patient_csrf_input() ?>
       <div class="form-group">
         <label for="username">اسم المستخدم</label>
         <input type="text" id="username" name="username" class="form-control"
