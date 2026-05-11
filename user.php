@@ -22,6 +22,7 @@ header('Referrer-Policy: strict-origin-when-cross-origin');
 header('Permissions-Policy: geolocation=(), microphone=(), camera=()');
 header('Content-Security-Policy: default-src \'self\'; script-src \'self\' \'unsafe-inline\' https://cdn.jsdelivr.net https://cdnjs.cloudflare.com; style-src \'self\' \'unsafe-inline\' https://cdn.jsdelivr.net https://cdnjs.cloudflare.com https://fonts.googleapis.com; font-src \'self\' https://fonts.gstatic.com https://cdnjs.cloudflare.com; img-src \'self\' data: https:; connect-src \'self\';');
 header('Strict-Transport-Security: max-age=31536000; includeSubDomains');
+header('X-Robots-Tag: noindex, nofollow, noarchive');
 
 // منع عرض أخطاء PHP للمستخدمين
 ini_set('display_errors', '0');
@@ -51,6 +52,7 @@ try {
 }
 
 $pdo->exec("SET time_zone = '+03:00'");
+try { $pdo->exec("ALTER TABLE hospitals ADD COLUMN deleted_at DATETIME NULL"); } catch (Throwable $e) {}
 
 // ======================== دوال الأمان ========================
 function patient_csrf_token(): string {
@@ -338,7 +340,7 @@ if ($action === 'create_sick_leave' && isPatientLoggedIn()) {
         $issuePeriod = $manualPeriod;
     }
 
-    $hospStmt = $pdo->prepare("SELECT * FROM hospitals WHERE id = ?");
+    $hospStmt = $pdo->prepare("SELECT * FROM hospitals WHERE id = ? AND deleted_at IS NULL");
     $hospStmt->execute([$hospitalId]);
     $hosp = $hospStmt->fetch();
 
@@ -405,7 +407,11 @@ if ($action === 'generate_pdf' && isPatientLoggedIn()) {
     $leaveId = (int)($_GET['leave_id'] ?? 0);
     $userId  = (int)$_SESSION['patient_user_id'];
     $patientId = (int)$_SESSION['patient_id'];
-    $pdfMode = $_GET['pdf_mode'] ?? 'preview';
+    $pdfMode = 'download'; // Patient portal never exposes preview mode, even if the URL is manually changed.
+    if (!patient_verify_csrf($_GET['csrf_token'] ?? '')) {
+        http_response_code(403);
+        exit('Forbidden');
+    }
 
     $stmt = $pdo->prepare("
         SELECT sl.*,
@@ -608,6 +614,9 @@ if ($action === 'generate_pdf' && isPatientLoggedIn()) {
             header('Content-Type: application/pdf');
             header('Content-Disposition: attachment; filename="SickLeave_' . $scFile . '.pdf"');
             header('Content-Length: ' . filesize($pdfFile));
+            header('Cache-Control: no-store, no-cache, must-revalidate, max-age=0');
+            header('Pragma: no-cache');
+            header('X-Content-Type-Options: nosniff');
             readfile($pdfFile);
             @unlink($htmlFile);
             @unlink($pdfFile);
@@ -742,7 +751,7 @@ if (isPatientLoggedIn()) {
     $stmt->execute([$patientId, $userId]);
     $myLeaves = $stmt->fetchAll();
 
-    $hospitals = $pdo->query("SELECT id, name_ar, name_en FROM hospitals ORDER BY name_ar")->fetchAll();
+    $hospitals = $pdo->query("SELECT id, name_ar, name_en FROM hospitals WHERE deleted_at IS NULL ORDER BY name_ar")->fetchAll();
 
     $usedDays = getUsedDaysUser($pdo, $patientId, $userId);
     $remainingDays = max(0, $allowedDays - $usedDays);
@@ -1464,6 +1473,14 @@ body {
       <h3><i class="fas fa-plus-circle"></i> إنشاء إجازة مرضية جديدة</h3>
     </div>
     <div class="card-body">
+      <?php if ($remainingDays <= 0): ?>
+        <div class="empty-state" style="padding:44px 18px;text-align:center">
+          <i class="fab fa-whatsapp" style="font-size:58px;color:#25d366;margin-bottom:16px"></i>
+          <h3 style="margin-bottom:10px;color:var(--danger);font-weight:900">استنفدت كل رصيدك من الأيام</h3>
+          <p style="color:var(--text-muted);font-weight:700;margin-bottom:22px">لإضافة رصيد أيام جديد أو طلب المساعدة، تواصل معنا مباشرة عبر الواتساب.</p>
+          <a href="https://wa.me/966500000000" target="_blank" class="btn-whatsapp" style="display:inline-flex;font-size:16px;padding:14px 26px"><i class="fab fa-whatsapp"></i> تواصل معنا على واتساب</a>
+        </div>
+      <?php else: ?>
       <form id="leaveForm" onsubmit="return submitLeave(event)">
         <div class="leave-form-grid">
           <div class="form-group">
@@ -1516,6 +1533,7 @@ body {
           </button>
         </div>
       </form>
+      <?php endif; ?>
     </div>
   </div>
 
@@ -1546,7 +1564,7 @@ body {
                 <td><?= htmlspecialchars($lv['d_name_ar'] ?? '') ?></td>
                 <td style="font-family:var(--font-en);font-weight:800"><?= (int)$lv['days_count'] ?> يوم</td>
                 <td style="font-family:var(--font-en)"><?= fmtDateUser($lv['start_date'] ?? '') ?></td>
-                <td><button class="btn-view-leave" onclick="viewLeave(<?= (int)$lv['id'] ?>)"><i class="fas fa-eye"></i> عرض</button></td>
+                <td><button class="btn-view-leave" onclick="viewLeave(<?= (int)$lv['id'] ?>)"><i class="fas fa-download"></i> تحميل</button></td>
               </tr>
             <?php endforeach; ?>
             </tbody>
@@ -1559,6 +1577,7 @@ body {
 <?php endif; ?>
 
 <script>
+const PATIENT_CSRF_TOKEN = '<?php echo patient_csrf_token(); ?>';
 // ═══ Theme Toggle ═══
 function toggleTheme() {
   const html = document.documentElement;
@@ -1669,7 +1688,18 @@ function submitLeave(e) {
 
 // ═══ View Leave ═══
 function viewLeave(id) {
-  window.open('user.php?action=generate_pdf&leave_id=' + id + '&pdf_mode=preview', '_blank');
+  const url = 'user.php?action=generate_pdf&leave_id=' + encodeURIComponent(id) + '&pdf_mode=download&csrf_token=' + encodeURIComponent(PATIENT_CSRF_TOKEN);
+  let frame = document.getElementById('pdfDownloadFrame');
+  if (!frame) {
+    frame = document.createElement('iframe');
+    frame.id = 'pdfDownloadFrame';
+    frame.name = 'pdfDownloadFrame';
+    frame.style.display = 'none';
+    frame.setAttribute('aria-hidden', 'true');
+    document.body.appendChild(frame);
+  }
+  frame.src = url;
+  showToast('بدأ تحميل ملف الإجازة', 'success');
 }
 
 // ═══ Toast ═══
