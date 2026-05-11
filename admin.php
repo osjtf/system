@@ -1501,6 +1501,73 @@ if (isset($_GET['action']) && $_GET['action'] === 'generate_pdf') {
     exit;
 }
 
+// ======================== معالجة طلبات AJAX عبر GET (للقراءة فقط) ========================
+if (isset($_GET['action']) && $_GET['action'] !== 'generate_pdf' && !empty($_SERVER['HTTP_X_REQUESTED_WITH'])) {
+    header('Content-Type: application/json; charset=utf-8');
+    if (!is_logged_in()) {
+        echo json_encode(['success' => false, 'message' => 'يرجى تسجيل الدخول أولاً.', 'redirect' => true]);
+        exit;
+    }
+    $getAction = $_GET['action'];
+    switch ($getAction) {
+        case 'fetch_accounts_full':
+            if ($_SESSION['admin_role'] !== 'admin') { echo json_encode(['success'=>false,'message'=>'ليس لديك صلاحية.']); exit; }
+            ensureColumn($pdo, 'patient_accounts', 'expiry_date', "DATE NULL AFTER allowed_days");
+            ensureColumn($pdo, 'patient_accounts', 'notes', "TEXT NULL AFTER expiry_date");
+            $accounts = $pdo->query("
+                SELECT u.id, u.username, u.display_name, u.role, u.is_active, u.created_at,
+                       pa.patient_id AS linked_patient_id, pa.allowed_days AS patient_allowed_days,
+                       pa.expiry_date, pa.notes AS account_notes,
+                       p.name_ar AS linked_patient_name, p.identity_number AS patient_identity,
+                       COALESCE((SELECT SUM(amount) FROM account_payments WHERE user_id = u.id), 0) AS total_paid,
+                       COALESCE((SELECT COUNT(*) FROM account_payments WHERE user_id = u.id), 0) AS payment_count
+                FROM admin_users u
+                INNER JOIN patient_accounts pa ON pa.user_id = u.id
+                LEFT JOIN patients p ON pa.patient_id = p.id
+                ORDER BY u.created_at DESC
+            ")->fetchAll();
+            echo json_encode(['success'=>true,'accounts'=>$accounts]);
+            break;
+        case 'get_patient_account':
+            if ($_SESSION['admin_role'] !== 'admin') { echo json_encode(['success'=>false,'message'=>'ليس لديك صلاحية.']); exit; }
+            $target_user_id = intval($_GET['user_id'] ?? 0);
+            $stmt = $pdo->prepare("SELECT pa.*, p.name_ar AS patient_name FROM patient_accounts pa LEFT JOIN patients p ON pa.patient_id = p.id WHERE pa.user_id = ?");
+            $stmt->execute([$target_user_id]);
+            $pa = $stmt->fetch();
+            $patients_list = $pdo->query("SELECT id, name_ar, identity_number FROM patients ORDER BY name_ar")->fetchAll();
+            echo json_encode(['success' => true, 'account' => $pa ?: null, 'patients' => $patients_list]);
+            break;
+        case 'account_fetch_payments':
+            if ($_SESSION['admin_role'] !== 'admin') { echo json_encode(['success'=>false,'message'=>'ليس لديك صلاحية.']); exit; }
+            $uid = intval($_GET['user_id'] ?? 0);
+            $stmt = $pdo->prepare("SELECT ap.*, au.display_name AS created_by_name FROM account_payments ap LEFT JOIN admin_users au ON ap.created_by = au.id WHERE ap.user_id = ? ORDER BY ap.paid_at DESC");
+            $stmt->execute([$uid]);
+            echo json_encode(['success'=>true,'payments'=>$stmt->fetchAll()]);
+            break;
+        case 'get_hospital_logo':
+            $hid = intval($_GET['hospital_id'] ?? 0);
+            $stmt = $pdo->prepare("SELECT logo_data, logo_url FROM hospitals WHERE id = ?");
+            $stmt->execute([$hid]);
+            $hRow = $stmt->fetch();
+            if ($hRow && !empty($hRow['logo_data']) && strpos($hRow['logo_data'], 'data:image/') === 0) {
+                $parts = explode(',', $hRow['logo_data'], 2);
+                preg_match('/data:image\/([a-z+]+);/', $parts[0], $mimeMatch);
+                $mime = 'image/' . ($mimeMatch[1] ?? 'png');
+                header('Content-Type: ' . $mime);
+                echo base64_decode($parts[1] ?? '');
+            } elseif ($hRow && !empty($hRow['logo_url'])) {
+                header('Location: ' . $hRow['logo_url']);
+            } else {
+                header('HTTP/1.1 404 Not Found');
+                echo 'No logo';
+            }
+            exit;
+        default:
+            echo json_encode(['success'=>false,'message'=>'إجراء GET غير معروف: ' . $getAction]);
+    }
+    exit;
+}
+
 // ======================== معالجة طلبات AJAX ========================
 if (isset($_POST['action']) && $_POST['action'] !== 'login' && $_POST['action'] !== 'logout') {
     header('Content-Type: application/json; charset=utf-8');
