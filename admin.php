@@ -2905,7 +2905,22 @@ if (isset($_POST['action']) && $_POST['action'] !== 'login' && $_POST['action'] 
                 $stmt = $pdo->prepare("UPDATE admin_users SET display_name = ?, role = ?, is_active = ? WHERE id = ?");
                 $stmt->execute([$display_name, $role, $is_active, $user_id]);
             }
-            
+            // إذا تم التعطيل: أبطل جلسات المستخدم
+            if (!$is_active && $user_id != intval($_SESSION['admin_user_id'])) {
+                $pdo->prepare("UPDATE user_sessions SET logout_at = NOW() WHERE user_id = ? AND logout_at IS NULL")->execute([$user_id]);
+                $sessionSavePath = session_save_path() ?: sys_get_temp_dir();
+                if (is_dir($sessionSavePath)) {
+                    foreach (glob($sessionSavePath . '/sess_*') as $sessFile) {
+                        $sessContent = @file_get_contents($sessFile);
+                        if ($sessContent !== false) {
+                            if (strpos($sessContent, 'patient_user_id|i:' . $user_id . ';') !== false
+                                || strpos($sessContent, 'admin_user_id|i:' . $user_id . ';') !== false) {
+                                @unlink($sessFile);
+                            }
+                        }
+                    }
+                }
+            }
             $users = $pdo->query("SELECT u.* FROM admin_users u ORDER BY u.created_at DESC")->fetchAll();
             echo json_encode(['success' => true, 'message' => 'تم تعديل المستخدم بنجاح.', 'users' => $users]);
             break;
@@ -3158,7 +3173,26 @@ if (isset($_POST['action']) && $_POST['action'] !== 'login' && $_POST['action'] 
             $status = intval($_POST['status'] ?? 0);
             if ($uid == $_SESSION['admin_user_id']) { echo json_encode(['success'=>false,'message'=>'لا يمكنك تعطيل حسابك الخاص.']); exit; }
             $pdo->prepare("UPDATE admin_users SET is_active = ? WHERE id = ?")->execute([$status, $uid]);
-            echo json_encode(['success'=>true,'message'=>$status ? 'تم تفعيل الحساب.' : 'تم تعطيل الحساب.']);
+            // إذا تم التعطيل: احذف جلسات المستخدم من جدول user_sessions وأبطل ملفات الجلسة
+            if (!$status) {
+                // حذف سجلات الجلسات من قاعدة البيانات
+                $pdo->prepare("UPDATE user_sessions SET logout_at = NOW() WHERE user_id = ? AND logout_at IS NULL")->execute([$uid]);
+                // محاولة إبطال ملفات الجلسة المخزنة على الخادم
+                $sessionSavePath = session_save_path() ?: sys_get_temp_dir();
+                if (is_dir($sessionSavePath)) {
+                    foreach (glob($sessionSavePath . '/sess_*') as $sessFile) {
+                        $sessContent = @file_get_contents($sessFile);
+                        if ($sessContent !== false) {
+                            // تحقق إذا كانت الجلسة تخص هذا المستخدم (patient_user_id أو admin_user_id)
+                            if (strpos($sessContent, 'patient_user_id|i:' . $uid . ';') !== false
+                                || strpos($sessContent, 'admin_user_id|i:' . $uid . ';') !== false) {
+                                @unlink($sessFile);
+                            }
+                        }
+                    }
+                }
+            }
+            echo json_encode(['success'=>true,'message'=>$status ? 'تم تفعيل الحساب وأصبح بإمكان المستخدم الدخول.' : 'تم تعطيل الحساب وتسجيل خروجه فوراً.']);
             break;
 
         case 'account_update_password':
