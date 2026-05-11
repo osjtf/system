@@ -11564,6 +11564,253 @@ setupSelectQuickSearch('batch_hospital_search', 'batch_hospital_id');
 }); // نهاية DOMContentLoaded
 </script>
 
+
+<script>
+(function(){
+    // مدير مستقل بالكامل لتبويب المستشفيات. لا يعتمد على سكربتات الجدول القديمة.
+    const HOSPITAL_SELECT_IDS = [
+        'hospital_id', 'batch_hospital_id', 'edit_doctor_hospital_id', 'quick_doctor_hospital_id',
+        'dup_hospital_id', 'hospital_id_edit', 'dup_hospital_select', 'batchPayHospitalSelect'
+    ];
+    let hospitalRows = [];
+    let editModalInstance = null;
+    let editSubmitting = false;
+
+    function ready(fn) {
+        if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', fn);
+        else fn();
+    }
+    function esc(value) {
+        const div = document.createElement('div');
+        div.textContent = value == null ? '' : String(value);
+        return div.innerHTML;
+    }
+    function toast(message, type = 'success') {
+        if (typeof showToast === 'function') showToast(message, type);
+        else alert(message);
+    }
+    function loading(on) {
+        if (on && typeof showLoading === 'function') showLoading();
+        if (!on && typeof hideLoading === 'function') hideLoading();
+    }
+    async function postHospital(action, data = {}, filesForm = null) {
+        const fd = filesForm ? new FormData(filesForm) : new FormData();
+        fd.set('action', action);
+        fd.set('csrf_token', typeof CSRF_TOKEN !== 'undefined' ? CSRF_TOKEN : '');
+        Object.entries(data).forEach(([key, value]) => fd.set(key, value == null ? '' : value));
+        const response = await fetch(typeof REQUEST_URL !== 'undefined' ? REQUEST_URL : window.location.pathname, {
+            method: 'POST',
+            body: fd,
+            headers: { 'X-Requested-With': 'XMLHttpRequest' }
+        });
+        const text = await response.text();
+        try { return JSON.parse(text); }
+        catch (e) { throw new Error('رد الخادم غير صالح: ' + text.slice(0, 180)); }
+    }
+    function renderHospitalTable() {
+        const table = document.getElementById('hospitalsTable');
+        if (!table) return;
+        const tbody = table.querySelector('tbody');
+        const search = (document.getElementById('searchHospitals')?.value || '').trim().toLowerCase();
+        const rows = search ? hospitalRows.filter(h => JSON.stringify(h).toLowerCase().includes(search)) : hospitalRows;
+        if (!rows.length) {
+            tbody.innerHTML = '<tr><td colspan="7" class="text-center py-4 text-muted"><i class="bi bi-inbox"></i><br>لا توجد مستشفيات</td></tr>';
+            return;
+        }
+        tbody.innerHTML = rows.map((h, idx) => {
+            const logo = h.has_logo_data === 'has_logo'
+                ? '<span class="badge bg-success"><i class="bi bi-image"></i> موجود</span>'
+                : (h.logo_url ? `<img src="${esc(h.logo_url)}" style="max-height:40px;max-width:90px" onerror="this.outerHTML='افتراضي'">` : 'افتراضي');
+            const prefix = h.service_prefix || 'GSL';
+            return `<tr data-hospital-id="${esc(h.id)}">
+                <td class="row-num">${idx + 1}</td>
+                <td>${logo}</td>
+                <td>${esc(h.name_ar)}</td>
+                <td>${esc(h.name_en)}</td>
+                <td>${esc(h.license_number || '-')}</td>
+                <td><span class="badge ${prefix === 'PSL' ? 'bg-warning' : 'bg-success'}">${esc(prefix)}</span></td>
+                <td>
+                    <button type="button" class="btn btn-sm btn-gradient action-btn" data-hospital-edit="${esc(h.id)}" title="تعديل"><i class="bi bi-pencil"></i></button>
+                    <button type="button" class="btn btn-sm btn-danger-custom action-btn" data-hospital-delete="${esc(h.id)}" title="حذف"><i class="bi bi-trash3"></i></button>
+                </td>
+            </tr>`;
+        }).join('');
+        if (typeof applyTableMobileLabels === 'function') applyTableMobileLabels(table);
+    }
+    function refreshHospitalSelects() {
+        HOSPITAL_SELECT_IDS.forEach(id => {
+            const sel = document.getElementById(id);
+            if (!sel) return;
+            const current = sel.value;
+            const required = ['hospital_id', 'dup_hospital_id', 'hospital_id_edit', 'dup_hospital_select'].includes(id);
+            sel.innerHTML = required ? '<option value="">-- اختر مستشفى --</option>' : '<option value="">المستشفى (اختياري)</option>';
+            hospitalRows.forEach(h => {
+                const opt = document.createElement('option');
+                opt.value = h.id;
+                opt.textContent = h.name_ar || '';
+                opt.dataset.prefix = h.service_prefix || 'GSL';
+                if (String(current) === String(h.id)) opt.selected = true;
+                sel.appendChild(opt);
+            });
+            if (typeof refreshSelectQuickSearchData === 'function') refreshSelectQuickSearchData(id);
+        });
+        const doctorHospitalSelect = document.querySelector('#addDoctorForm [name="doctor_hospital_id"]');
+        if (doctorHospitalSelect) {
+            const current = doctorHospitalSelect.value;
+            doctorHospitalSelect.innerHTML = '<option value="">المستشفى (اختياري)</option>';
+            hospitalRows.forEach(h => {
+                const opt = document.createElement('option');
+                opt.value = h.id;
+                opt.textContent = h.name_ar || '';
+                if (String(current) === String(h.id)) opt.selected = true;
+                doctorHospitalSelect.appendChild(opt);
+            });
+        }
+    }
+    async function loadHospitals() {
+        const result = await postHospital('fetch_hospitals');
+        if (!result.success) throw new Error(result.message || 'فشل تحميل المستشفيات');
+        hospitalRows = Array.isArray(result.hospitals) ? result.hospitals : [];
+        renderHospitalTable();
+        refreshHospitalSelects();
+    }
+    function fillEditModal(id) {
+        const h = hospitalRows.find(row => String(row.id) === String(id));
+        if (!h) { toast('لم يتم العثور على المستشفى، اضغط تحديث وحاول مرة أخرى.', 'danger'); return; }
+        document.getElementById('edit_hospital_id').value = h.id || '';
+        document.getElementById('edit_hospital_name_ar').value = h.name_ar || '';
+        document.getElementById('edit_hospital_name_en').value = h.name_en || '';
+        document.getElementById('edit_hospital_license').value = h.license_number || '';
+        document.getElementById('edit_hospital_prefix').value = h.service_prefix || 'GSL';
+        document.getElementById('edit_hospital_logo_url').value = h.logo_url || '';
+        document.getElementById('edit_hospital_logo_file').value = '';
+        document.getElementById('edit_logo_scale').value = h.logo_scale || 1;
+        document.getElementById('edit_logo_offset_x').value = h.logo_offset_x || 0;
+        document.getElementById('edit_logo_offset_y').value = h.logo_offset_y || 0;
+        const preview = document.getElementById('edit_hospital_logo_preview');
+        if (preview) {
+            preview.style.transform = `translate(${parseFloat(h.logo_offset_x || 0)}px, ${parseFloat(h.logo_offset_y || 0)}px) scale(${parseFloat(h.logo_scale || 1)})`;
+            if (h.has_logo_data === 'has_logo') preview.src = `${window.location.pathname}?action=get_hospital_logo&hospital_id=${encodeURIComponent(h.id)}&csrf_token=${encodeURIComponent(CSRF_TOKEN)}`;
+            else if (h.logo_url) preview.src = h.logo_url;
+            else preview.removeAttribute('src');
+        }
+        const slider = document.getElementById('logoScaleSlider');
+        if (slider) slider.value = h.logo_scale || 1;
+        const label = document.getElementById('logoScaleValue');
+        if (label) label.textContent = Math.round(parseFloat(h.logo_scale || 1) * 100) + '%';
+        editModalInstance = bootstrap.Modal.getOrCreateInstance(document.getElementById('editHospitalModal'));
+        editModalInstance.show();
+    }
+    async function saveEditHospital() {
+        const form = document.getElementById('editHospitalForm');
+        if (!form || editSubmitting) return;
+        editSubmitting = true;
+        loading(true);
+        try {
+            const result = await postHospital('edit_hospital', {}, form);
+            if (!result.success) throw new Error(result.message || 'تعذّر تعديل المستشفى');
+            toast(result.message || 'تم تعديل المستشفى بنجاح', 'success');
+            if (editModalInstance) editModalInstance.hide();
+            hospitalRows = Array.isArray(result.hospitals) ? result.hospitals : hospitalRows;
+            renderHospitalTable();
+            refreshHospitalSelects();
+            if (typeof updateStats === 'function' && result.stats) updateStats(result.stats);
+        } catch (e) {
+            toast(e.message || 'تعذّر تعديل المستشفى', 'danger');
+        } finally {
+            editSubmitting = false;
+            loading(false);
+        }
+    }
+    async function deleteHospital(id) {
+        if (!id || !window.confirm('هل أنت متأكد من حذف هذا المستشفى؟')) return;
+        loading(true);
+        try {
+            const result = await postHospital('delete_hospital', { hospital_id: id });
+            if (!result.success) throw new Error(result.message || 'تعذّر حذف المستشفى');
+            toast(result.message || 'تم حذف المستشفى', 'success');
+            hospitalRows = Array.isArray(result.hospitals) ? result.hospitals : hospitalRows.filter(h => String(h.id) !== String(id));
+            renderHospitalTable();
+            refreshHospitalSelects();
+            if (typeof updateStats === 'function' && result.stats) updateStats(result.stats);
+        } catch (e) {
+            toast(e.message || 'تعذّر حذف المستشفى', 'danger');
+        } finally {
+            loading(false);
+        }
+    }
+    function initHospitalManager() {
+        const table = document.getElementById('hospitalsTable');
+        if (!table || table.dataset.rebuiltManager === '1') return;
+        table.dataset.rebuiltManager = '1';
+
+        const addForm = document.getElementById('addHospitalForm');
+        addForm?.addEventListener('submit', async (e) => {
+            e.preventDefault();
+            e.stopImmediatePropagation();
+            loading(true);
+            try {
+                const result = await postHospital('add_hospital', {}, addForm);
+                if (!result.success) throw new Error(result.message || 'تعذّر إضافة المستشفى');
+                toast(result.message || 'تمت إضافة المستشفى', 'success');
+                addForm.reset();
+                hospitalRows = Array.isArray(result.hospitals) ? result.hospitals : hospitalRows;
+                renderHospitalTable();
+                refreshHospitalSelects();
+                if (typeof updateStats === 'function' && result.stats) updateStats(result.stats);
+            } catch (err) { toast(err.message, 'danger'); }
+            finally { loading(false); }
+        }, true);
+
+        document.getElementById('addHospitalsBatchForm')?.addEventListener('submit', async (e) => {
+            e.preventDefault();
+            e.stopImmediatePropagation();
+            const textarea = document.getElementById('hospitals_batch_text');
+            const raw = (textarea?.value || '').trim();
+            if (!raw) { toast('يرجى كتابة الدفعة أولاً.', 'warning'); return; }
+            loading(true);
+            try {
+                const result = await postHospital('add_hospitals_batch', { hospitals_batch_text: raw });
+                if (!result.success) throw new Error(result.message || 'تعذّر إضافة الدفعة');
+                toast(result.message || 'تمت إضافة الدفعة', 'success');
+                textarea.value = '';
+                hospitalRows = Array.isArray(result.hospitals) ? result.hospitals : hospitalRows;
+                renderHospitalTable();
+                refreshHospitalSelects();
+                if (typeof updateStats === 'function' && result.stats) updateStats(result.stats);
+            } catch (err) { toast(err.message, 'danger'); }
+            finally { loading(false); }
+        }, true);
+
+        table.addEventListener('click', (e) => {
+            const edit = e.target.closest('[data-hospital-edit]');
+            const del = e.target.closest('[data-hospital-delete]');
+            if (edit) { e.preventDefault(); e.stopImmediatePropagation(); fillEditModal(edit.dataset.hospitalEdit); }
+            if (del) { e.preventDefault(); e.stopImmediatePropagation(); deleteHospital(del.dataset.hospitalDelete); }
+        }, true);
+
+        document.getElementById('saveEditHospital')?.addEventListener('click', (e) => {
+            e.preventDefault();
+            e.stopImmediatePropagation();
+            saveEditHospital();
+        }, true);
+        document.getElementById('editHospitalForm')?.addEventListener('submit', (e) => {
+            e.preventDefault();
+            e.stopImmediatePropagation();
+            saveEditHospital();
+        }, true);
+        document.getElementById('searchHospitals')?.addEventListener('input', renderHospitalTable);
+        document.getElementById('btn-search-hospitals')?.addEventListener('click', renderHospitalTable);
+        document.getElementById('tab-hospitals')?.addEventListener('shown.bs.tab', () => loadHospitals().catch(e => toast(e.message, 'danger')));
+        window.openEditHospital = fillEditModal;
+        window.confirmDeleteHospital = deleteHospital;
+        window.saveEditHospitalDirect = saveEditHospital;
+        loadHospitals().catch(e => toast(e.message, 'danger'));
+    }
+    ready(initHospitalManager);
+})();
+</script>
+
 <!-- عرض الصورة بحجم كبير -->
 <div class="modal fade" id="chatImageModal" tabindex="-1" aria-hidden="true">
   <div class="modal-dialog modal-dialog-centered modal-xl">
