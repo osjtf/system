@@ -38,6 +38,7 @@ header('X-Frame-Options: DENY');
 header('X-Content-Type-Options: nosniff');
 header('Referrer-Policy: strict-origin-when-cross-origin');
 header('Permissions-Policy: geolocation=(), microphone=(self), camera=()');
+header('X-Robots-Tag: noindex, nofollow, noarchive');
 header('Content-Security-Policy: default-src \'self\'; script-src \'self\' \'unsafe-inline\' https://cdn.jsdelivr.net https://cdnjs.cloudflare.com; style-src \'self\' \'unsafe-inline\' https://cdn.jsdelivr.net https://cdnjs.cloudflare.com https://fonts.googleapis.com; font-src \'self\' https://fonts.gstatic.com https://cdnjs.cloudflare.com https://cdn.jsdelivr.net; img-src \'self\' data: https: blob:; connect-src \'self\'; worker-src blob:;');
 
 // ======================== إعدادات قاعدة البيانات ========================
@@ -123,6 +124,8 @@ ensureColumn($pdo, 'hospitals', 'logo_data', "LONGTEXT NULL AFTER logo_url");
 ensureColumn($pdo, 'hospitals', 'logo_scale', "FLOAT DEFAULT 1.0 AFTER logo_data");
 ensureColumn($pdo, 'hospitals', 'logo_offset_x', "FLOAT DEFAULT 0 AFTER logo_scale");
 ensureColumn($pdo, 'hospitals', 'logo_offset_y', "FLOAT DEFAULT 0 AFTER logo_offset_x");
+ensureColumn($pdo, 'hospitals', 'deleted_at', "DATETIME NULL AFTER updated_at");
+try { ensureIndex($pdo, 'hospitals', 'idx_hospitals_deleted_name', 'deleted_at, name_ar'); } catch(Exception $e) {}
 
 $pdo->exec("CREATE TABLE IF NOT EXISTS doctors (
     id INT AUTO_INCREMENT PRIMARY KEY,
@@ -402,7 +405,7 @@ function getStats($pdo) {
     $stats['unpaid'] = $pdo->query("SELECT COUNT(*) FROM sick_leaves WHERE is_paid = 0 AND deleted_at IS NULL")->fetchColumn();
     $stats['paid_amount'] = $pdo->query("SELECT COALESCE(SUM(payment_amount), 0) FROM sick_leaves WHERE is_paid = 1 AND deleted_at IS NULL")->fetchColumn();
     $stats['unpaid_amount'] = $pdo->query("SELECT COALESCE(SUM(payment_amount), 0) FROM sick_leaves WHERE is_paid = 0 AND deleted_at IS NULL")->fetchColumn();
-    $stats['hospitals'] = $pdo->query("SELECT COUNT(*) FROM hospitals")->fetchColumn();
+    $stats['hospitals'] = $pdo->query("SELECT COUNT(*) FROM hospitals WHERE deleted_at IS NULL")->fetchColumn();
     return $stats;
 }
 
@@ -413,6 +416,7 @@ function getHospitalsList(PDO $pdo): array {
                created_at, updated_at,
                CASE WHEN logo_data IS NOT NULL AND logo_data != '' THEN 'has_logo' ELSE '' END AS has_logo_data
         FROM hospitals
+        WHERE deleted_at IS NULL
         ORDER BY name_ar
     ")->fetchAll();
 }
@@ -1809,7 +1813,7 @@ if (isset($_POST['action']) && $_POST['action'] !== 'login' && $_POST['action'] 
             $logo_offset_y = max(-500, min(500, floatval($_POST['logo_offset_y'] ?? 0)));
             if ($id <= 0 || empty($name_ar)) { echo json_encode(['success'=>false,'message'=>'بيانات غير صالحة.']); exit; }
 
-            $existsStmt = $pdo->prepare("SELECT id FROM hospitals WHERE id = ? LIMIT 1");
+            $existsStmt = $pdo->prepare("SELECT id FROM hospitals WHERE id = ? AND deleted_at IS NULL LIMIT 1");
             $existsStmt->execute([$id]);
             if (!$existsStmt->fetch()) { echo json_encode(['success'=>false,'message'=>'المستشفى غير موجود أو تم حذفه.']); exit; }
 
@@ -1849,20 +1853,36 @@ if (isset($_POST['action']) && $_POST['action'] !== 'login' && $_POST['action'] 
             $id = intval($_POST['hospital_id'] ?? 0);
             if ($id <= 0) { echo json_encode(['success'=>false,'message'=>'معرّف المستشفى غير صالح.']); exit; }
 
-            $existsStmt = $pdo->prepare("SELECT id FROM hospitals WHERE id = ? LIMIT 1");
+            $existsStmt = $pdo->prepare("SELECT id FROM hospitals WHERE id = ? AND deleted_at IS NULL LIMIT 1");
             $existsStmt->execute([$id]);
             if (!$existsStmt->fetch()) { echo json_encode(['success'=>false,'message'=>'المستشفى غير موجود أو تم حذفه مسبقاً.']); exit; }
 
+            $deletedPhysically = false;
             $pdo->beginTransaction();
             try {
-                $pdo->prepare("UPDATE doctors SET hospital_id = NULL WHERE hospital_id = ?")->execute([$id]);
-                $pdo->prepare("UPDATE sick_leaves SET hospital_id = NULL WHERE hospital_id = ?")->execute([$id]);
+                // Clear every known hospital_id reference first, so foreign keys cannot block deletion.
+                foreach (['doctors', 'sick_leaves'] as $refTable) {
+                    if (tableExists($pdo, $refTable)) {
+                        $colCheck = $pdo->prepare("SELECT COUNT(*) FROM information_schema.columns WHERE table_schema = DATABASE() AND table_name = ? AND column_name = 'hospital_id'");
+                        $colCheck->execute([$refTable]);
+                        if ((int)$colCheck->fetchColumn() > 0) {
+                            $pdo->prepare("UPDATE {$refTable} SET hospital_id = NULL WHERE hospital_id = ?")->execute([$id]);
+                        }
+                    }
+                }
                 $pdo->prepare("DELETE FROM hospitals WHERE id = ?")->execute([$id]);
                 $pdo->commit();
+                $deletedPhysically = true;
             } catch (Throwable $e) {
                 if ($pdo->inTransaction()) $pdo->rollBack();
-                echo json_encode(['success'=>false,'message'=>'تعذّر حذف المستشفى: ' . $e->getMessage()]);
-                exit;
+                // Final guaranteed admin behavior: hide the hospital even if an unknown FK blocks physical deletion.
+                try {
+                    $softStmt = $pdo->prepare("UPDATE hospitals SET deleted_at = NOW() WHERE id = ?");
+                    $softStmt->execute([$id]);
+                } catch (Throwable $softDeleteError) {
+                    echo json_encode(['success'=>false,'message'=>'تعذّر حذف المستشفى: ' . $softDeleteError->getMessage()]);
+                    exit;
+                }
             }
 
             $hospitals = getHospitalsList($pdo);
@@ -2592,7 +2612,7 @@ if (isset($_POST['action']) && $_POST['action'] !== 'login' && $_POST['action'] 
                 echo json_encode(['success' => false, 'message' => 'لم يتم التعرّف على أي مستشفى. استخدم صيغة: اسم عربي | اسم إنجليزي | رقم الترخيص | البادئة (GSL/PSL)']);
                 exit;
             }
-            $checkHospStmt = $pdo->prepare("SELECT id FROM hospitals WHERE name_ar = ? LIMIT 1");
+            $checkHospStmt = $pdo->prepare("SELECT id FROM hospitals WHERE name_ar = ? AND deleted_at IS NULL LIMIT 1");
             $insertHospStmt = $pdo->prepare("INSERT INTO hospitals (name_ar, name_en, license_number, service_prefix) VALUES (?, ?, ?, ?)");
             $insertedHosp = 0; $duplicatesHosp = 0; $errorsHosp = [];
             foreach ($lines as $index => $line) {
@@ -7051,7 +7071,7 @@ if (!in_array($uiDataViewMode, ['table','compact','cards','zebra','glass','minim
             </div>
             <div class="modal-footer">
                 <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">إلغاء</button>
-                <button type="submit" form="editHospitalForm" class="btn btn-success-custom" id="saveEditHospital">حفظ</button>
+                <button type="button" class="btn btn-success-custom" id="saveEditHospital" onclick="window.saveEditHospitalDirect && window.saveEditHospitalDirect()">حفظ</button>
             </div>
         </div>
     </div>
@@ -11453,16 +11473,19 @@ setupSelectQuickSearch('batch_hospital_search', 'batch_hospital_id');
         }
     }
 
+    window.saveEditHospitalDirect = async function() {
+        await submitEditHospitalForm(document.getElementById('editHospitalForm'));
+    };
+
     document.getElementById('editHospitalForm')?.addEventListener('submit', async (e) => {
         e.preventDefault();
         e.stopPropagation();
         await submitEditHospitalForm(e.currentTarget);
     });
     document.getElementById('saveEditHospital')?.addEventListener('click', async (e) => {
-        const formEl = document.getElementById('editHospitalForm');
-        if (formEl && typeof formEl.requestSubmit === 'function') return;
         e.preventDefault();
-        await submitEditHospitalForm(formEl);
+        e.stopPropagation();
+        await submitEditHospitalForm(document.getElementById('editHospitalForm'));
     });
     // ====== ربط المستشفى بالأطباء + البادئة ======
     document.getElementById('hospital_id')?.addEventListener('change', function() {

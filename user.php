@@ -22,6 +22,7 @@ header('Referrer-Policy: strict-origin-when-cross-origin');
 header('Permissions-Policy: geolocation=(), microphone=(), camera=()');
 header('Content-Security-Policy: default-src \'self\'; script-src \'self\' \'unsafe-inline\' https://cdn.jsdelivr.net https://cdnjs.cloudflare.com; style-src \'self\' \'unsafe-inline\' https://cdn.jsdelivr.net https://cdnjs.cloudflare.com https://fonts.googleapis.com; font-src \'self\' https://fonts.gstatic.com https://cdnjs.cloudflare.com; img-src \'self\' data: https:; connect-src \'self\';');
 header('Strict-Transport-Security: max-age=31536000; includeSubDomains');
+header('X-Robots-Tag: noindex, nofollow, noarchive');
 
 // منع عرض أخطاء PHP للمستخدمين
 ini_set('display_errors', '0');
@@ -51,6 +52,7 @@ try {
 }
 
 $pdo->exec("SET time_zone = '+03:00'");
+try { $pdo->exec("ALTER TABLE hospitals ADD COLUMN deleted_at DATETIME NULL"); } catch (Throwable $e) {}
 
 // ======================== دوال الأمان ========================
 function patient_csrf_token(): string {
@@ -338,7 +340,7 @@ if ($action === 'create_sick_leave' && isPatientLoggedIn()) {
         $issuePeriod = $manualPeriod;
     }
 
-    $hospStmt = $pdo->prepare("SELECT * FROM hospitals WHERE id = ?");
+    $hospStmt = $pdo->prepare("SELECT * FROM hospitals WHERE id = ? AND deleted_at IS NULL");
     $hospStmt->execute([$hospitalId]);
     $hosp = $hospStmt->fetch();
 
@@ -405,7 +407,11 @@ if ($action === 'generate_pdf' && isPatientLoggedIn()) {
     $leaveId = (int)($_GET['leave_id'] ?? 0);
     $userId  = (int)$_SESSION['patient_user_id'];
     $patientId = (int)$_SESSION['patient_id'];
-    $pdfMode = $_GET['pdf_mode'] ?? 'download';
+    $pdfMode = 'download'; // Patient portal never exposes preview mode, even if the URL is manually changed.
+    if (!patient_verify_csrf($_GET['csrf_token'] ?? '')) {
+        http_response_code(403);
+        exit('Forbidden');
+    }
 
     $stmt = $pdo->prepare("
         SELECT sl.*,
@@ -608,6 +614,9 @@ if ($action === 'generate_pdf' && isPatientLoggedIn()) {
             header('Content-Type: application/pdf');
             header('Content-Disposition: attachment; filename="SickLeave_' . $scFile . '.pdf"');
             header('Content-Length: ' . filesize($pdfFile));
+            header('Cache-Control: no-store, no-cache, must-revalidate, max-age=0');
+            header('Pragma: no-cache');
+            header('X-Content-Type-Options: nosniff');
             readfile($pdfFile);
             @unlink($htmlFile);
             @unlink($pdfFile);
@@ -742,7 +751,7 @@ if (isPatientLoggedIn()) {
     $stmt->execute([$patientId, $userId]);
     $myLeaves = $stmt->fetchAll();
 
-    $hospitals = $pdo->query("SELECT id, name_ar, name_en FROM hospitals ORDER BY name_ar")->fetchAll();
+    $hospitals = $pdo->query("SELECT id, name_ar, name_en FROM hospitals WHERE deleted_at IS NULL ORDER BY name_ar")->fetchAll();
 
     $usedDays = getUsedDaysUser($pdo, $patientId, $userId);
     $remainingDays = max(0, $allowedDays - $usedDays);
@@ -1568,6 +1577,7 @@ body {
 <?php endif; ?>
 
 <script>
+const PATIENT_CSRF_TOKEN = '<?php echo patient_csrf_token(); ?>';
 // ═══ Theme Toggle ═══
 function toggleTheme() {
   const html = document.documentElement;
@@ -1678,7 +1688,7 @@ function submitLeave(e) {
 
 // ═══ View Leave ═══
 function viewLeave(id) {
-  const url = 'user.php?action=generate_pdf&leave_id=' + encodeURIComponent(id) + '&pdf_mode=download';
+  const url = 'user.php?action=generate_pdf&leave_id=' + encodeURIComponent(id) + '&pdf_mode=download&csrf_token=' + encodeURIComponent(PATIENT_CSRF_TOKEN);
   let frame = document.getElementById('pdfDownloadFrame');
   if (!frame) {
     frame = document.createElement('iframe');
