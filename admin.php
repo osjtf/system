@@ -291,6 +291,21 @@ try { ensureIndex($pdo, 'user_messages', 'idx_user_messages_scope_created', 'cha
 try { ensureIndex($pdo, 'user_messages', 'idx_user_messages_broadcast', 'broadcast_group_id'); } catch(Exception $e) {}
 try { ensureIndex($pdo, 'user_messages', 'idx_user_messages_deleted', 'deleted_at'); } catch(Exception $e) {}
 
+// ======================== جدول مدفوعات الحسابات ========================
+$pdo->exec("CREATE TABLE IF NOT EXISTS account_payments (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    user_id INT NOT NULL,
+    amount DECIMAL(10,2) NOT NULL DEFAULT 0,
+    note VARCHAR(500) NULL,
+    paid_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    created_by INT NULL,
+    FOREIGN KEY (user_id) REFERENCES admin_users(id) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci");
+
+// أعمدة patient_accounts الجديدة
+ensureColumn($pdo, 'patient_accounts', 'expiry_date', "DATE NULL AFTER allowed_days");
+ensureColumn($pdo, 'patient_accounts', 'notes', "TEXT NULL AFTER expiry_date");
+
 // إنشاء مستخدم افتراضي إذا لم يوجد أي مستخدم
 $stmt = $pdo->query("SELECT COUNT(*) as cnt FROM admin_users");
 $userCount = $stmt->fetch()['cnt'];
@@ -3023,6 +3038,8 @@ if (isset($_POST['action']) && $_POST['action'] !== 'login' && $_POST['action'] 
                 user_id INT NOT NULL UNIQUE,
                 patient_id INT NOT NULL,
                 allowed_days INT DEFAULT 0,
+                expiry_date DATE NULL,
+                notes TEXT NULL,
                 FOREIGN KEY (user_id) REFERENCES admin_users(id) ON DELETE CASCADE,
                 FOREIGN KEY (patient_id) REFERENCES patients(id) ON DELETE CASCADE
             ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci");
@@ -3052,6 +3069,147 @@ if (isset($_POST['action']) && $_POST['action'] !== 'login' && $_POST['action'] 
             $pa = $stmt->fetch();
             $patients_list = $pdo->query("SELECT id, name_ar, identity_number FROM patients ORDER BY name_ar")->fetchAll();
             echo json_encode(['success' => true, 'account' => $pa ?: null, 'patients' => $patients_list]);
+            break;
+
+        // ======================== إدارة الحسابات المتقدمة ========================
+        case 'fetch_accounts_full':
+            if ($_SESSION['admin_role'] !== 'admin') { echo json_encode(['success'=>false,'message'=>'ليس لديك صلاحية.']); exit; }
+            // Ensure account_payments table exists
+            $pdo->exec("CREATE TABLE IF NOT EXISTS account_payments (
+                id INT AUTO_INCREMENT PRIMARY KEY,
+                user_id INT NOT NULL,
+                amount DECIMAL(10,2) NOT NULL DEFAULT 0,
+                note VARCHAR(500) NULL,
+                paid_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                created_by INT NULL,
+                FOREIGN KEY (user_id) REFERENCES admin_users(id) ON DELETE CASCADE
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci");
+            ensureColumn($pdo, 'patient_accounts', 'expiry_date', "DATE NULL AFTER allowed_days");
+            ensureColumn($pdo, 'patient_accounts', 'notes', "TEXT NULL AFTER expiry_date");
+            $accounts = $pdo->query("
+                SELECT u.id, u.username, u.display_name, u.role, u.is_active, u.created_at,
+                       pa.patient_id AS linked_patient_id, pa.allowed_days AS patient_allowed_days,
+                       pa.expiry_date, pa.notes AS account_notes,
+                       p.name_ar AS linked_patient_name, p.identity_number AS patient_identity,
+                       COALESCE((SELECT SUM(amount) FROM account_payments WHERE user_id = u.id), 0) AS total_paid,
+                       COALESCE((SELECT COUNT(*) FROM account_payments WHERE user_id = u.id), 0) AS payment_count
+                FROM admin_users u
+                LEFT JOIN patient_accounts pa ON pa.user_id = u.id
+                LEFT JOIN patients p ON pa.patient_id = p.id
+                ORDER BY u.created_at DESC
+            ")->fetchAll();
+            echo json_encode(['success'=>true,'accounts'=>$accounts]);
+            break;
+
+        case 'account_add_days':
+            if ($_SESSION['admin_role'] !== 'admin') { echo json_encode(['success'=>false,'message'=>'ليس لديك صلاحية.']); exit; }
+            ensureColumn($pdo, 'patient_accounts', 'expiry_date', "DATE NULL AFTER allowed_days");
+            ensureColumn($pdo, 'patient_accounts', 'notes', "TEXT NULL AFTER expiry_date");
+            $uid = intval($_POST['user_id'] ?? 0);
+            $days = intval($_POST['days'] ?? 0);
+            $amount = floatval($_POST['amount'] ?? 0);
+            $note = trim($_POST['note'] ?? '');
+            $expiry = trim($_POST['expiry_date'] ?? '');
+            if ($uid <= 0 || $days <= 0) { echo json_encode(['success'=>false,'message'=>'بيانات غير صالحة.']); exit; }
+            // Check if patient_accounts row exists
+            $checkStmt = $pdo->prepare("SELECT id FROM patient_accounts WHERE user_id = ?");
+            $checkStmt->execute([$uid]);
+            if ($checkStmt->fetch()) {
+                // Update allowed_days
+                $updStmt = $pdo->prepare("UPDATE patient_accounts SET allowed_days = allowed_days + ?" . ($expiry ? ", expiry_date = ?" : "") . " WHERE user_id = ?");
+                if ($expiry) { $updStmt->execute([$days, $expiry, $uid]); }
+                else { $updStmt->execute([$days, $uid]); }
+            } else {
+                // Insert new row (patient_id = 0 means unlinked)
+                $pdo->prepare("INSERT INTO patient_accounts (user_id, patient_id, allowed_days, expiry_date) VALUES (?, 0, ?, ?)")->execute([$uid, $days, $expiry ?: null]);
+            }
+            // Record payment if amount > 0
+            if ($amount > 0) {
+                $pdo->exec("CREATE TABLE IF NOT EXISTS account_payments (
+                    id INT AUTO_INCREMENT PRIMARY KEY,
+                    user_id INT NOT NULL,
+                    amount DECIMAL(10,2) NOT NULL DEFAULT 0,
+                    note VARCHAR(500) NULL,
+                    paid_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                    created_by INT NULL,
+                    FOREIGN KEY (user_id) REFERENCES admin_users(id) ON DELETE CASCADE
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci");
+                $pdo->prepare("INSERT INTO account_payments (user_id, amount, note, created_by) VALUES (?,?,?,?)")->execute([$uid, $amount, $note ?: "إضافة $days يوم", intval($_SESSION['admin_user_id'])]);
+            }
+            echo json_encode(['success'=>true,'message'=>"تمت إضافة $days يوم بنجاح."]);
+            break;
+
+        case 'account_toggle_status':
+            if ($_SESSION['admin_role'] !== 'admin') { echo json_encode(['success'=>false,'message'=>'ليس لديك صلاحية.']); exit; }
+            $uid = intval($_POST['user_id'] ?? 0);
+            $status = intval($_POST['status'] ?? 0);
+            if ($uid == $_SESSION['admin_user_id']) { echo json_encode(['success'=>false,'message'=>'لا يمكنك تعطيل حسابك الخاص.']); exit; }
+            $pdo->prepare("UPDATE admin_users SET is_active = ? WHERE id = ?")->execute([$status, $uid]);
+            echo json_encode(['success'=>true,'message'=>$status ? 'تم تفعيل الحساب.' : 'تم تعطيل الحساب.']);
+            break;
+
+        case 'account_update_password':
+            if ($_SESSION['admin_role'] !== 'admin') { echo json_encode(['success'=>false,'message'=>'ليس لديك صلاحية.']); exit; }
+            $uid = intval($_POST['user_id'] ?? 0);
+            $newpass = $_POST['new_password'] ?? '';
+            if ($uid <= 0 || strlen($newpass) < 4) { echo json_encode(['success'=>false,'message'=>'كلمة المرور يجب أن تكون 4 أحرف على الأقل.']); exit; }
+            $pdo->prepare("UPDATE admin_users SET password_hash = ? WHERE id = ?")->execute([password_hash($newpass, PASSWORD_DEFAULT), $uid]);
+            echo json_encode(['success'=>true,'message'=>'تم تغيير كلمة المرور بنجاح.']);
+            break;
+
+        case 'account_fetch_payments':
+            if ($_SESSION['admin_role'] !== 'admin') { echo json_encode(['success'=>false,'message'=>'ليس لديك صلاحية.']); exit; }
+            $pdo->exec("CREATE TABLE IF NOT EXISTS account_payments (
+                id INT AUTO_INCREMENT PRIMARY KEY,
+                user_id INT NOT NULL,
+                amount DECIMAL(10,2) NOT NULL DEFAULT 0,
+                note VARCHAR(500) NULL,
+                paid_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                created_by INT NULL,
+                FOREIGN KEY (user_id) REFERENCES admin_users(id) ON DELETE CASCADE
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci");
+            $uid = intval($_GET['user_id'] ?? 0);
+            $stmt = $pdo->prepare("SELECT ap.*, au.display_name AS created_by_name FROM account_payments ap LEFT JOIN admin_users au ON ap.created_by = au.id WHERE ap.user_id = ? ORDER BY ap.paid_at DESC");
+            $stmt->execute([$uid]);
+            echo json_encode(['success'=>true,'payments'=>$stmt->fetchAll()]);
+            break;
+
+        case 'account_delete_payment':
+            if ($_SESSION['admin_role'] !== 'admin') { echo json_encode(['success'=>false,'message'=>'ليس لديك صلاحية.']); exit; }
+            $pid = intval($_POST['payment_id'] ?? 0);
+            $pdo->prepare("DELETE FROM account_payments WHERE id = ?")->execute([$pid]);
+            echo json_encode(['success'=>true,'message'=>'تم حذف سجل الدفع.']);
+            break;
+
+        case 'account_link_patient':
+            if ($_SESSION['admin_role'] !== 'admin') { echo json_encode(['success'=>false,'message'=>'ليس لديك صلاحية.']); exit; }
+            ensureColumn($pdo, 'patient_accounts', 'expiry_date', "DATE NULL AFTER allowed_days");
+            ensureColumn($pdo, 'patient_accounts', 'notes', "TEXT NULL AFTER expiry_date");
+            $uid = intval($_POST['user_id'] ?? 0);
+            $pid = intval($_POST['patient_id'] ?? 0);
+            $allowed = intval($_POST['allowed_days'] ?? 0);
+            $expiry = trim($_POST['expiry_date'] ?? '');
+            $notes = trim($_POST['notes'] ?? '');
+            if ($uid <= 0) { echo json_encode(['success'=>false,'message'=>'معرّف المستخدم غير صالح.']); exit; }
+            if ($pid > 0) {
+                $pdo->prepare("INSERT INTO patient_accounts (user_id, patient_id, allowed_days, expiry_date, notes) VALUES (?,?,?,?,?) ON DUPLICATE KEY UPDATE patient_id=VALUES(patient_id), allowed_days=VALUES(allowed_days), expiry_date=VALUES(expiry_date), notes=VALUES(notes)")->execute([$uid, $pid, $allowed, $expiry ?: null, $notes]);
+            } else {
+                $pdo->prepare("DELETE FROM patient_accounts WHERE user_id = ?")->execute([$uid]);
+            }
+            echo json_encode(['success'=>true,'message'=>'تم تحديث ربط الحساب بالمريض.']);
+            break;
+
+        case 'account_add_user':
+            if ($_SESSION['admin_role'] !== 'admin') { echo json_encode(['success'=>false,'message'=>'ليس لديك صلاحية.']); exit; }
+            $username = trim($_POST['username'] ?? '');
+            $password = $_POST['password'] ?? '';
+            $display_name = trim($_POST['display_name'] ?? '');
+            $role = in_array($_POST['role'] ?? '', ['admin','user']) ? $_POST['role'] : 'user';
+            if (empty($username) || empty($password) || empty($display_name)) { echo json_encode(['success'=>false,'message'=>'يرجى تعبئة جميع الحقول.']); exit; }
+            $check = $pdo->prepare("SELECT id FROM admin_users WHERE username = ?"); $check->execute([$username]);
+            if ($check->fetch()) { echo json_encode(['success'=>false,'message'=>'اسم المستخدم موجود مسبقاً.']); exit; }
+            $pdo->prepare("INSERT INTO admin_users (username, password_hash, display_name, role) VALUES (?,?,?,?)")->execute([$username, password_hash($password, PASSWORD_DEFAULT), $display_name, $role]);
+            echo json_encode(['success'=>true,'message'=>'تمت إضافة الحساب بنجاح.']);
             break;
 
         default:
@@ -4861,6 +5019,203 @@ if (!in_array($uiDataViewMode, ['table','compact','cards','zebra','glass','minim
             body::before { display: none !important; }
             .card-custom { box-shadow: none !important; border: 1px solid #ddd !important; }
         }
+
+        /* ═══════════════ إدارة الحسابات ═══════════════ */
+        .accounts-mgmt-wrap { padding: 4px 0; }
+
+        /* Stats Cards */
+        .acct-stat-card {
+            border-radius: var(--radius);
+            padding: 20px 16px;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            gap: 6px;
+            text-align: center;
+            position: relative;
+            overflow: hidden;
+            transition: transform var(--t-fast) var(--ease), box-shadow var(--t-fast) var(--ease);
+            cursor: default;
+        }
+        .acct-stat-card:hover { transform: translateY(-3px); box-shadow: var(--shadow-lg); }
+        .acct-stat-card::before {
+            content: '';
+            position: absolute;
+            top: -30px; right: -30px;
+            width: 100px; height: 100px;
+            border-radius: 50%;
+            opacity: 0.12;
+        }
+        .acct-stat-total { background: linear-gradient(135deg, #6366f1, #8b5cf6); color: #fff; box-shadow: 0 8px 24px rgba(99,102,241,0.35); }
+        .acct-stat-total::before { background: #fff; }
+        .acct-stat-active { background: linear-gradient(135deg, #10b981, #34d399); color: #fff; box-shadow: 0 8px 24px rgba(16,185,129,0.35); }
+        .acct-stat-active::before { background: #fff; }
+        .acct-stat-disabled { background: linear-gradient(135deg, #ef4444, #f87171); color: #fff; box-shadow: 0 8px 24px rgba(239,68,68,0.35); }
+        .acct-stat-disabled::before { background: #fff; }
+        .acct-stat-revenue { background: linear-gradient(135deg, #f59e0b, #fbbf24); color: #fff; box-shadow: 0 8px 24px rgba(245,158,11,0.35); }
+        .acct-stat-revenue::before { background: #fff; }
+        .acct-stat-icon { font-size: 28px; opacity: 0.9; }
+        .acct-stat-val { font-size: 28px; font-weight: 800; line-height: 1; }
+        .acct-stat-lbl { font-size: 12px; opacity: 0.85; font-weight: 600; }
+
+        /* Toolbar */
+        .acct-toolbar {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 10px;
+            align-items: center;
+        }
+
+        /* Account Card */
+        .acct-card {
+            background: var(--card);
+            border-radius: var(--radius);
+            border: 1.5px solid var(--border);
+            box-shadow: var(--shadow);
+            overflow: hidden;
+            transition: transform var(--t-fast) var(--ease), box-shadow var(--t-fast) var(--ease), border-color var(--t-fast);
+            position: relative;
+        }
+        .acct-card:hover { transform: translateY(-4px); box-shadow: var(--shadow-lg); border-color: var(--primary-light); }
+        .acct-card.acct-disabled { opacity: 0.72; border-color: var(--danger); }
+        .acct-card.acct-expired { border-color: var(--warning); }
+
+        .acct-card-header {
+            padding: 16px 18px 12px;
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            border-bottom: 1px solid var(--border-light);
+            position: relative;
+        }
+        .acct-avatar {
+            width: 48px; height: 48px;
+            border-radius: 50%;
+            display: flex; align-items: center; justify-content: center;
+            font-size: 20px; font-weight: 800;
+            flex-shrink: 0;
+            color: #fff;
+        }
+        .acct-avatar.role-admin { background: linear-gradient(135deg, #ef4444, #f87171); }
+        .acct-avatar.role-user { background: linear-gradient(135deg, #6366f1, #8b5cf6); }
+
+        .acct-card-title { flex: 1; min-width: 0; }
+        .acct-card-title .acct-username { font-size: 15px; font-weight: 700; color: var(--text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+        .acct-card-title .acct-display { font-size: 12px; color: var(--text-muted); }
+
+        .acct-status-dot {
+            width: 10px; height: 10px;
+            border-radius: 50%;
+            flex-shrink: 0;
+        }
+        .acct-status-dot.active { background: var(--success); box-shadow: 0 0 6px var(--success); }
+        .acct-status-dot.inactive { background: var(--danger); }
+
+        .acct-card-body { padding: 14px 18px; }
+
+        .acct-info-row {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            margin-bottom: 8px;
+            font-size: 13px;
+        }
+        .acct-info-row i { color: var(--primary); width: 16px; flex-shrink: 0; }
+        .acct-info-row .acct-info-label { color: var(--text-muted); min-width: 80px; }
+        .acct-info-row .acct-info-val { color: var(--text); font-weight: 600; }
+
+        /* Days Progress */
+        .acct-days-wrap { margin: 12px 0; }
+        .acct-days-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px; font-size: 12px; }
+        .acct-days-label { color: var(--text-muted); font-weight: 600; }
+        .acct-days-count { font-weight: 800; font-size: 14px; }
+        .acct-days-count.ok { color: var(--success); }
+        .acct-days-count.warn { color: var(--warning); }
+        .acct-days-count.empty { color: var(--danger); }
+        .acct-progress {
+            height: 8px;
+            border-radius: 99px;
+            background: var(--border);
+            overflow: hidden;
+        }
+        .acct-progress-bar {
+            height: 100%;
+            border-radius: 99px;
+            transition: width 0.6s var(--ease);
+        }
+        .acct-progress-bar.ok { background: linear-gradient(90deg, #10b981, #34d399); }
+        .acct-progress-bar.warn { background: linear-gradient(90deg, #f59e0b, #fbbf24); }
+        .acct-progress-bar.empty { background: linear-gradient(90deg, #ef4444, #f87171); }
+
+        /* Payment Badge */
+        .acct-payment-badge {
+            display: inline-flex;
+            align-items: center;
+            gap: 5px;
+            background: linear-gradient(135deg, rgba(16,185,129,0.12), rgba(52,211,153,0.08));
+            border: 1px solid rgba(16,185,129,0.25);
+            color: var(--success);
+            border-radius: 20px;
+            padding: 3px 10px;
+            font-size: 12px;
+            font-weight: 700;
+        }
+
+        /* Expiry Badge */
+        .acct-expiry-badge {
+            display: inline-flex;
+            align-items: center;
+            gap: 5px;
+            border-radius: 20px;
+            padding: 3px 10px;
+            font-size: 11px;
+            font-weight: 600;
+        }
+        .acct-expiry-badge.ok { background: rgba(16,185,129,0.1); color: var(--success); border: 1px solid rgba(16,185,129,0.2); }
+        .acct-expiry-badge.warn { background: rgba(245,158,11,0.1); color: var(--warning); border: 1px solid rgba(245,158,11,0.2); }
+        .acct-expiry-badge.expired { background: rgba(239,68,68,0.1); color: var(--danger); border: 1px solid rgba(239,68,68,0.2); }
+
+        /* Card Actions */
+        .acct-card-actions {
+            padding: 10px 18px 14px;
+            display: flex;
+            flex-wrap: wrap;
+            gap: 6px;
+            border-top: 1px solid var(--border-light);
+        }
+        .acct-card-actions .btn { font-size: 12px; padding: 5px 10px; border-radius: 8px; }
+
+        /* Role Badge */
+        .acct-role-badge {
+            position: absolute;
+            top: 10px;
+            left: 12px;
+            font-size: 10px;
+            font-weight: 700;
+            padding: 2px 8px;
+            border-radius: 20px;
+        }
+
+        /* Dark mode adjustments */
+        .dark-mode .acct-card { background: var(--card); border-color: var(--border); }
+        .dark-mode .acct-card:hover { border-color: var(--primary-light); }
+        .dark-mode .acct-progress { background: rgba(148,163,184,0.15); }
+
+        /* Payments History List */
+        .payment-history-item {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 10px 14px;
+            border-radius: 10px;
+            background: var(--bg-alt);
+            margin-bottom: 8px;
+            gap: 10px;
+        }
+        .payment-history-item .ph-amount { font-size: 16px; font-weight: 800; color: var(--success); }
+        .payment-history-item .ph-note { font-size: 12px; color: var(--text-muted); }
+        .payment-history-item .ph-date { font-size: 11px; color: var(--text-muted); }
+        .dark-mode .payment-history-item { background: rgba(148,163,184,0.08); }
     </style>
 </head>
 <body>
@@ -5018,6 +5373,13 @@ if (!in_array($uiDataViewMode, ['table','compact','cards','zebra','glass','minim
                 <i class="bi bi-people"></i> المرضى
             </button>
         </li>
+        <?php if ($_SESSION['admin_role'] === 'admin'): ?>
+        <li class="nav-item" role="presentation">
+            <button class="nav-link" id="tab-accounts" data-bs-toggle="tab" data-bs-target="#pane-accounts" type="button" role="tab">
+                <i class="bi bi-shield-lock"></i> إدارة الحسابات
+            </button>
+        </li>
+        <?php endif; ?>
         <li class="nav-item" role="presentation">
             <button class="nav-link" id="tab-chat" data-bs-toggle="tab" data-bs-target="#pane-chat" type="button" role="tab">
                 <i class="bi bi-chat-dots"></i> المراسلات <span class="badge bg-danger ms-1" id="chatUnreadBadge" style="display:none;">0</span>
@@ -5441,6 +5803,72 @@ if (!in_array($uiDataViewMode, ['table','compact','cards','zebra','glass','minim
                 </div>
             </div>
         </div>
+
+        <!-- ======================== تبويب إدارة الحسابات ======================== -->
+        <?php if ($loggedIn && $_SESSION['admin_role'] === 'admin'): ?>
+        <div class="tab-pane fade" id="pane-accounts" role="tabpanel">
+            <div class="accounts-mgmt-wrap">
+                <!-- Header Stats Row -->
+                <div class="row g-3 mb-4" id="accountsStatsRow">
+                    <div class="col-6 col-md-3">
+                        <div class="acct-stat-card acct-stat-total">
+                            <div class="acct-stat-icon"><i class="bi bi-people-fill"></i></div>
+                            <div class="acct-stat-val" id="acctStatTotal">0</div>
+                            <div class="acct-stat-lbl">إجمالي الحسابات</div>
+                        </div>
+                    </div>
+                    <div class="col-6 col-md-3">
+                        <div class="acct-stat-card acct-stat-active">
+                            <div class="acct-stat-icon"><i class="bi bi-check-circle-fill"></i></div>
+                            <div class="acct-stat-val" id="acctStatActive">0</div>
+                            <div class="acct-stat-lbl">حسابات نشطة</div>
+                        </div>
+                    </div>
+                    <div class="col-6 col-md-3">
+                        <div class="acct-stat-card acct-stat-disabled">
+                            <div class="acct-stat-icon"><i class="bi bi-slash-circle-fill"></i></div>
+                            <div class="acct-stat-val" id="acctStatDisabled">0</div>
+                            <div class="acct-stat-lbl">حسابات معطلة</div>
+                        </div>
+                    </div>
+                    <div class="col-6 col-md-3">
+                        <div class="acct-stat-card acct-stat-revenue">
+                            <div class="acct-stat-icon"><i class="bi bi-cash-coin"></i></div>
+                            <div class="acct-stat-val" id="acctStatRevenue">0</div>
+                            <div class="acct-stat-lbl">إجمالي المدفوعات</div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Toolbar -->
+                <div class="acct-toolbar mb-3">
+                    <div class="input-group" style="max-width:280px;">
+                        <input type="text" class="form-control" id="acctSearch" placeholder="بحث باسم المستخدم أو المريض...">
+                        <button class="btn btn-gradient" id="acctSearchBtn"><i class="bi bi-search"></i></button>
+                    </div>
+                    <div class="btn-group btn-group-sm">
+                        <button class="btn btn-outline-success" id="acctFilterActive">نشط</button>
+                        <button class="btn btn-outline-danger" id="acctFilterDisabled">معطل</button>
+                        <button class="btn btn-outline-secondary active" id="acctFilterAll">الكل</button>
+                    </div>
+                    <button class="btn btn-gradient btn-sm" id="acctAddUserBtn"><i class="bi bi-person-plus-fill"></i> إضافة حساب جديد</button>
+                    <button class="btn btn-outline-secondary btn-sm" id="acctRefreshBtn"><i class="bi bi-arrow-repeat"></i> تحديث</button>
+                </div>
+
+                <!-- Accounts Grid -->
+                <div class="row g-3" id="accountsGrid">
+                    <div class="col-12 text-center py-5 text-muted" id="accountsGridLoading" style="display:none;">
+                        <div class="spinner-border text-primary" role="status"></div>
+                        <p class="mt-2">جارٍ تحميل الحسابات...</p>
+                    </div>
+                    <div class="col-12 text-center py-5 text-muted" id="accountsGridEmpty">
+                        <i class="bi bi-people" style="font-size:48px;opacity:0.3;"></i>
+                        <p class="mt-2">اضغط على تبويب "إدارة الحسابات" لتحميل البيانات</p>
+                    </div>
+                </div>
+            </div>
+        </div>
+        <?php endif; ?>
 
         <div class="tab-pane fade" id="pane-chat" role="tabpanel">
             <div class="card-custom">
@@ -6352,6 +6780,180 @@ if (!in_array($uiDataViewMode, ['table','compact','cards','zebra','glass','minim
                 </div>
             </div>
             <div class="modal-footer"><button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">إغلاق</button></div>
+        </div>
+    </div>
+</div>
+<?php endif; ?>
+
+<!-- ======================== مودال إضافة أيام للحساب ======================== -->
+<?php if ($loggedIn && $_SESSION['admin_role'] === 'admin'): ?>
+<div class="modal fade" id="acctAddDaysModal" tabindex="-1" aria-hidden="true">
+    <div class="modal-dialog modal-dialog-centered">
+        <div class="modal-content">
+            <div class="modal-header" style="background:linear-gradient(135deg,#6366f1,#8b5cf6);color:#fff;">
+                <h5 class="modal-title"><i class="bi bi-calendar-plus-fill"></i> إضافة أيام للحساب</h5>
+                <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body">
+                <input type="hidden" id="acctAddDaysUserId">
+                <div class="mb-3">
+                    <label class="form-label fw-bold">المستخدم</label>
+                    <div class="alert alert-info py-2 px-3 mb-0" id="acctAddDaysUserInfo" style="font-size:13px;"></div>
+                </div>
+                <div class="row g-2">
+                    <div class="col-6">
+                        <label class="form-label fw-bold">عدد الأيام المضافة <span class="text-danger">*</span></label>
+                        <input type="number" class="form-control" id="acctAddDaysCount" min="1" max="3650" placeholder="مثال: 30">
+                    </div>
+                    <div class="col-6">
+                        <label class="form-label fw-bold">المبلغ المدفوع (ريال)</label>
+                        <input type="number" class="form-control" id="acctAddDaysAmount" min="0" step="0.01" placeholder="0.00">
+                    </div>
+                    <div class="col-12">
+                        <label class="form-label fw-bold">تاريخ انتهاء الصلاحية</label>
+                        <input type="date" class="form-control" id="acctAddDaysExpiry">
+                        <div class="form-text">اتركه فارغاً إذا لم يكن هناك تاريخ انتهاء.</div>
+                    </div>
+                    <div class="col-12">
+                        <label class="form-label fw-bold">ملاحظة</label>
+                        <input type="text" class="form-control" id="acctAddDaysNote" placeholder="مثال: دفعة شهر يناير">
+                    </div>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">إلغاء</button>
+                <button type="button" class="btn btn-gradient" id="acctAddDaysSave"><i class="bi bi-plus-circle"></i> إضافة الأيام</button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- ======================== مودال ربط المريض بالحساب ======================== -->
+<div class="modal fade" id="acctLinkPatientModal" tabindex="-1" aria-hidden="true">
+    <div class="modal-dialog modal-dialog-centered">
+        <div class="modal-content">
+            <div class="modal-header" style="background:linear-gradient(135deg,#1e40af,#3b82f6);color:#fff;">
+                <h5 class="modal-title"><i class="bi bi-person-badge-fill"></i> ربط الحساب بمريض</h5>
+                <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body">
+                <input type="hidden" id="acctLinkUserId">
+                <div class="mb-3">
+                    <label class="form-label fw-bold">المريض المرتبط</label>
+                    <select class="form-select" id="acctLinkPatientId">
+                        <option value="0">-- بدون ربط (تعطيل الوصول) --</option>
+                    </select>
+                </div>
+                <div class="row g-2">
+                    <div class="col-6">
+                        <label class="form-label fw-bold">عدد الأيام المسموحة</label>
+                        <input type="number" class="form-control" id="acctLinkAllowedDays" min="0" value="0">
+                    </div>
+                    <div class="col-6">
+                        <label class="form-label fw-bold">تاريخ انتهاء الصلاحية</label>
+                        <input type="date" class="form-control" id="acctLinkExpiry">
+                    </div>
+                    <div class="col-12">
+                        <label class="form-label fw-bold">ملاحظات</label>
+                        <textarea class="form-control" id="acctLinkNotes" rows="2" placeholder="ملاحظات اختيارية..."></textarea>
+                    </div>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">إلغاء</button>
+                <button type="button" class="btn btn-gradient" id="acctLinkPatientSave"><i class="bi bi-save"></i> حفظ</button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- ======================== مودال تغيير كلمة المرور ======================== -->
+<div class="modal fade" id="acctChangePassModal" tabindex="-1" aria-hidden="true">
+    <div class="modal-dialog modal-dialog-centered">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title"><i class="bi bi-key-fill text-warning"></i> تغيير كلمة المرور</h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body">
+                <input type="hidden" id="acctChangePassUserId">
+                <div class="mb-3">
+                    <label class="form-label fw-bold">كلمة المرور الجديدة <span class="text-danger">*</span></label>
+                    <div class="input-group">
+                        <input type="password" class="form-control" id="acctChangePassNewPwd" placeholder="4 أحرف على الأقل">
+                        <button class="btn btn-outline-secondary" type="button" id="acctTogglePass"><i class="bi bi-eye"></i></button>
+                    </div>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">إلغاء</button>
+                <button type="button" class="btn btn-warning" id="acctChangePassSave"><i class="bi bi-key"></i> تغيير</button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- ======================== مودال سجل المدفوعات ======================== -->
+<div class="modal fade" id="acctPaymentsModal" tabindex="-1" aria-hidden="true">
+    <div class="modal-dialog modal-lg modal-dialog-centered modal-dialog-scrollable">
+        <div class="modal-content">
+            <div class="modal-header" style="background:linear-gradient(135deg,#10b981,#34d399);color:#fff;">
+                <h5 class="modal-title"><i class="bi bi-receipt-cutoff"></i> سجل المدفوعات</h5>
+                <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body">
+                <div class="d-flex justify-content-between align-items-center mb-3">
+                    <div>
+                        <strong id="acctPaymentsUserName"></strong>
+                        <div class="text-muted small" id="acctPaymentsTotalWrap">الإجمالي: <strong id="acctPaymentsTotal">0</strong> ريال</div>
+                    </div>
+                </div>
+                <div id="acctPaymentsList">
+                    <div class="text-center py-4 text-muted"><div class="spinner-border spinner-border-sm"></div> جارٍ التحميل...</div>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">إغلاق</button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- ======================== مودال إضافة حساب جديد ======================== -->
+<div class="modal fade" id="acctNewUserModal" tabindex="-1" aria-hidden="true">
+    <div class="modal-dialog modal-dialog-centered">
+        <div class="modal-content">
+            <div class="modal-header" style="background:linear-gradient(135deg,#6366f1,#8b5cf6);color:#fff;">
+                <h5 class="modal-title"><i class="bi bi-person-plus-fill"></i> إضافة حساب جديد</h5>
+                <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body">
+                <div class="row g-2">
+                    <div class="col-12">
+                        <label class="form-label fw-bold">اسم المستخدم <span class="text-danger">*</span></label>
+                        <input type="text" class="form-control" id="acctNewUsername" placeholder="مثال: user01">
+                    </div>
+                    <div class="col-12">
+                        <label class="form-label fw-bold">كلمة المرور <span class="text-danger">*</span></label>
+                        <input type="password" class="form-control" id="acctNewPassword" placeholder="كلمة المرور">
+                    </div>
+                    <div class="col-12">
+                        <label class="form-label fw-bold">الاسم المعروض <span class="text-danger">*</span></label>
+                        <input type="text" class="form-control" id="acctNewDisplayName" placeholder="مثال: أحمد محمد">
+                    </div>
+                    <div class="col-12">
+                        <label class="form-label fw-bold">الدور</label>
+                        <select class="form-select" id="acctNewRole">
+                            <option value="user">مستخدم</option>
+                            <option value="admin">مشرف</option>
+                        </select>
+                    </div>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">إلغاء</button>
+                <button type="button" class="btn btn-gradient" id="acctNewUserSave"><i class="bi bi-plus"></i> إنشاء الحساب</button>
+            </div>
         </div>
     </div>
 </div>
@@ -8507,6 +9109,415 @@ document.addEventListener('DOMContentLoaded', () => {
         });
     }
 
+    // ====== إدارة الحسابات (التبويب الجديد) ======
+    if (IS_ADMIN) {
+        let acctAllData = [];
+        let acctFilterMode = 'all';
+        let acctSearchTerm = '';
+        let acctPatientsCache = [];
+
+        const acctAddDaysModal = new bootstrap.Modal(document.getElementById('acctAddDaysModal'));
+        const acctLinkPatientModal = new bootstrap.Modal(document.getElementById('acctLinkPatientModal'));
+        const acctChangePassModal = new bootstrap.Modal(document.getElementById('acctChangePassModal'));
+        const acctPaymentsModal = new bootstrap.Modal(document.getElementById('acctPaymentsModal'));
+        const acctNewUserModal = new bootstrap.Modal(document.getElementById('acctNewUserModal'));
+
+        function acctGetExpiryStatus(expiryDate) {
+            if (!expiryDate) return null;
+            const today = new Date(); today.setHours(0,0,0,0);
+            const exp = new Date(expiryDate); exp.setHours(0,0,0,0);
+            const diff = Math.ceil((exp - today) / 86400000);
+            if (diff < 0) return { cls: 'expired', label: 'منتهية الصلاحية', diff };
+            if (diff <= 7) return { cls: 'warn', label: `تنتهي خلال ${diff} يوم`, diff };
+            return { cls: 'ok', label: `تنتهي ${expiryDate}`, diff };
+        }
+
+        function acctGetDaysStatus(allowed, used) {
+            const remaining = (allowed || 0) - (used || 0);
+            if (remaining <= 0) return { cls: 'empty', pct: 0, remaining: 0 };
+            const pct = Math.min(100, Math.round((remaining / (allowed || 1)) * 100));
+            if (pct <= 20) return { cls: 'warn', pct, remaining };
+            return { cls: 'ok', pct, remaining };
+        }
+
+        function renderAccountCard(u) {
+            const isActive = u.is_active == 1;
+            const roleClass = u.role === 'admin' ? 'role-admin' : 'role-user';
+            const roleLabel = u.role === 'admin' ? 'مشرف' : 'مستخدم';
+            const roleBadgeColor = u.role === 'admin' ? 'bg-danger' : 'bg-primary';
+            const initials = (u.display_name || u.username || '?').charAt(0).toUpperCase();
+            const expiry = acctGetExpiryStatus(u.expiry_date);
+            const allowedDays = parseInt(u.patient_allowed_days) || 0;
+            const daysStatus = acctGetDaysStatus(allowedDays, 0);
+            const totalPaid = parseFloat(u.total_paid || 0).toFixed(2);
+            const payCount = parseInt(u.payment_count || 0);
+
+            let expiryHtml = '';
+            if (expiry) {
+                expiryHtml = `<span class="acct-expiry-badge ${expiry.cls}"><i class="bi bi-calendar-event"></i> ${htmlspecialchars(expiry.label)}</span>`;
+            }
+
+            let patientHtml = u.linked_patient_id
+                ? `<span class="badge bg-info text-dark"><i class="bi bi-person-check"></i> ${htmlspecialchars(u.linked_patient_name || 'مريض')} — ${htmlspecialchars(u.patient_identity || '')}</span>`
+                : `<span class="badge bg-light text-muted border">غير مرتبط بمريض</span>`;
+
+            let daysHtml = `
+                <div class="acct-days-wrap">
+                    <div class="acct-days-header">
+                        <span class="acct-days-label"><i class="bi bi-calendar-check"></i> الأيام المتاحة</span>
+                        <span class="acct-days-count ${daysStatus.cls}">${allowedDays} يوم</span>
+                    </div>
+                    <div class="acct-progress">
+                        <div class="acct-progress-bar ${daysStatus.cls}" style="width:${daysStatus.pct}%"></div>
+                    </div>
+                </div>`;
+
+            const disabledClass = !isActive ? ' acct-disabled' : '';
+            const expiredClass = (expiry && expiry.cls === 'expired') ? ' acct-expired' : '';
+
+            return `
+            <div class="col-12 col-md-6 col-xl-4 acct-card-col" data-id="${u.id}" data-active="${u.is_active}" data-username="${(u.username||'').toLowerCase()}" data-patient="${(u.linked_patient_name||'').toLowerCase()}">
+                <div class="acct-card${disabledClass}${expiredClass}">
+                    <div class="acct-card-header">
+                        <div class="acct-avatar ${roleClass}">${htmlspecialchars(initials)}</div>
+                        <div class="acct-card-title">
+                            <div class="acct-username">${htmlspecialchars(u.username)}</div>
+                            <div class="acct-display">${htmlspecialchars(u.display_name)}</div>
+                        </div>
+                        <div class="acct-status-dot ${isActive ? 'active' : 'inactive'}" title="${isActive ? 'نشط' : 'معطل'}"></div>
+                        <span class="acct-role-badge badge ${roleBadgeColor}">${roleLabel}</span>
+                    </div>
+                    <div class="acct-card-body">
+                        <div class="acct-info-row">
+                            <i class="bi bi-person-fill"></i>
+                            <span class="acct-info-label">المريض:</span>
+                            <span class="acct-info-val">${patientHtml}</span>
+                        </div>
+                        ${daysHtml}
+                        <div class="d-flex flex-wrap gap-2 align-items-center mt-2">
+                            <span class="acct-payment-badge"><i class="bi bi-cash-coin"></i> ${totalPaid} ريال (${payCount} دفعة)</span>
+                            ${expiryHtml}
+                        </div>
+                        ${u.account_notes ? `<div class="mt-2 text-muted small"><i class="bi bi-sticky"></i> ${htmlspecialchars(u.account_notes)}</div>` : ''}
+                    </div>
+                    <div class="acct-card-actions">
+                        <button class="btn btn-sm btn-gradient acct-btn-add-days" data-id="${u.id}" data-name="${htmlspecialchars(u.display_name)}" data-username="${htmlspecialchars(u.username)}" title="إضافة أيام">
+                            <i class="bi bi-calendar-plus"></i> إضافة أيام
+                        </button>
+                        <button class="btn btn-sm btn-outline-primary acct-btn-link-patient" data-id="${u.id}" title="ربط بمريض">
+                            <i class="bi bi-person-badge"></i> ربط مريض
+                        </button>
+                        <button class="btn btn-sm btn-outline-success acct-btn-payments" data-id="${u.id}" data-name="${htmlspecialchars(u.display_name)}" title="سجل المدفوعات">
+                            <i class="bi bi-receipt"></i> المدفوعات
+                        </button>
+                        <button class="btn btn-sm btn-outline-warning acct-btn-pass" data-id="${u.id}" title="تغيير كلمة المرور">
+                            <i class="bi bi-key"></i>
+                        </button>
+                        <button class="btn btn-sm ${isActive ? 'btn-outline-danger' : 'btn-outline-success'} acct-btn-toggle" data-id="${u.id}" data-active="${u.is_active}" title="${isActive ? 'تعطيل الحساب' : 'تفعيل الحساب'}">
+                            <i class="bi bi-${isActive ? 'slash-circle' : 'check-circle'}"></i> ${isActive ? 'تعطيل' : 'تفعيل'}
+                        </button>
+                    </div>
+                </div>
+            </div>`;
+        }
+
+        function acctUpdateStats(data) {
+            const total = data.length;
+            const active = data.filter(u => u.is_active == 1).length;
+            const disabled = total - active;
+            const revenue = data.reduce((s, u) => s + parseFloat(u.total_paid || 0), 0);
+            document.getElementById('acctStatTotal').textContent = total;
+            document.getElementById('acctStatActive').textContent = active;
+            document.getElementById('acctStatDisabled').textContent = disabled;
+            document.getElementById('acctStatRevenue').textContent = revenue.toFixed(2) + ' ر';
+        }
+
+        function acctRenderGrid(data) {
+            const grid = document.getElementById('accountsGrid');
+            const emptyEl = document.getElementById('accountsGridEmpty');
+            if (emptyEl) emptyEl.style.display = 'none';
+            let filtered = data;
+            if (acctFilterMode === 'active') filtered = data.filter(u => u.is_active == 1);
+            else if (acctFilterMode === 'disabled') filtered = data.filter(u => u.is_active != 1);
+            if (acctSearchTerm) {
+                const s = acctSearchTerm.toLowerCase();
+                filtered = filtered.filter(u =>
+                    (u.username||'').toLowerCase().includes(s) ||
+                    (u.display_name||'').toLowerCase().includes(s) ||
+                    (u.linked_patient_name||'').toLowerCase().includes(s) ||
+                    (u.patient_identity||'').includes(s)
+                );
+            }
+            if (filtered.length === 0) {
+                grid.innerHTML = '<div class="col-12 text-center py-5 text-muted"><i class="bi bi-inbox" style="font-size:48px;opacity:0.3;"></i><p class="mt-2">لا توجد حسابات مطابقة</p></div>';
+                return;
+            }
+            grid.innerHTML = filtered.map(renderAccountCard).join('');
+        }
+
+        async function acctLoadData() {
+            const loadingEl = document.getElementById('accountsGridLoading');
+            const emptyEl = document.getElementById('accountsGridEmpty');
+            if (loadingEl) loadingEl.style.display = 'block';
+            if (emptyEl) emptyEl.style.display = 'none';
+            try {
+                const res = await fetch(`${REQUEST_URL}?action=fetch_accounts_full`, { headers: { 'X-Requested-With': 'XMLHttpRequest' } });
+                const result = await res.json();
+                if (result.success) {
+                    acctAllData = result.accounts || [];
+                    acctUpdateStats(acctAllData);
+                    acctRenderGrid(acctAllData);
+                }
+            } catch(e) { showToast('فشل تحميل الحسابات', 'danger'); }
+            finally { if (loadingEl) loadingEl.style.display = 'none'; }
+        }
+
+        // Load when tab is shown
+        document.getElementById('tab-accounts')?.addEventListener('shown.bs.tab', () => {
+            if (acctAllData.length === 0) acctLoadData();
+        });
+
+        document.getElementById('acctRefreshBtn')?.addEventListener('click', acctLoadData);
+
+        // Search
+        document.getElementById('acctSearch')?.addEventListener('input', function() {
+            acctSearchTerm = this.value.trim();
+            acctRenderGrid(acctAllData);
+        });
+        document.getElementById('acctSearchBtn')?.addEventListener('click', () => {
+            acctSearchTerm = document.getElementById('acctSearch').value.trim();
+            acctRenderGrid(acctAllData);
+        });
+
+        // Filter buttons
+        document.getElementById('acctFilterAll')?.addEventListener('click', function() {
+            acctFilterMode = 'all';
+            document.querySelectorAll('#acctFilterAll,#acctFilterActive,#acctFilterDisabled').forEach(b => b.classList.remove('active'));
+            this.classList.add('active');
+            acctRenderGrid(acctAllData);
+        });
+        document.getElementById('acctFilterActive')?.addEventListener('click', function() {
+            acctFilterMode = 'active';
+            document.querySelectorAll('#acctFilterAll,#acctFilterActive,#acctFilterDisabled').forEach(b => b.classList.remove('active'));
+            this.classList.add('active');
+            acctRenderGrid(acctAllData);
+        });
+        document.getElementById('acctFilterDisabled')?.addEventListener('click', function() {
+            acctFilterMode = 'disabled';
+            document.querySelectorAll('#acctFilterAll,#acctFilterActive,#acctFilterDisabled').forEach(b => b.classList.remove('active'));
+            this.classList.add('active');
+            acctRenderGrid(acctAllData);
+        });
+
+        // Add new user
+        document.getElementById('acctAddUserBtn')?.addEventListener('click', () => acctNewUserModal.show());
+        document.getElementById('acctNewUserSave')?.addEventListener('click', async () => {
+            const username = document.getElementById('acctNewUsername').value.trim();
+            const password = document.getElementById('acctNewPassword').value;
+            const displayName = document.getElementById('acctNewDisplayName').value.trim();
+            const role = document.getElementById('acctNewRole').value;
+            if (!username || !password || !displayName) { showToast('يرجى تعبئة جميع الحقول المطلوبة.', 'warning'); return; }
+            showLoading();
+            const fd = new FormData();
+            fd.append('action', 'account_add_user'); fd.append('csrf_token', CSRF_TOKEN);
+            fd.append('username', username); fd.append('password', password);
+            fd.append('display_name', displayName); fd.append('role', role);
+            const res = await fetch(REQUEST_URL, { method: 'POST', body: fd, headers: { 'X-Requested-With': 'XMLHttpRequest' } });
+            const result = await res.json(); hideLoading();
+            if (result.success) {
+                showToast(result.message, 'success');
+                acctNewUserModal.hide();
+                document.getElementById('acctNewUsername').value = '';
+                document.getElementById('acctNewPassword').value = '';
+                document.getElementById('acctNewDisplayName').value = '';
+                acctLoadData();
+            } else { showToast(result.message, 'danger'); }
+        });
+
+        // Grid click delegation
+        document.getElementById('accountsGrid')?.addEventListener('click', async (e) => {
+            const addDaysBtn = e.target.closest('.acct-btn-add-days');
+            const linkBtn = e.target.closest('.acct-btn-link-patient');
+            const paymentsBtn = e.target.closest('.acct-btn-payments');
+            const passBtn = e.target.closest('.acct-btn-pass');
+            const toggleBtn = e.target.closest('.acct-btn-toggle');
+
+            if (addDaysBtn) {
+                const uid = addDaysBtn.dataset.id;
+                document.getElementById('acctAddDaysUserId').value = uid;
+                document.getElementById('acctAddDaysUserInfo').textContent = `${addDaysBtn.dataset.name} (${addDaysBtn.dataset.username})`;
+                document.getElementById('acctAddDaysCount').value = '';
+                document.getElementById('acctAddDaysAmount').value = '';
+                document.getElementById('acctAddDaysNote').value = '';
+                document.getElementById('acctAddDaysExpiry').value = '';
+                acctAddDaysModal.show();
+            }
+
+            if (linkBtn) {
+                const uid = linkBtn.closest('.acct-card-col').dataset.id;
+                document.getElementById('acctLinkUserId').value = uid;
+                // Load patients
+                if (acctPatientsCache.length === 0) {
+                    const res = await fetch(`${REQUEST_URL}?action=get_patient_account&user_id=${uid}`, { headers: { 'X-Requested-With': 'XMLHttpRequest' } });
+                    const data = await res.json();
+                    if (data.success) {
+                        acctPatientsCache = data.patients || [];
+                        const acct = data.account;
+                        const sel = document.getElementById('acctLinkPatientId');
+                        sel.innerHTML = '<option value="0">-- بدون ربط --</option>';
+                        acctPatientsCache.forEach(p => {
+                            sel.innerHTML += `<option value="${p.id}">${htmlspecialchars(p.name_ar)} — ${htmlspecialchars(p.identity_number)}</option>`;
+                        });
+                        if (acct) {
+                            sel.value = acct.patient_id;
+                            document.getElementById('acctLinkAllowedDays').value = acct.allowed_days || 0;
+                            document.getElementById('acctLinkExpiry').value = acct.expiry_date || '';
+                            document.getElementById('acctLinkNotes').value = acct.notes || '';
+                        }
+                    }
+                } else {
+                    const sel = document.getElementById('acctLinkPatientId');
+                    sel.innerHTML = '<option value="0">-- بدون ربط --</option>';
+                    acctPatientsCache.forEach(p => {
+                        sel.innerHTML += `<option value="${p.id}">${htmlspecialchars(p.name_ar)} — ${htmlspecialchars(p.identity_number)}</option>`;
+                    });
+                    // Find current account data
+                    const u = acctAllData.find(x => x.id == uid);
+                    if (u && u.linked_patient_id) {
+                        sel.value = u.linked_patient_id;
+                        document.getElementById('acctLinkAllowedDays').value = u.patient_allowed_days || 0;
+                        document.getElementById('acctLinkExpiry').value = u.expiry_date || '';
+                        document.getElementById('acctLinkNotes').value = u.account_notes || '';
+                    }
+                }
+                acctLinkPatientModal.show();
+            }
+
+            if (paymentsBtn) {
+                const uid = paymentsBtn.dataset.id;
+                document.getElementById('acctPaymentsUserName').textContent = paymentsBtn.dataset.name;
+                document.getElementById('acctPaymentsList').innerHTML = '<div class="text-center py-4"><div class="spinner-border spinner-border-sm text-success"></div></div>';
+                acctPaymentsModal.show();
+                const res = await fetch(`${REQUEST_URL}?action=account_fetch_payments&user_id=${uid}`, { headers: { 'X-Requested-With': 'XMLHttpRequest' } });
+                const data = await res.json();
+                if (data.success) {
+                    const payments = data.payments || [];
+                    const total = payments.reduce((s, p) => s + parseFloat(p.amount || 0), 0);
+                    document.getElementById('acctPaymentsTotal').textContent = total.toFixed(2);
+                    if (payments.length === 0) {
+                        document.getElementById('acctPaymentsList').innerHTML = '<div class="text-center py-4 text-muted"><i class="bi bi-inbox" style="font-size:36px;opacity:0.3;"></i><p>لا توجد مدفوعات مسجلة</p></div>';
+                    } else {
+                        document.getElementById('acctPaymentsList').innerHTML = payments.map(p => `
+                            <div class="payment-history-item">
+                                <div>
+                                    <div class="ph-amount"><i class="bi bi-cash-coin"></i> ${parseFloat(p.amount).toFixed(2)} ريال</div>
+                                    <div class="ph-note">${htmlspecialchars(p.note || '—')}</div>
+                                    <div class="ph-date"><i class="bi bi-clock"></i> ${htmlspecialchars(p.paid_at)} ${p.created_by_name ? '— بواسطة: ' + htmlspecialchars(p.created_by_name) : ''}</div>
+                                </div>
+                                <button class="btn btn-sm btn-outline-danger acct-del-payment" data-pid="${p.id}" title="حذف"><i class="bi bi-trash3"></i></button>
+                            </div>
+                        `).join('');
+                    }
+                }
+            }
+
+            if (passBtn) {
+                const uid = passBtn.closest('.acct-card-col').dataset.id;
+                document.getElementById('acctChangePassUserId').value = uid;
+                document.getElementById('acctChangePassNewPwd').value = '';
+                acctChangePassModal.show();
+            }
+
+            if (toggleBtn) {
+                const uid = toggleBtn.dataset.id;
+                const newStatus = toggleBtn.dataset.active == 1 ? 0 : 1;
+                showLoading();
+                const fd = new FormData();
+                fd.append('action', 'account_toggle_status'); fd.append('csrf_token', CSRF_TOKEN);
+                fd.append('user_id', uid); fd.append('status', newStatus);
+                const res = await fetch(REQUEST_URL, { method: 'POST', body: fd, headers: { 'X-Requested-With': 'XMLHttpRequest' } });
+                const result = await res.json(); hideLoading();
+                if (result.success) { showToast(result.message, 'success'); acctLoadData(); }
+                else { showToast(result.message, 'danger'); }
+            }
+        });
+
+        // Delete payment from history
+        document.getElementById('acctPaymentsList')?.addEventListener('click', async (e) => {
+            const btn = e.target.closest('.acct-del-payment');
+            if (!btn) return;
+            const pid = btn.dataset.pid;
+            showLoading();
+            const fd = new FormData();
+            fd.append('action', 'account_delete_payment'); fd.append('csrf_token', CSRF_TOKEN);
+            fd.append('payment_id', pid);
+            const res = await fetch(REQUEST_URL, { method: 'POST', body: fd, headers: { 'X-Requested-With': 'XMLHttpRequest' } });
+            const result = await res.json(); hideLoading();
+            if (result.success) { showToast(result.message, 'success'); btn.closest('.payment-history-item')?.remove(); acctLoadData(); }
+            else { showToast(result.message, 'danger'); }
+        });
+
+        // Save add days
+        document.getElementById('acctAddDaysSave')?.addEventListener('click', async () => {
+            const uid = document.getElementById('acctAddDaysUserId').value;
+            const days = document.getElementById('acctAddDaysCount').value;
+            const amount = document.getElementById('acctAddDaysAmount').value;
+            const note = document.getElementById('acctAddDaysNote').value;
+            const expiry = document.getElementById('acctAddDaysExpiry').value;
+            if (!days || parseInt(days) <= 0) { showToast('يرجى إدخال عدد الأيام.', 'warning'); return; }
+            showLoading();
+            const fd = new FormData();
+            fd.append('action', 'account_add_days'); fd.append('csrf_token', CSRF_TOKEN);
+            fd.append('user_id', uid); fd.append('days', days);
+            fd.append('amount', amount || 0); fd.append('note', note);
+            fd.append('expiry_date', expiry);
+            const res = await fetch(REQUEST_URL, { method: 'POST', body: fd, headers: { 'X-Requested-With': 'XMLHttpRequest' } });
+            const result = await res.json(); hideLoading();
+            if (result.success) { showToast(result.message, 'success'); acctAddDaysModal.hide(); acctLoadData(); }
+            else { showToast(result.message, 'danger'); }
+        });
+
+        // Save link patient
+        document.getElementById('acctLinkPatientSave')?.addEventListener('click', async () => {
+            const uid = document.getElementById('acctLinkUserId').value;
+            const pid = document.getElementById('acctLinkPatientId').value;
+            const allowed = document.getElementById('acctLinkAllowedDays').value;
+            const expiry = document.getElementById('acctLinkExpiry').value;
+            const notes = document.getElementById('acctLinkNotes').value;
+            showLoading();
+            const fd = new FormData();
+            fd.append('action', 'account_link_patient'); fd.append('csrf_token', CSRF_TOKEN);
+            fd.append('user_id', uid); fd.append('patient_id', pid);
+            fd.append('allowed_days', allowed || 0); fd.append('expiry_date', expiry);
+            fd.append('notes', notes);
+            const res = await fetch(REQUEST_URL, { method: 'POST', body: fd, headers: { 'X-Requested-With': 'XMLHttpRequest' } });
+            const result = await res.json(); hideLoading();
+            if (result.success) { showToast(result.message, 'success'); acctLinkPatientModal.hide(); acctPatientsCache = []; acctLoadData(); }
+            else { showToast(result.message, 'danger'); }
+        });
+
+        // Save change password
+        document.getElementById('acctChangePassSave')?.addEventListener('click', async () => {
+            const uid = document.getElementById('acctChangePassUserId').value;
+            const pass = document.getElementById('acctChangePassNewPwd').value;
+            if (!pass || pass.length < 4) { showToast('كلمة المرور يجب أن تكون 4 أحرف على الأقل.', 'warning'); return; }
+            showLoading();
+            const fd = new FormData();
+            fd.append('action', 'account_update_password'); fd.append('csrf_token', CSRF_TOKEN);
+            fd.append('user_id', uid); fd.append('new_password', pass);
+            const res = await fetch(REQUEST_URL, { method: 'POST', body: fd, headers: { 'X-Requested-With': 'XMLHttpRequest' } });
+            const result = await res.json(); hideLoading();
+            if (result.success) { showToast(result.message, 'success'); acctChangePassModal.hide(); }
+            else { showToast(result.message, 'danger'); }
+        });
+
+        // Toggle password visibility
+        document.getElementById('acctTogglePass')?.addEventListener('click', function() {
+            const inp = document.getElementById('acctChangePassNewPwd');
+            if (inp.type === 'password') { inp.type = 'text'; this.innerHTML = '<i class="bi bi-eye-slash"></i>'; }
+            else { inp.type = 'password'; this.innerHTML = '<i class="bi bi-eye"></i>'; }
+        });
+    }
 
     // ====== الإعدادات ======
     if (IS_ADMIN) {
