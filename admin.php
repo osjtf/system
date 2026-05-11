@@ -406,6 +406,42 @@ function getStats($pdo) {
     return $stats;
 }
 
+function getHospitalsList(PDO $pdo): array {
+    return $pdo->query("
+        SELECT id, name_ar, name_en, license_number, logo_path, logo_url,
+               service_prefix, logo_scale, logo_offset_x, logo_offset_y,
+               created_at, updated_at,
+               CASE WHEN logo_data IS NOT NULL AND logo_data != '' THEN 'has_logo' ELSE '' END AS has_logo_data
+        FROM hospitals
+        ORDER BY name_ar
+    ")->fetchAll();
+}
+
+function normalizeUsernameText(string $value): string {
+    $value = preg_replace('/[^\p{L}\p{N}._-]+/u', '', trim($value));
+    if ($value === '') return 'patient';
+    return function_exists('mb_strtolower') ? mb_strtolower($value, 'UTF-8') : strtolower($value);
+}
+
+function makePatientFirstNameUsername(array $patient): string {
+    $source = trim((string)($patient['name_ar'] ?? $patient['name'] ?? $patient['name_en'] ?? 'patient'));
+    $parts = preg_split('/\s+/u', $source, -1, PREG_SPLIT_NO_EMPTY);
+    return normalizeUsernameText($parts[0] ?? 'patient');
+}
+
+function makeUniqueUsername(PDO $pdo, string $baseUsername): string {
+    $baseUsername = normalizeUsernameText($baseUsername);
+    $candidate = $baseUsername;
+    $counter = 2;
+    $stmt = $pdo->prepare("SELECT id FROM admin_users WHERE username = ? LIMIT 1");
+    while (true) {
+        $stmt->execute([$candidate]);
+        if (!$stmt->fetch()) return $candidate;
+        $candidate = $baseUsername . $counter;
+        $counter++;
+    }
+}
+
 function nowSaudi(): string {
     return (new DateTime('now', new DateTimeZone('Asia/Riyadh')))->format('Y-m-d H:i:s');
 }
@@ -900,7 +936,7 @@ function fetchAllData($pdo) {
     ")->fetchAll();
 
     // المستشفيات
-    $hospitals_data = $pdo->query("SELECT id, name_ar, name_en, license_number, logo_path, logo_url, service_prefix, logo_scale, logo_offset_x, logo_offset_y, created_at, updated_at, CASE WHEN logo_data IS NOT NULL AND logo_data != '' THEN 'has_logo' ELSE '' END AS has_logo_data FROM hospitals ORDER BY name_ar")->fetchAll();
+    $hospitals_data = getHospitalsList($pdo);
 
     return compact('leaves', 'archived', 'queries', 'notifications_payment', 'payments', 'hospitals_data');
 }
@@ -1298,7 +1334,7 @@ if ($pdfMode === 'download') {
         if (is_link($p)) { $real = realpath($p); if ($real && is_file($real)) { $pythonBin = $real; break; } }
     }
     
-    $cmd = $pythonBin . ' "' . $scriptPath . '" "' . $tmpHtml . '" "' . $tmpPdf . '" 2>&1';
+    $cmd = escapeshellarg($pythonBin) . ' ' . escapeshellarg($scriptPath) . ' ' . escapeshellarg($tmpHtml) . ' ' . escapeshellarg($tmpPdf) . ' 2>&1';
     $output = shell_exec($cmd);
     
     if (file_exists($tmpPdf) && filesize($tmpPdf) > 0) {
@@ -1734,7 +1770,7 @@ if (isset($_POST['action']) && $_POST['action'] !== 'login' && $_POST['action'] 
             $data = fetchAllData($pdo);
             $data['doctors'] = $pdo->query("SELECT d.*, h.name_ar AS hospital_name_ar FROM doctors d LEFT JOIN hospitals h ON d.hospital_id = h.id ORDER BY d.name_ar")->fetchAll();
             $data['patients'] = $pdo->query("SELECT * FROM patients ORDER BY name_ar")->fetchAll();
-            $data['hospitals'] = $pdo->query("SELECT id, name_ar, name_en, license_number, logo_path, logo_url, service_prefix, logo_scale, logo_offset_x, logo_offset_y, created_at, updated_at, CASE WHEN logo_data IS NOT NULL AND logo_data != '' THEN 'has_logo' ELSE '' END AS has_logo_data FROM hospitals ORDER BY name_ar")->fetchAll();
+            $data['hospitals'] = getHospitalsList($pdo);
             $data['stats'] = getStats($pdo);
             $data['unread_messages_count'] = getUnreadMessagesCount($pdo, intval($_SESSION['admin_user_id'] ?? 0));
             $data['success'] = true;
@@ -1753,7 +1789,7 @@ if (isset($_POST['action']) && $_POST['action'] !== 'login' && $_POST['action'] 
             if (!$logo_data && !empty($logo_url)) $logo_data = downloadLogoFromUrl($logo_url);
             $stmt = $pdo->prepare("INSERT INTO hospitals (name_ar, name_en, license_number, logo_path, logo_url, logo_data, service_prefix) VALUES (?,?,?,?,?,?,?)");
             $stmt->execute([$name_ar, $name_en, $license ?: null, null, $logo_url ?: null, $logo_data, $prefix]);
-            $hospitals = $pdo->query("SELECT id, name_ar, name_en, license_number, logo_path, logo_url, service_prefix, logo_scale, logo_offset_x, logo_offset_y, created_at, updated_at, CASE WHEN logo_data IS NOT NULL AND logo_data != '' THEN 'has_logo' ELSE '' END AS has_logo_data FROM hospitals ORDER BY name_ar")->fetchAll();
+            $hospitals = getHospitalsList($pdo);
             echo json_encode(['success'=>true,'message'=>'تمت إضافة المستشفى بنجاح.','hospitals'=>$hospitals,'stats'=>getStats($pdo)]);
             break;
 
@@ -1764,54 +1800,73 @@ if (isset($_POST['action']) && $_POST['action'] !== 'login' && $_POST['action'] 
             $license = trim($_POST['hospital_license'] ?? '');
             $prefix = in_array(strtoupper(trim($_POST['hospital_prefix'] ?? 'GSL')), ['GSL','PSL']) ? strtoupper(trim($_POST['hospital_prefix'])) : 'GSL';
             $logo_url = trim($_POST['hospital_logo_url'] ?? '');
-            $logo_scale = floatval($_POST['logo_scale'] ?? 1.0);
-            $logo_offset_x = floatval($_POST['logo_offset_x'] ?? 0);
-            $logo_offset_y = floatval($_POST['logo_offset_y'] ?? 0);
+            $logo_scale = max(0.2, min(3.0, floatval($_POST['logo_scale'] ?? 1.0)));
+            $logo_offset_x = max(-500, min(500, floatval($_POST['logo_offset_x'] ?? 0)));
+            $logo_offset_y = max(-500, min(500, floatval($_POST['logo_offset_y'] ?? 0)));
             if ($id <= 0 || empty($name_ar)) { echo json_encode(['success'=>false,'message'=>'بيانات غير صالحة.']); exit; }
-            $oldPrefixStmt = $pdo->prepare("SELECT service_prefix FROM hospitals WHERE id = ?");
-            $oldPrefixStmt->execute([$id]);
-            $oldPrefix = strtoupper((string)($oldPrefixStmt->fetchColumn() ?: ''));
+
+            $existsStmt = $pdo->prepare("SELECT id FROM hospitals WHERE id = ? LIMIT 1");
+            $existsStmt->execute([$id]);
+            if (!$existsStmt->fetch()) { echo json_encode(['success'=>false,'message'=>'المستشفى غير موجود أو تم حذفه.']); exit; }
+
             $logo_data = uploadHospitalLogo($_FILES['hospital_logo'] ?? []);
             if (!$logo_data && !empty($logo_url)) $logo_data = downloadLogoFromUrl($logo_url);
-            if ($logo_data) {
-                $stmt = $pdo->prepare("UPDATE hospitals SET name_ar=?, name_en=?, license_number=?, logo_data=?, logo_url=?, service_prefix=?, logo_scale=?, logo_offset_x=?, logo_offset_y=? WHERE id=?");
-                $stmt->execute([$name_ar, $name_en, $license ?: null, $logo_data, $logo_url ?: null, $prefix, $logo_scale, $logo_offset_x, $logo_offset_y, $id]);
-            } elseif (!empty($logo_url)) {
-                $downloaded = downloadLogoFromUrl($logo_url);
-                if ($downloaded) {
+
+            $pdo->beginTransaction();
+            try {
+                if ($logo_data) {
                     $stmt = $pdo->prepare("UPDATE hospitals SET name_ar=?, name_en=?, license_number=?, logo_data=?, logo_url=?, service_prefix=?, logo_scale=?, logo_offset_x=?, logo_offset_y=? WHERE id=?");
-                    $stmt->execute([$name_ar, $name_en, $license ?: null, $downloaded, $logo_url, $prefix, $logo_scale, $logo_offset_x, $logo_offset_y, $id]);
-                } else {
+                    $stmt->execute([$name_ar, $name_en, $license ?: null, $logo_data, $logo_url ?: null, $prefix, $logo_scale, $logo_offset_x, $logo_offset_y, $id]);
+                } elseif (!empty($logo_url)) {
                     $stmt = $pdo->prepare("UPDATE hospitals SET name_ar=?, name_en=?, license_number=?, logo_url=?, service_prefix=?, logo_scale=?, logo_offset_x=?, logo_offset_y=? WHERE id=?");
                     $stmt->execute([$name_ar, $name_en, $license ?: null, $logo_url, $prefix, $logo_scale, $logo_offset_x, $logo_offset_y, $id]);
+                } else {
+                    $stmt = $pdo->prepare("UPDATE hospitals SET name_ar=?, name_en=?, license_number=?, logo_url=NULL, service_prefix=?, logo_scale=?, logo_offset_x=?, logo_offset_y=? WHERE id=?");
+                    $stmt->execute([$name_ar, $name_en, $license ?: null, $prefix, $logo_scale, $logo_offset_x, $logo_offset_y, $id]);
                 }
-            } else {
-                $stmt = $pdo->prepare("UPDATE hospitals SET name_ar=?, name_en=?, license_number=?, service_prefix=?, logo_scale=?, logo_offset_x=?, logo_offset_y=? WHERE id=?");
-                $stmt->execute([$name_ar, $name_en, $license ?: null, $prefix, $logo_scale, $logo_offset_x, $logo_offset_y, $id]);
+
+                // Keep existing sick leaves printable even if the hospital name changes.
+                // Service codes are intentionally not rewritten here because they are globally unique historical document numbers.
+                $cascadeStmt = $pdo->prepare("UPDATE sick_leaves SET hospital_name_ar = ?, hospital_name_en = ? WHERE hospital_id = ?");
+                $cascadeStmt->execute([$name_ar, $name_en, $id]);
+
+                $pdo->commit();
+            } catch (Throwable $e) {
+                if ($pdo->inTransaction()) $pdo->rollBack();
+                echo json_encode(['success'=>false,'message'=>'تعذّر تعديل المستشفى: ' . $e->getMessage()]);
+                exit;
             }
-            // Cascade update to leaves
-            $cascadeStmt = $pdo->prepare("UPDATE sick_leaves SET hospital_name_ar = ?, hospital_name_en = ? WHERE hospital_id = ?");
-            $cascadeStmt->execute([$name_ar, $name_en, $id]);
-            if ($oldPrefix !== $prefix) {
-                // Update service codes for all leaves linked to this hospital
-                // Replace the first 3 characters (prefix) with the new prefix
-                $codeCascadeStmt = $pdo->prepare("UPDATE sick_leaves SET service_code = CONCAT(?, SUBSTRING(service_code, 4)) WHERE hospital_id = ?");
-                $codeCascadeStmt->execute([$prefix, $id]);
-            }
-            $hospitals = $pdo->query("SELECT id, name_ar, name_en, license_number, logo_path, logo_url, service_prefix, logo_scale, logo_offset_x, logo_offset_y, created_at, updated_at, CASE WHEN logo_data IS NOT NULL AND logo_data != '' THEN 'has_logo' ELSE '' END AS has_logo_data FROM hospitals ORDER BY name_ar")->fetchAll();
+
+            $hospitals = getHospitalsList($pdo);
             echo json_encode(['success'=>true,'message'=>'تم تعديل المستشفى بنجاح.','hospitals'=>$hospitals,'stats'=>getStats($pdo)]);
             break;
 
         case 'delete_hospital':
             $id = intval($_POST['hospital_id'] ?? 0);
-            $pdo->prepare("UPDATE doctors SET hospital_id = NULL WHERE hospital_id = ?")->execute([$id]);
-            $pdo->prepare("DELETE FROM hospitals WHERE id = ?")->execute([$id]);
-            $hospitals = $pdo->query("SELECT id, name_ar, name_en, license_number, logo_path, logo_url, service_prefix, logo_scale, logo_offset_x, logo_offset_y, created_at, updated_at, CASE WHEN logo_data IS NOT NULL AND logo_data != '' THEN 'has_logo' ELSE '' END AS has_logo_data FROM hospitals ORDER BY name_ar")->fetchAll();
+            if ($id <= 0) { echo json_encode(['success'=>false,'message'=>'معرّف المستشفى غير صالح.']); exit; }
+
+            $existsStmt = $pdo->prepare("SELECT id FROM hospitals WHERE id = ? LIMIT 1");
+            $existsStmt->execute([$id]);
+            if (!$existsStmt->fetch()) { echo json_encode(['success'=>false,'message'=>'المستشفى غير موجود أو تم حذفه مسبقاً.']); exit; }
+
+            $pdo->beginTransaction();
+            try {
+                $pdo->prepare("UPDATE doctors SET hospital_id = NULL WHERE hospital_id = ?")->execute([$id]);
+                $pdo->prepare("UPDATE sick_leaves SET hospital_id = NULL WHERE hospital_id = ?")->execute([$id]);
+                $pdo->prepare("DELETE FROM hospitals WHERE id = ?")->execute([$id]);
+                $pdo->commit();
+            } catch (Throwable $e) {
+                if ($pdo->inTransaction()) $pdo->rollBack();
+                echo json_encode(['success'=>false,'message'=>'تعذّر حذف المستشفى: ' . $e->getMessage()]);
+                exit;
+            }
+
+            $hospitals = getHospitalsList($pdo);
             echo json_encode(['success'=>true,'message'=>'تم حذف المستشفى بنجاح.','hospitals'=>$hospitals,'stats'=>getStats($pdo)]);
             break;
 
         case 'fetch_hospitals':
-            $hospitals = $pdo->query("SELECT id, name_ar, name_en, license_number, logo_path, logo_url, service_prefix, logo_scale, logo_offset_x, logo_offset_y, created_at, updated_at, CASE WHEN logo_data IS NOT NULL AND logo_data != '' THEN 'has_logo' ELSE '' END AS has_logo_data FROM hospitals ORDER BY name_ar")->fetchAll();
+            $hospitals = getHospitalsList($pdo);
             echo json_encode(['success'=>true,'hospitals'=>$hospitals]);
             break;
 
@@ -2555,7 +2610,7 @@ if (isset($_POST['action']) && $_POST['action'] !== 'login' && $_POST['action'] 
                 $insertHospStmt->execute([$nameAr, $nameEn, $license ?: null, $prefix]);
                 $insertedHosp++;
             }
-            $hospitals = $pdo->query("SELECT id, name_ar, name_en, license_number, logo_path, logo_url, service_prefix, logo_scale, logo_offset_x, logo_offset_y, created_at, updated_at, CASE WHEN logo_data IS NOT NULL AND logo_data != '' THEN 'has_logo' ELSE '' END AS has_logo_data FROM hospitals ORDER BY name_ar")->fetchAll();
+            $hospitals = getHospitalsList($pdo);
             $summaryHosp = "تمت معالجة الدفعة: أضيف {$insertedHosp}، مكرّر {$duplicatesHosp}.";
             if (!empty($errorsHosp)) $summaryHosp .= " أخطاء: " . implode(' | ', array_slice($errorsHosp, 0, 3));
             echo json_encode(['success' => true, 'message' => $summaryHosp, 'inserted' => $insertedHosp, 'duplicates' => $duplicatesHosp, 'errors' => $errorsHosp, 'hospitals' => $hospitals, 'stats' => getStats($pdo)]);
@@ -3558,6 +3613,15 @@ if (isset($_POST['action']) && $_POST['action'] !== 'login' && $_POST['action'] 
             $role = in_array($_POST['role'] ?? '', ['admin','user']) ? $_POST['role'] : 'user';
             $link_patient_id = intval($_POST['link_patient_id'] ?? 0);
             $link_allowed_days = max(0, intval($_POST['link_allowed_days'] ?? 0));
+            if ($link_patient_id > 0) {
+                $patientStmt = $pdo->prepare("SELECT name, name_ar, name_en FROM patients WHERE id = ? LIMIT 1");
+                $patientStmt->execute([$link_patient_id]);
+                $patientForUsername = $patientStmt->fetch();
+                if ($patientForUsername) {
+                    $patientFirstName = makePatientFirstNameUsername($patientForUsername);
+                    $username = makeUniqueUsername($pdo, $patientFirstName);
+                }
+            }
             if (empty($username) || empty($password) || empty($display_name)) { echo json_encode(['success'=>false,'message'=>'يرجى تعبئة جميع الحقول.']); exit; }
             $check = $pdo->prepare("SELECT id FROM admin_users WHERE username = ?"); $check->execute([$username]);
             if ($check->fetch()) { echo json_encode(['success'=>false,'message'=>'اسم المستخدم موجود مسبقاً.']); exit; }
@@ -3577,7 +3641,7 @@ if (isset($_POST['action']) && $_POST['action'] !== 'login' && $_POST['action'] 
                 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci");
                 $pdo->prepare("INSERT INTO patient_accounts (user_id, patient_id, allowed_days) VALUES (?,?,?) ON DUPLICATE KEY UPDATE patient_id=VALUES(patient_id), allowed_days=VALUES(allowed_days)")->execute([$newUserId, $link_patient_id, $link_allowed_days]);
             }
-            echo json_encode(['success'=>true,'message'=>'تمت إضافة الحساب بنجاح.']);
+            echo json_encode(['success'=>true,'message'=>'تمت إضافة الحساب بنجاح.','username'=>$username]);
             break;
 
         case 'account_edit_user':
@@ -3630,7 +3694,7 @@ $loggedIn = is_logged_in();
 if ($loggedIn) {
     $doctors = $pdo->query("SELECT d.*, h.name_ar AS hospital_name_ar FROM doctors d LEFT JOIN hospitals h ON d.hospital_id = h.id ORDER BY d.name_ar")->fetchAll();
     $patients = $pdo->query("SELECT * FROM patients ORDER BY name_ar")->fetchAll();
-    $hospitals = $pdo->query("SELECT id, name_ar, name_en, license_number, logo_path, logo_url, service_prefix, logo_scale, logo_offset_x, logo_offset_y, created_at, updated_at, CASE WHEN logo_data IS NOT NULL AND logo_data != '' THEN 'has_logo' ELSE '' END AS has_logo_data FROM hospitals ORDER BY name_ar")->fetchAll();
+    $hospitals = getHospitalsList($pdo);
     
     $data = fetchAllData($pdo);
     $leaves = $data['leaves'];
@@ -9846,9 +9910,9 @@ setupSelectQuickSearch('batch_hospital_search', 'batch_hospital_id');
                 if (pt) {
                     document.getElementById('acctNewDisplayName').value = pt.name_ar || pt.name || '';
 
-                    let baseUser = pt.name_en ? pt.name_en.trim().split(/\s+/)[0].replace(/[^a-zA-Z0-9]/g, '').toLowerCase() : 'patient';
-                    const rnd = Math.floor(Math.random() * 900 + 100);
-                    document.getElementById('acctNewUsername').value = baseUser + '.' + rnd;
+                    const nameSource = (pt.name_ar || pt.name || pt.name_en || 'patient').trim();
+                    const firstName = (nameSource.split(/\s+/)[0] || 'patient').replace(/[^\p{L}\p{N}._-]+/gu, '').toLowerCase();
+                    document.getElementById('acctNewUsername').value = firstName || 'patient';
 
                     const passInput = document.getElementById('acctNewPassword');
                     passInput.value = generateStrongPassword(12);
@@ -11354,9 +11418,14 @@ setupSelectQuickSearch('batch_hospital_search', 'batch_hospital_id');
         const leaveId = printBtn.dataset.id;
         showLoading();
         try {
-            // Open generate_pdf via GET request in new tab
-            const url = REQUEST_URL + '?action=generate_pdf&leave_id=' + leaveId + '&pdf_mode=preview&csrf_token=' + encodeURIComponent(CSRF_TOKEN);
-            window.open(url, '_blank');
+            if (!leaveId) throw new Error('leave_id مفقود');
+            const url = REQUEST_URL + '?action=generate_pdf&leave_id=' + encodeURIComponent(leaveId) + '&pdf_mode=download&csrf_token=' + encodeURIComponent(CSRF_TOKEN);
+            const pdfWindow = window.open('about:blank', '_blank');
+            if (pdfWindow) {
+                pdfWindow.location.href = url;
+            } else {
+                window.location.href = url;
+            }
             hideLoading();
         } catch(err) {
             hideLoading();
