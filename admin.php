@@ -318,6 +318,16 @@ $pdo->exec("CREATE TABLE IF NOT EXISTS patient_accounts (
 ensureColumn($pdo, 'patient_accounts', 'expiry_date', "DATE NULL AFTER allowed_days");
 ensureColumn($pdo, 'patient_accounts', 'notes', "TEXT NULL AFTER expiry_date");
 
+// ======================== جدول إشعارات المستخدمين (المرضى) ========================
+$pdo->exec("CREATE TABLE IF NOT EXISTS user_notifications (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    user_id INT NOT NULL,
+    message TEXT NOT NULL,
+    is_read TINYINT(1) DEFAULT 0,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (user_id) REFERENCES admin_users(id) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci");
+
 // إنشاء مستخدم افتراضي إذا لم يوجد أي مستخدم
 $stmt = $pdo->query("SELECT COUNT(*) as cnt FROM admin_users");
 $userCount = $stmt->fetch()['cnt'];
@@ -1501,6 +1511,124 @@ if (isset($_GET['action']) && $_GET['action'] === 'generate_pdf') {
     exit;
 }
 
+// ======================== معالجة طلبات AJAX عبر GET ========================
+$_GET_AJAX_ACTIONS = ['fetch_accounts_full', 'get_patient_account', 'get_hospital_logo', 'fetch_notifications', 'get_unread_count', 'fetch_user_notifications'];
+if (isset($_GET['action']) && in_array($_GET['action'], $_GET_AJAX_ACTIONS) && !isset($_POST['action'])) {
+    header('Content-Type: application/json; charset=utf-8');
+    if (!is_logged_in()) {
+        echo json_encode(['success' => false, 'message' => 'يرجى تسجيل الدخول أولاً.', 'redirect' => true]);
+        exit;
+    }
+    // For GET AJAX actions, allow without CSRF (read-only) or check header
+    $action = $_GET['action'];
+
+    set_exception_handler(function(Throwable $e) {
+        if (!headers_sent()) { header('Content-Type: application/json; charset=utf-8'); }
+        echo json_encode(['success' => false, 'message' => 'تعذّر تنفيذ العملية: ' . $e->getMessage()], JSON_UNESCAPED_UNICODE);
+        exit;
+    });
+
+    switch ($action) {
+        case 'fetch_accounts_full':
+            if (($_SESSION['admin_role'] ?? 'user') !== 'admin') { echo json_encode(['success'=>false,'message'=>'ليس لديك صلاحية.']); exit; }
+            $pdo->exec("CREATE TABLE IF NOT EXISTS account_payments (
+                id INT AUTO_INCREMENT PRIMARY KEY,
+                user_id INT NOT NULL,
+                amount DECIMAL(10,2) NOT NULL DEFAULT 0,
+                note VARCHAR(500) NULL,
+                paid_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                created_by INT NULL,
+                FOREIGN KEY (user_id) REFERENCES admin_users(id) ON DELETE CASCADE
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci");
+            ensureColumn($pdo, 'patient_accounts', 'expiry_date', "DATE NULL AFTER allowed_days");
+            ensureColumn($pdo, 'patient_accounts', 'notes', "TEXT NULL AFTER expiry_date");
+            $accounts = $pdo->query("
+                SELECT u.id, u.username, u.display_name, u.role, u.is_active, u.created_at,
+                       pa.patient_id AS linked_patient_id, pa.allowed_days AS patient_allowed_days,
+                       pa.expiry_date, pa.notes AS account_notes,
+                       p.name_ar AS linked_patient_name, p.identity_number AS patient_identity,
+                       COALESCE((SELECT SUM(amount) FROM account_payments WHERE user_id = u.id), 0) AS total_paid,
+                       COALESCE((SELECT COUNT(*) FROM account_payments WHERE user_id = u.id), 0) AS payment_count
+                FROM admin_users u
+                INNER JOIN patient_accounts pa ON pa.user_id = u.id
+                LEFT JOIN patients p ON pa.patient_id = p.id
+                ORDER BY u.created_at DESC
+            ")->fetchAll();
+            echo json_encode(['success'=>true,'accounts'=>$accounts]);
+            break;
+
+        case 'get_patient_account':
+            if (($_SESSION['admin_role'] ?? 'user') !== 'admin') { echo json_encode(['success'=>false,'message'=>'ليس لديك صلاحية.']); exit; }
+            $target_user_id = intval($_GET['user_id'] ?? 0);
+            $stmt = $pdo->prepare("SELECT pa.*, p.name_ar AS patient_name FROM patient_accounts pa LEFT JOIN patients p ON pa.patient_id = p.id WHERE pa.user_id = ?");
+            $stmt->execute([$target_user_id]);
+            $pa = $stmt->fetch();
+            $patients_list = $pdo->query("SELECT id, name_ar, identity_number FROM patients ORDER BY name_ar")->fetchAll();
+            echo json_encode(['success' => true, 'account' => $pa ?: null, 'patients' => $patients_list]);
+            break;
+
+        case 'fetch_user_notifications':
+            $uid = intval($_SESSION['admin_user_id'] ?? 0);
+            // Ensure table exists
+            $pdo->exec("CREATE TABLE IF NOT EXISTS user_notifications (
+                id INT AUTO_INCREMENT PRIMARY KEY,
+                user_id INT NOT NULL,
+                message TEXT NOT NULL,
+                is_read TINYINT(1) DEFAULT 0,
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (user_id) REFERENCES admin_users(id) ON DELETE CASCADE
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci");
+            $stmt = $pdo->prepare("SELECT * FROM user_notifications WHERE user_id = ? ORDER BY created_at DESC LIMIT 20");
+            $stmt->execute([$uid]);
+            $notifs = $stmt->fetchAll();
+            $unread = $pdo->prepare("SELECT COUNT(*) FROM user_notifications WHERE user_id = ? AND is_read = 0");
+            $unread->execute([$uid]);
+            echo json_encode(['success'=>true,'notifications'=>$notifs,'unread_count'=>(int)$unread->fetchColumn()]);
+            break;
+
+        case 'get_hospital_logo':
+            // Return image directly (not JSON)
+            $hid = intval($_GET['hospital_id'] ?? 0);
+            $stmt = $pdo->prepare("SELECT logo_data, logo_url FROM hospitals WHERE id = ?");
+            $stmt->execute([$hid]);
+            $hRow = $stmt->fetch();
+            if ($hRow && !empty($hRow['logo_data']) && strpos($hRow['logo_data'], 'data:image/') === 0) {
+                $parts = explode(',', $hRow['logo_data'], 2);
+                preg_match('/data:image\/([a-z+]+);/', $parts[0], $mimeMatch);
+                $mime = 'image/' . ($mimeMatch[1] ?? 'png');
+                header('Content-Type: ' . $mime);
+                echo base64_decode($parts[1] ?? '');
+            } elseif ($hRow && !empty($hRow['logo_url'])) {
+                header('Location: ' . $hRow['logo_url']);
+            } else {
+                header('HTTP/1.1 404 Not Found');
+                echo 'No logo';
+            }
+            exit;
+
+        case 'fetch_notifications':
+            ensureDelayedUnpaidNotifications($pdo);
+            $notifications = $pdo->query("
+                SELECT n.*, sl.payment_amount, sl.service_code, sl.patient_id, p.name AS patient_name, p.phone AS patient_phone
+                FROM notifications n
+                LEFT JOIN sick_leaves sl ON n.leave_id = sl.id
+                LEFT JOIN patients p ON sl.patient_id = p.id
+                WHERE n.type = 'payment'
+                ORDER BY n.created_at DESC
+            ")->fetchAll();
+            echo json_encode(['success' => true, 'data' => $notifications]);
+            break;
+
+        case 'get_unread_count':
+            echo json_encode(['success' => true, 'count' => getUnreadMessagesCount($pdo, intval($_SESSION['admin_user_id'] ?? 0))]);
+            break;
+
+        default:
+            echo json_encode(['success'=>false,'message'=>'إجراء غير معروف.']);
+    }
+    exit;
+}
+
 // ======================== معالجة طلبات AJAX ========================
 if (isset($_POST['action']) && $_POST['action'] !== 'login' && $_POST['action'] !== 'logout') {
     header('Content-Type: application/json; charset=utf-8');
@@ -2488,6 +2616,12 @@ if (isset($_POST['action']) && $_POST['action'] !== 'login' && $_POST['action'] 
             echo json_encode(['success' => true, 'message' => 'تم حذف الإشعار.']);
             break;
 
+        case 'mark_user_notifications_read':
+            $uid = intval($_SESSION['admin_user_id'] ?? 0);
+            $pdo->prepare("UPDATE user_notifications SET is_read = 1 WHERE user_id = ?")->execute([$uid]);
+            echo json_encode(['success' => true]);
+            break;
+
         case 'fetch_leaves_by_patient':
             $patient_id = intval($_POST['patient_id'] ?? 0);
             $stmt = $pdo->prepare("
@@ -3164,6 +3298,17 @@ if (isset($_POST['action']) && $_POST['action'] !== 'login' && $_POST['action'] 
                 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci");
                 $pdo->prepare("INSERT INTO account_payments (user_id, amount, note, created_by) VALUES (?,?,?,?)")->execute([$uid, $amount, $note ?: "إضافة $days يوم", intval($_SESSION['admin_user_id'])]);
             }
+            // إرسال إشعار للمستخدم بإضافة الأيام
+            $pdo->exec("CREATE TABLE IF NOT EXISTS user_notifications (
+                id INT AUTO_INCREMENT PRIMARY KEY,
+                user_id INT NOT NULL,
+                message TEXT NOT NULL,
+                is_read TINYINT(1) DEFAULT 0,
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (user_id) REFERENCES admin_users(id) ON DELETE CASCADE
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci");
+            $notifMsg = "🎉 تمت إضافة {$days} يوم إجازة مرضية إلى حسابك." . ($expiry ? " تاريخ الانتهاء: {$expiry}." : "") . ($note ? " ملاحظة: {$note}" : "");
+            $pdo->prepare("INSERT INTO user_notifications (user_id, message) VALUES (?, ?)")->execute([$uid, $notifMsg]);
             echo json_encode(['success'=>true,'message'=>"تمت إضافة $days يوم بنجاح."]);
             break;
 
