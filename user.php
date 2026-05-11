@@ -1464,6 +1464,14 @@ body {
       <h3><i class="fas fa-plus-circle"></i> إنشاء إجازة مرضية جديدة</h3>
     </div>
     <div class="card-body">
+      <?php if ($remainingDays <= 0): ?>
+        <div class="empty-state" style="padding:44px 18px;text-align:center">
+          <i class="fab fa-whatsapp" style="font-size:58px;color:#25d366;margin-bottom:16px"></i>
+          <h3 style="margin-bottom:10px;color:var(--danger);font-weight:900">استنفدت كل رصيدك من الأيام</h3>
+          <p style="color:var(--text-muted);font-weight:700;margin-bottom:22px">لإضافة رصيد أيام جديد أو طلب المساعدة، تواصل معنا مباشرة عبر الواتساب.</p>
+          <a href="https://wa.me/966500000000" target="_blank" class="btn-whatsapp" style="display:inline-flex;font-size:16px;padding:14px 26px"><i class="fab fa-whatsapp"></i> تواصل معنا على واتساب</a>
+        </div>
+      <?php else: ?>
       <form id="leaveForm" onsubmit="return submitLeave(event)">
         <div class="leave-form-grid">
           <div class="form-group">
@@ -1516,6 +1524,7 @@ body {
           </button>
         </div>
       </form>
+      <?php endif; ?>
     </div>
   </div>
 
@@ -1669,7 +1678,18 @@ function submitLeave(e) {
 
 // ═══ View Leave ═══
 function viewLeave(id) {
-  window.open('user.php?action=generate_pdf&leave_id=' + encodeURIComponent(id) + '&pdf_mode=download', '_blank');
+  const url = 'user.php?action=generate_pdf&leave_id=' + encodeURIComponent(id) + '&pdf_mode=download';
+  let frame = document.getElementById('pdfDownloadFrame');
+  if (!frame) {
+    frame = document.createElement('iframe');
+    frame.id = 'pdfDownloadFrame';
+    frame.name = 'pdfDownloadFrame';
+    frame.style.display = 'none';
+    frame.setAttribute('aria-hidden', 'true');
+    document.body.appendChild(frame);
+  }
+  frame.src = url;
+  showToast('بدأ تحميل ملف الإجازة', 'success');
 }
 
 // ═══ Toast ═══

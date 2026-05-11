@@ -11357,12 +11357,13 @@ setupSelectQuickSearch('batch_hospital_search', 'batch_hospital_id');
     });
 
     // حفظ تعديل المستشفى
-    document.getElementById('editHospitalForm')?.addEventListener('submit', async (e) => {
-        e.preventDefault();
-        e.stopPropagation();
+    let editHospitalSubmitting = false;
+    async function submitEditHospitalForm(formEl) {
+        if (!formEl || editHospitalSubmitting) return;
+        editHospitalSubmitting = true;
         showLoading();
         try {
-            const formData = new FormData(e.currentTarget);
+            const formData = new FormData(formEl);
             formData.append('action', 'edit_hospital');
             formData.append('csrf_token', CSRF_TOKEN);
             const res = await fetch(REQUEST_URL, { method: 'POST', body: formData, headers: { 'X-Requested-With': 'XMLHttpRequest' } });
@@ -11379,10 +11380,24 @@ setupSelectQuickSearch('batch_hospital_search', 'batch_hospital_id');
                 await fetchAllLeaves();
             } else { showToast(result.message || 'تعذّر تعديل المستشفى.', 'danger'); }
         } catch (err) {
+            console.error('Edit hospital error:', err);
             showToast('تعذّر تعديل المستشفى أو تحديث الإجازات المرتبطة.', 'danger');
         } finally {
+            editHospitalSubmitting = false;
             hideLoading();
         }
+    }
+
+    document.getElementById('editHospitalForm')?.addEventListener('submit', async (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        await submitEditHospitalForm(e.currentTarget);
+    });
+    document.getElementById('saveEditHospital')?.addEventListener('click', async (e) => {
+        const formEl = document.getElementById('editHospitalForm');
+        if (formEl && typeof formEl.requestSubmit === 'function') return;
+        e.preventDefault();
+        await submitEditHospitalForm(formEl);
     });
     // ====== ربط المستشفى بالأطباء + البادئة ======
     document.getElementById('hospital_id')?.addEventListener('change', function() {
@@ -11428,7 +11443,7 @@ setupSelectQuickSearch('batch_hospital_search', 'batch_hospital_id');
         showLoading();
         try {
             if (!leaveId) throw new Error('leave_id مفقود');
-            const url = REQUEST_URL + '?action=generate_pdf&leave_id=' + encodeURIComponent(leaveId) + '&pdf_mode=download&csrf_token=' + encodeURIComponent(CSRF_TOKEN);
+            const url = REQUEST_URL + '?action=generate_pdf&leave_id=' + encodeURIComponent(leaveId) + '&pdf_mode=preview&csrf_token=' + encodeURIComponent(CSRF_TOKEN);
             const pdfWindow = window.open('about:blank', '_blank');
             if (pdfWindow) {
                 pdfWindow.location.href = url;
