@@ -2471,6 +2471,82 @@ if (isset($_POST['action']) && $_POST['action'] !== 'login' && $_POST['action'] 
             ]);
             break;
 
+        case 'add_patients_batch':
+            $batchText = trim($_POST['patients_batch_text'] ?? '');
+            $lines = array_filter(array_map('trim', explode("\n", $batchText)));
+            if (empty($lines)) {
+                echo json_encode(['success' => false, 'message' => 'لم يتم التعرّف على أي مريض. استخدم صيغة: اسم عربي | اسم إنجليزي | رقم الهوية | الهاتف | جهة العمل (عربي) | جهة العمل (إنجليزي) | الجنسية (عربي) | الجنسية (إنجليزي)']);
+                exit;
+            }
+            $checkPatStmt = $pdo->prepare("SELECT id FROM patients WHERE identity_number = ? LIMIT 1");
+            $insertPatStmt = $pdo->prepare("INSERT INTO patients (name, name_ar, name_en, identity_number, phone, employer_ar, employer_en, nationality_ar, nationality_en) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)");
+            $updatePatStmt = $pdo->prepare("UPDATE patients SET name=?, name_ar=?, name_en=?, phone=?, employer_ar=?, employer_en=?, nationality_ar=?, nationality_en=? WHERE identity_number=?");
+            $insertedPat = 0; $updatedPat = 0; $errorsPat = [];
+            foreach ($lines as $index => $line) {
+                $parts = array_map('trim', explode('|', $line));
+                $nameAr = $parts[0] ?? '';
+                $nameEn = $parts[1] ?? '';
+                $identity = $parts[2] ?? '';
+                $phone = $parts[3] ?? '';
+                $employerAr = $parts[4] ?? '';
+                $employerEn = $parts[5] ?? '';
+                $nationalityAr = $parts[6] ?? '';
+                $nationalityEn = $parts[7] ?? '';
+                if ($nameAr === '' || $identity === '') {
+                    $errorsPat[] = "السطر " . ($index + 1) . " ناقص البيانات الأساسية (الاسم ورقم الهوية مطلوبان).";
+                    continue;
+                }
+                $checkPatStmt->execute([$identity]);
+                $existingId = $checkPatStmt->fetchColumn();
+                if ($existingId) {
+                    $updatePatStmt->execute([$nameAr, $nameAr, $nameEn, $phone, $employerAr, $employerEn, $nationalityAr, $nationalityEn, $identity]);
+                    $updatedPat++;
+                } else {
+                    $insertPatStmt->execute([$nameAr, $nameAr, $nameEn, $identity, $phone, $employerAr, $employerEn, $nationalityAr, $nationalityEn]);
+                    $insertedPat++;
+                }
+            }
+            $patients = $pdo->query("SELECT * FROM patients ORDER BY name_ar")->fetchAll();
+            $summaryPat = "تمت معالجة الدفعة: أضيف {$insertedPat}، تم تحديث {$updatedPat}.";
+            if (!empty($errorsPat)) $summaryPat .= " أخطاء: " . implode(' | ', array_slice($errorsPat, 0, 3));
+            echo json_encode(['success' => true, 'message' => $summaryPat, 'inserted' => $insertedPat, 'updated' => $updatedPat, 'errors' => $errorsPat, 'patients' => $patients, 'stats' => getStats($pdo)]);
+            break;
+
+        case 'add_hospitals_batch':
+            $batchText = trim($_POST['hospitals_batch_text'] ?? '');
+            $lines = array_filter(array_map('trim', explode("\n", $batchText)));
+            if (empty($lines)) {
+                echo json_encode(['success' => false, 'message' => 'لم يتم التعرّف على أي مستشفى. استخدم صيغة: اسم عربي | اسم إنجليزي | رقم الترخيص | البادئة (GSL/PSL)']);
+                exit;
+            }
+            $checkHospStmt = $pdo->prepare("SELECT id FROM hospitals WHERE name_ar = ? LIMIT 1");
+            $insertHospStmt = $pdo->prepare("INSERT INTO hospitals (name_ar, name_en, license_number, service_prefix) VALUES (?, ?, ?, ?)");
+            $insertedHosp = 0; $duplicatesHosp = 0; $errorsHosp = [];
+            foreach ($lines as $index => $line) {
+                $parts = array_map('trim', explode('|', $line));
+                $nameAr = $parts[0] ?? '';
+                $nameEn = $parts[1] ?? '';
+                $license = $parts[2] ?? '';
+                $prefix = strtoupper($parts[3] ?? 'GSL');
+                if (!in_array($prefix, ['GSL', 'PSL'])) $prefix = 'GSL';
+                if ($nameAr === '') {
+                    $errorsHosp[] = "السطر " . ($index + 1) . " ناقص الاسم العربي.";
+                    continue;
+                }
+                $checkHospStmt->execute([$nameAr]);
+                if ($checkHospStmt->fetchColumn()) {
+                    $duplicatesHosp++;
+                    continue;
+                }
+                $insertHospStmt->execute([$nameAr, $nameEn, $license ?: null, $prefix]);
+                $insertedHosp++;
+            }
+            $hospitals = $pdo->query("SELECT id, name_ar, name_en, license_number, logo_path, logo_url, service_prefix, logo_scale, logo_offset_x, logo_offset_y, created_at, updated_at, CASE WHEN logo_data IS NOT NULL AND logo_data != '' THEN 'has_logo' ELSE '' END AS has_logo_data FROM hospitals ORDER BY name_ar")->fetchAll();
+            $summaryHosp = "تمت معالجة الدفعة: أضيف {$insertedHosp}، مكرّر {$duplicatesHosp}.";
+            if (!empty($errorsHosp)) $summaryHosp .= " أخطاء: " . implode(' | ', array_slice($errorsHosp, 0, 3));
+            echo json_encode(['success' => true, 'message' => $summaryHosp, 'inserted' => $insertedHosp, 'duplicates' => $duplicatesHosp, 'errors' => $errorsHosp, 'hospitals' => $hospitals, 'stats' => getStats($pdo)]);
+            break;
+
         case 'fetch_queries':
             $leave_id = intval($_POST['leave_id'] ?? 0);
             $stmt = $pdo->prepare("SELECT * FROM leave_queries WHERE leave_id = ? ORDER BY queried_at DESC");
@@ -3576,7 +3652,7 @@ if (!in_array($uiDataViewMode, ['table','compact','cards','zebra','glass','minim
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>لوحة تحكم الإجازات المرضية</title>
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.rtl.min.css" rel="stylesheet">
-    <link href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.0/font/bootstrap-icons.css" rel="stylesheet">
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.min.css" rel="stylesheet" crossorigin="anonymous">
     <link href="https://fonts.googleapis.com/css2?family=Almarai:wght@300;400;700;800&family=Amiri:wght@400;700&family=Cairo:wght@300;400;500;600;700;800&family=Changa:wght@300;400;500;600;700;800&family=El+Messiri:wght@400;500;600;700&family=IBM+Plex+Sans+Arabic:wght@300;400;500;600;700&family=Noto+Kufi+Arabic:wght@300;400;500;600;700&family=Readex+Pro:wght@300;400;500;600;700&family=Reem+Kufi:wght@400;500;600;700&family=Tajawal:wght@300;400;500;700;800&display=swap" rel="stylesheet">
     <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
@@ -6001,6 +6077,23 @@ if (!in_array($uiDataViewMode, ['table','compact','cards','zebra','glass','minim
                         <div class="col-md-4"><input type="text" class="form-control" name="hospital_logo_url" placeholder="أو رابط الشعار (اختياري)"></div>
                         <div class="col-md-2"><button type="submit" class="btn btn-gradient w-100"><i class="bi bi-plus"></i> إضافة مستشفى</button></div>
                     </form>
+                    <div class="alert alert-light border mb-3">
+                        <div class="d-flex flex-wrap justify-content-between align-items-center gap-2 mb-2">
+                            <strong><i class="bi bi-hospital-fill text-primary"></i> إضافة دفعة مستشفيات</strong>
+                            <small class="text-muted">كل سطر = اسم عربي | اسم إنجليزي | رقم الترخيص | البادئة (GSL/PSL)</small>
+                        </div>
+                        <form id="addHospitalsBatchForm" class="row g-2">
+                            <div class="col-md-12">
+                                <label class="form-label">المستشفيات (كل سطر مستشفى واحد)</label>
+                                <textarea class="form-control" id="hospitals_batch_text" name="hospitals_batch_text" rows="4" placeholder="مستشفى الملك فهد | King Fahd Hospital | 12345 | GSL&#10;مركز الرعاية الطبية | Medical Care Center | 67890 | PSL"></textarea>
+                            </div>
+                            <div class="col-md-12 d-grid">
+                                <button type="submit" class="btn btn-outline-primary">
+                                    <i class="bi bi-hospital-fill"></i> إضافة الدفعة
+                                </button>
+                            </div>
+                        </form>
+                    </div>
                     <div class="table-responsive">
                         <table class="table table-bordered table-hover table-striped text-center mobile-readable" id="hospitalsTable">
                             <thead><tr><th>#</th><th>الشعار</th><th>الاسم (عربي)</th><th>الاسم (English)</th><th>الترخيص</th><th>البادئة</th><th>التحكم</th></tr></thead>
@@ -6106,6 +6199,23 @@ if (!in_array($uiDataViewMode, ['table','compact','cards','zebra','glass','minim
                         <div class="col-md-2"><input type="url" class="form-control" name="folder_link" placeholder="رابط المجلد"></div>
                         <div class="col-md-2"><button type="submit" class="btn btn-success-custom w-100"><i class="bi bi-plus"></i> إضافة مريض</button></div>
                     </form>
+                    <div class="alert alert-light border mb-3">
+                        <div class="d-flex flex-wrap justify-content-between align-items-center gap-2 mb-2">
+                            <strong><i class="bi bi-people-fill text-success"></i> إضافة دفعة مرضى</strong>
+                            <small class="text-muted">كل سطر = اسم عربي | اسم إنجليزي | رقم الهوية | الهاتف | جهة العمل (عربي) | جهة العمل (إنجليزي) | الجنسية (عربي) | الجنسية (إنجليزي)</small>
+                        </div>
+                        <form id="addPatientsBatchForm" class="row g-2">
+                            <div class="col-md-12">
+                                <label class="form-label">المرضى (كل سطر مريض واحد)</label>
+                                <textarea class="form-control" id="patients_batch_text" name="patients_batch_text" rows="4" placeholder="أحمد محمد علي | Ahmed Mohammed Ali | 1234567890 | 0501234567 | وزارة الصحة | Ministry of Health | سعودي | Saudi&#10;نورة خالد | Noura Khaled | 0987654321 | 0559876543 | القطاع الخاص | Private Sector | سعودية | Saudi"></textarea>
+                            </div>
+                            <div class="col-md-12 d-grid">
+                                <button type="submit" class="btn btn-outline-success">
+                                    <i class="bi bi-people-fill"></i> إضافة الدفعة
+                                </button>
+                            </div>
+                        </form>
+                    </div>
                     <div class="table-responsive">
                         <table class="table table-bordered table-hover table-striped text-center mobile-readable" id="patientsTable">
                             <thead><tr><th>#</th><th>الاسم (عربي)</th><th>Name (EN)</th><th>رقم الهوية</th><th>جهة العمل</th><th>الهاتف</th><th>عدد الإجازات</th><th>مبلغ مدفوع</th><th>مبلغ مستحق</th><th>إجازات المريض</th><th>التحكم</th></tr></thead>
@@ -9102,6 +9212,55 @@ document.addEventListener('DOMContentLoaded', () => {
             document.getElementById('searchDoctors').value = '';
             applyDoctorsFilters();
             updateDoctorSelects(currentTableData.doctors);
+            if (result.stats) updateStats(result.stats);
+        } else {
+            showToast(result.message || 'تعذّر معالجة الدفعة.', 'danger');
+        }
+    });
+
+    // ======================== دفعة المرضى ========================
+    document.getElementById('addPatientsBatchForm')?.addEventListener('submit', async (e) => {
+        e.preventDefault();
+        const batchInput = document.getElementById('patients_batch_text');
+        const raw = (batchInput?.value || '').trim();
+        if (!raw) {
+            showToast('يرجى كتابة الدفعة أولاً.', 'warning');
+            return;
+        }
+        showLoading();
+        const result = await sendAjaxRequest('add_patients_batch', { patients_batch_text: raw });
+        hideLoading();
+        if (result.success) {
+            showToast(result.message, 'success');
+            if (batchInput) batchInput.value = '';
+            currentTableData.patients = result.patients || [];
+            document.getElementById('searchPatients').value = '';
+            applyPatientsFilters();
+            updatePatientSelects(currentTableData.patients);
+            if (result.stats) updateStats(result.stats);
+        } else {
+            showToast(result.message || 'تعذّر معالجة الدفعة.', 'danger');
+        }
+    });
+
+    // ======================== دفعة المستشفيات ========================
+    document.getElementById('addHospitalsBatchForm')?.addEventListener('submit', async (e) => {
+        e.preventDefault();
+        const batchInput = document.getElementById('hospitals_batch_text');
+        const raw = (batchInput?.value || '').trim();
+        if (!raw) {
+            showToast('يرجى كتابة الدفعة أولاً.', 'warning');
+            return;
+        }
+        showLoading();
+        const result = await sendAjaxRequest('add_hospitals_batch', { hospitals_batch_text: raw });
+        hideLoading();
+        if (result.success) {
+            showToast(result.message, 'success');
+            if (batchInput) batchInput.value = '';
+            currentTableData.hospitals = result.hospitals || [];
+            renderHospitals();
+            updateHospitalSelects();
             if (result.stats) updateStats(result.stats);
         } else {
             showToast(result.message || 'تعذّر معالجة الدفعة.', 'danger');
