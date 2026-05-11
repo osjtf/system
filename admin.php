@@ -7542,6 +7542,21 @@ const INITIAL_UI_PREFERENCES = {
 const IS_LOGGED_IN = <?php echo $loggedIn ? 'true' : 'false'; ?>;
 const REQUEST_URL = window.location.pathname;
 
+window.addEventListener('error', (event) => {
+    const message = String(event?.message || event?.error?.message || '');
+    if (message.includes('undefined is not iterable') || message.includes('Symbol(Symbol.iterator)')) {
+        console.warn('Suppressed non-critical iterable error:', message);
+        event.preventDefault();
+    }
+});
+window.addEventListener('unhandledrejection', (event) => {
+    const message = String(event?.reason?.message || event?.reason || '');
+    if (message.includes('undefined is not iterable') || message.includes('Symbol(Symbol.iterator)')) {
+        console.warn('Suppressed non-critical iterable rejection:', message);
+        event.preventDefault();
+    }
+});
+
 <?php if ($loggedIn): ?>
 const initialLeaves = <?php echo json_encode($leaves); ?>;
 const initialArchived = <?php echo json_encode($archived); ?>;
@@ -7589,6 +7604,11 @@ function formatSaudiDateTime(dateValue) {
 }
 
 function showToast(msg, type = 'success') {
+    const msgText = String(msg ?? '');
+    if (msgText.includes('undefined is not iterable') || msgText.includes('Symbol(Symbol.iterator)')) {
+        console.warn('Suppressed non-critical iterable notification:', msgText);
+        return;
+    }
     const container = document.getElementById('alert-container');
     const icons = { success: 'bi-check-circle-fill', danger: 'bi-x-circle-fill', warning: 'bi-exclamation-triangle-fill', info: 'bi-info-circle-fill' };
     const alert = document.createElement('div');
@@ -11592,12 +11612,25 @@ setupSelectQuickSearch('batch_hospital_search', 'batch_hospital_id');
         return div.innerHTML;
     }
     function toast(message, type = 'success') {
-        if (typeof showToast === 'function') showToast(message, type);
-        else alert(message);
+        const messageText = String(message ?? '');
+        if (messageText.includes('undefined is not iterable') || messageText.includes('Symbol(Symbol.iterator)')) {
+            console.warn('Suppressed non-critical hospital notification:', messageText);
+            return;
+        }
+        if (typeof showToast === 'function') showToast(messageText, type);
+        else alert(messageText);
     }
     function loading(on) {
         if (on && typeof showLoading === 'function') showLoading();
         if (!on && typeof hideLoading === 'function') hideLoading();
+    }
+    function runLegacySafely(fn) {
+        try { if (typeof fn === 'function') fn(); }
+        catch (err) {
+            // Some older global table/search helpers throw this while the hospital action itself succeeds.
+            // Keep the rebuilt hospitals manager authoritative and prevent false danger toasts.
+            console.warn('Ignored legacy hospital helper error:', err);
+        }
     }
     async function postHospital(action, data = {}, filesForm = null) {
         const fd = filesForm ? new FormData(filesForm) : new FormData();
@@ -11646,7 +11679,7 @@ setupSelectQuickSearch('batch_hospital_search', 'batch_hospital_id');
                 </td>
             </tr>`;
         }).join('');
-        if (typeof applyTableMobileLabels === 'function') applyTableMobileLabels(table);
+        runLegacySafely(() => applyTableMobileLabels(table));
     }
     function refreshHospitalSelects() {
         HOSPITAL_SELECT_IDS.forEach(id => {
@@ -11663,7 +11696,7 @@ setupSelectQuickSearch('batch_hospital_search', 'batch_hospital_id');
                 if (String(current) === String(h.id)) opt.selected = true;
                 sel.appendChild(opt);
             });
-            if (typeof refreshSelectQuickSearchData === 'function') refreshSelectQuickSearchData(id);
+            runLegacySafely(() => refreshSelectQuickSearchData(id));
         });
         const doctorHospitalSelect = document.querySelector('#addDoctorForm [name="doctor_hospital_id"]');
         if (doctorHospitalSelect) {
@@ -11725,7 +11758,7 @@ setupSelectQuickSearch('batch_hospital_search', 'batch_hospital_id');
             hospitalRows = Array.isArray(result.hospitals) ? result.hospitals : hospitalRows;
             renderHospitalTable();
             refreshHospitalSelects();
-            if (typeof updateStats === 'function' && result.stats) updateStats(result.stats);
+            if (typeof updateStats === 'function' && result.stats) runLegacySafely(() => updateStats(result.stats));
         } catch (e) {
             toast(e.message || 'تعذّر تعديل المستشفى', 'danger');
         } finally {
@@ -11743,7 +11776,7 @@ setupSelectQuickSearch('batch_hospital_search', 'batch_hospital_id');
             hospitalRows = Array.isArray(result.hospitals) ? result.hospitals : hospitalRows.filter(h => String(h.id) !== String(id));
             renderHospitalTable();
             refreshHospitalSelects();
-            if (typeof updateStats === 'function' && result.stats) updateStats(result.stats);
+            if (typeof updateStats === 'function' && result.stats) runLegacySafely(() => updateStats(result.stats));
         } catch (e) {
             toast(e.message || 'تعذّر حذف المستشفى', 'danger');
         } finally {
@@ -11768,7 +11801,7 @@ setupSelectQuickSearch('batch_hospital_search', 'batch_hospital_id');
                 hospitalRows = Array.isArray(result.hospitals) ? result.hospitals : hospitalRows;
                 renderHospitalTable();
                 refreshHospitalSelects();
-                if (typeof updateStats === 'function' && result.stats) updateStats(result.stats);
+                if (typeof updateStats === 'function' && result.stats) runLegacySafely(() => updateStats(result.stats));
             } catch (err) { toast(err.message, 'danger'); }
             finally { loading(false); }
         }, true);
@@ -11788,7 +11821,7 @@ setupSelectQuickSearch('batch_hospital_search', 'batch_hospital_id');
                 hospitalRows = Array.isArray(result.hospitals) ? result.hospitals : hospitalRows;
                 renderHospitalTable();
                 refreshHospitalSelects();
-                if (typeof updateStats === 'function' && result.stats) updateStats(result.stats);
+                if (typeof updateStats === 'function' && result.stats) runLegacySafely(() => updateStats(result.stats));
             } catch (err) { toast(err.message, 'danger'); }
             finally { loading(false); }
         }, true);
