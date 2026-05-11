@@ -1259,8 +1259,8 @@ body { font-family:'Cairo',sans-serif; background:var(--bg); color:var(--text); 
                 <?= $lv['issue_period'] === 'AM' ? 'ص' : ($lv['issue_period'] === 'PM' ? 'م' : '') ?>
               </td>
               <td>
-                <a href="user.php?action=generate_pdf&leave_id=<?= $lv['id'] ?>"
-                   target="_blank" class="btn btn-outline btn-sm">
+                <a href="user.php?action=generate_pdf&leave_id=<?= $lv['id'] ?>&pdf_mode=download"
+                   class="btn btn-outline btn-sm">
                   📄 PDF
                 </a>
               </td>
