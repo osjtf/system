@@ -64,6 +64,16 @@ try {
 }
 
 $pdo->exec("SET time_zone = '+03:00'");
+$pdo->exec("CREATE TABLE IF NOT EXISTS patient_employers (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    patient_id INT NOT NULL,
+    employer_ar VARCHAR(200) NULL,
+    employer_en VARCHAR(200) NULL,
+    is_default TINYINT(1) DEFAULT 0,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (patient_id) REFERENCES patients(id) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci");
+
 
 // ======================== إنشاء جداول المستخدمين والجلسات ========================
 $pdo->exec("CREATE TABLE IF NOT EXISTS admin_users (
@@ -402,6 +412,66 @@ function is_ajax_request() {
 }
 
 // ======================== دوال مساعدة ========================
+
+function parseEmployerLines(string $raw): array {
+    $rows = [];
+    foreach (preg_split('/\R/u', trim($raw)) as $line) {
+        $line = trim($line);
+        if ($line === '') continue;
+        $parts = array_map('trim', explode('|', $line, 2));
+        $ar = $parts[0] ?? '';
+        $en = $parts[1] ?? '';
+        if ($ar !== '' || $en !== '') $rows[] = ['ar' => $ar, 'en' => $en];
+    }
+    return $rows;
+}
+
+function savePatientEmployerOptions(PDO $pdo, int $patientId, string $raw, string $primaryAr = '', string $primaryEn = ''): void {
+    $pdo->prepare("DELETE FROM patient_employers WHERE patient_id = ?")->execute([$patientId]);
+    $ins = $pdo->prepare("INSERT INTO patient_employers (patient_id, employer_ar, employer_en, is_default) VALUES (?, ?, ?, ?)");
+    if (trim($primaryAr) !== '' || trim($primaryEn) !== '') {
+        $ins->execute([$patientId, trim($primaryAr), trim($primaryEn), 1]);
+    }
+    foreach (parseEmployerLines($raw) as $row) {
+        if ($row['ar'] === trim($primaryAr) && $row['en'] === trim($primaryEn)) continue;
+        $ins->execute([$patientId, $row['ar'], $row['en'], 0]);
+    }
+}
+
+function getPatientEmployerChoices(PDO $pdo, int $patientId): array {
+    $choices = [
+        ['value' => 'default', 'ar' => 'الى من يهمه الامر', 'en' => 'TO WHOM IT MAY CONCERN', 'label' => 'الافتراضي: الى من يهمه الامر'],
+        ['value' => 'none', 'ar' => '', 'en' => '', 'label' => 'بدون جهة عمل']
+    ];
+    $stmt = $pdo->prepare("SELECT id, employer_ar, employer_en FROM patient_employers WHERE patient_id = ? ORDER BY is_default DESC, id ASC");
+    $stmt->execute([$patientId]);
+    foreach ($stmt->fetchAll() as $row) {
+        $ar = trim((string)($row['employer_ar'] ?? ''));
+        $en = trim((string)($row['employer_en'] ?? ''));
+        if ($ar === '' && $en === '') continue;
+        $choices[] = ['value' => 'emp:' . $row['id'], 'ar' => $ar, 'en' => $en, 'label' => trim($ar . ($en ? ' | ' . $en : ''))];
+    }
+    return $choices;
+}
+
+function resolveEmployerChoice(PDO $pdo, int $patientId, string $choice): array {
+    if ($choice === 'none') return ['', ''];
+    if (preg_match('/^emp:(\d+)$/', $choice, $m)) {
+        $stmt = $pdo->prepare("SELECT employer_ar, employer_en FROM patient_employers WHERE id = ? AND patient_id = ? LIMIT 1");
+        $stmt->execute([(int)$m[1], $patientId]);
+        if ($row = $stmt->fetch()) return [$row['employer_ar'] ?? '', $row['employer_en'] ?? ''];
+    }
+    return ['الى من يهمه الامر', 'TO WHOM IT MAY CONCERN'];
+}
+
+function enrichPatientsWithEmployers(PDO $pdo, array $patients): array {
+    foreach ($patients as &$p) {
+        $p['employer_options'] = getPatientEmployerChoices($pdo, (int)($p['id'] ?? 0));
+    }
+    unset($p);
+    return $patients;
+}
+
 function getStats($pdo) {
     $stats = [];
     $stats['total'] = $pdo->query("SELECT COUNT(*) FROM sick_leaves WHERE deleted_at IS NULL")->fetchColumn();
@@ -1859,7 +1929,7 @@ if (isset($_POST['action']) && $_POST['action'] !== 'login' && $_POST['action'] 
         case 'fetch_all_leaves':
             $data = fetchAllData($pdo);
             $data['doctors'] = $pdo->query("SELECT d.*, h.name_ar AS hospital_name_ar FROM doctors d LEFT JOIN hospitals h ON d.hospital_id = h.id ORDER BY d.name_ar")->fetchAll();
-            $data['patients'] = $pdo->query("SELECT * FROM patients ORDER BY name_ar")->fetchAll();
+            $data['patients'] = enrichPatientsWithEmployers($pdo, $pdo->query("SELECT * FROM patients ORDER BY name_ar")->fetchAll());
             $data['hospitals'] = getHospitalsList($pdo);
             $data['stats'] = getStats($pdo);
             $data['unread_messages_count'] = getUnreadMessagesCount($pdo, intval($_SESSION['admin_user_id'] ?? 0));
@@ -2118,6 +2188,10 @@ if (isset($_POST['action']) && $_POST['action'] !== 'login' && $_POST['action'] 
             $hospital_name_en = trim($_POST['hospital_name_en'] ?? '');
             $employer_ar = trim($_POST['employer_ar'] ?? '');
             $employer_en = trim($_POST['employer_en'] ?? '');
+            $employer_choice = trim($_POST['employer_choice'] ?? 'manual');
+            if ($employer_choice !== 'manual') {
+                [$employer_ar, $employer_en] = resolveEmployerChoice($pdo, (int)$patient_id, $employer_choice);
+            }
             $logo_path = uploadLeaveLogo($_FILES['leave_logo'] ?? []);
             // إذا لم يتم رفع شعار، نأخذه من المستشفى
             if (!$logo_path && $hospital_id && isset($hData) && !empty($hData['logo_path'])) {
@@ -2163,7 +2237,7 @@ if (isset($_POST['action']) && $_POST['action'] !== 'login' && $_POST['action'] 
 
             $data = fetchActiveOperationalData($pdo);
             $data['doctors'] = $pdo->query("SELECT d.*, h.name_ar AS hospital_name_ar FROM doctors d LEFT JOIN hospitals h ON d.hospital_id = h.id ORDER BY d.name_ar")->fetchAll();
-            $data['patients'] = $pdo->query("SELECT * FROM patients ORDER BY name_ar")->fetchAll();
+            $data['patients'] = enrichPatientsWithEmployers($pdo, $pdo->query("SELECT * FROM patients ORDER BY name_ar")->fetchAll());
             $data['stats'] = getStats($pdo);
             $data['success'] = true;
             $data['message'] = "تمت إضافة الإجازة بنجاح. رمز الخدمة: $service_code";
@@ -2226,33 +2300,33 @@ if (isset($_POST['action']) && $_POST['action'] !== 'login' && $_POST['action'] 
                 $stmt = $pdo->prepare("UPDATE sick_leaves SET 
                     service_code = ?, issue_date = ?, start_date = ?, end_date = ?, days_count = ?,
                     is_companion = ?, companion_name = ?, companion_relation = ?,
-                    is_paid = ?, payment_amount = ?, doctor_id = ?, hospital_id = COALESCE(?, hospital_id),
+                    is_paid = ?, payment_amount = ?, doctor_id = ?, hospital_id = COALESCE(?, hospital_id), employer_ar = ?, employer_en = ?,
                     issue_time = ?, issue_period = ?, updated_at = ?
                     WHERE id = ?");
                 $stmt->execute([
                     $service_code, $issue_date, $start_date, $end_date, $days_count,
                     $is_companion, $companion_name, $companion_relation,
-                    $is_paid, $payment_amount, $doctor_id_edit, $hospital_id_edit,
+                    $is_paid, $payment_amount, $doctor_id_edit, $hospital_id_edit, $employer_ar_edit, $employer_en_edit,
                     $issue_time ?: null, $issue_period, nowSaudi(), $leave_id
                 ]);
             } else {
                 $stmt = $pdo->prepare("UPDATE sick_leaves SET 
                     service_code = ?, issue_date = ?, start_date = ?, end_date = ?, days_count = ?,
                     is_companion = ?, companion_name = ?, companion_relation = ?,
-                    is_paid = ?, payment_amount = ?, hospital_id = COALESCE(?, hospital_id),
+                    is_paid = ?, payment_amount = ?, hospital_id = COALESCE(?, hospital_id), employer_ar = ?, employer_en = ?,
                     issue_time = ?, issue_period = ?, updated_at = ?
                     WHERE id = ?");
                 $stmt->execute([
                     $service_code, $issue_date, $start_date, $end_date, $days_count,
                     $is_companion, $companion_name, $companion_relation,
-                    $is_paid, $payment_amount, $hospital_id_edit,
+                    $is_paid, $payment_amount, $hospital_id_edit, $employer_ar_edit, $employer_en_edit,
                     $issue_time ?: null, $issue_period, nowSaudi(), $leave_id
                 ]);
             }
 
             $data = fetchActiveOperationalData($pdo);
             $data['doctors'] = $pdo->query("SELECT d.*, h.name_ar AS hospital_name_ar FROM doctors d LEFT JOIN hospitals h ON d.hospital_id = h.id ORDER BY d.name_ar")->fetchAll();
-            $data['patients'] = $pdo->query("SELECT * FROM patients ORDER BY name_ar")->fetchAll();
+            $data['patients'] = enrichPatientsWithEmployers($pdo, $pdo->query("SELECT * FROM patients ORDER BY name_ar")->fetchAll());
             $data['stats'] = getStats($pdo);
             $data['success'] = true;
             $data['message'] = 'تم تعديل الإجازة بنجاح.';
@@ -2373,7 +2447,7 @@ if (isset($_POST['action']) && $_POST['action'] !== 'login' && $_POST['action'] 
 
             $data = fetchActiveOperationalData($pdo);
             $data['doctors'] = $pdo->query("SELECT d.*, h.name_ar AS hospital_name_ar FROM doctors d LEFT JOIN hospitals h ON d.hospital_id = h.id ORDER BY d.name_ar")->fetchAll();
-            $data['patients'] = $pdo->query("SELECT * FROM patients ORDER BY name_ar")->fetchAll();
+            $data['patients'] = enrichPatientsWithEmployers($pdo, $pdo->query("SELECT * FROM patients ORDER BY name_ar")->fetchAll());
             $data['stats'] = getStats($pdo);
             $data['success'] = true;
             $data['message'] = "تم تكرار الإجازة بنجاح. رمز الخدمة الجديد: $service_code";
@@ -2438,7 +2512,7 @@ if (isset($_POST['action']) && $_POST['action'] !== 'login' && $_POST['action'] 
             $pdo->prepare("DELETE FROM notifications WHERE leave_id = ? AND type = 'payment'")->execute([$leave_id]);
             $data = fetchActiveOperationalData($pdo);
             $data['doctors'] = $pdo->query("SELECT d.*, h.name_ar AS hospital_name_ar FROM doctors d LEFT JOIN hospitals h ON d.hospital_id = h.id ORDER BY d.name_ar")->fetchAll();
-            $data['patients'] = $pdo->query("SELECT * FROM patients ORDER BY name_ar")->fetchAll();
+            $data['patients'] = enrichPatientsWithEmployers($pdo, $pdo->query("SELECT * FROM patients ORDER BY name_ar")->fetchAll());
             $data['stats'] = getStats($pdo);
             $data['success'] = true;
             $data['message'] = 'تم تأكيد الدفع بنجاح.';
@@ -2610,6 +2684,7 @@ if (isset($_POST['action']) && $_POST['action'] !== 'login' && $_POST['action'] 
             $employer_en = trim($_POST['patient_employer_en'] ?? '');
             $nationality_ar = trim($_POST['patient_nationality_ar'] ?? '');
             $nationality_en = trim($_POST['patient_nationality_en'] ?? '');
+            $employers_extra = trim($_POST['patient_employers_extra'] ?? '');
             if (empty($name) && !empty($name_ar)) $name = $name_ar;
             if (empty($name) || empty($identity)) {
                 echo json_encode(['success' => false, 'message' => 'يرجى إدخال اسم المريض ورقم هويته.']);
@@ -2629,10 +2704,11 @@ if (isset($_POST['action']) && $_POST['action'] !== 'login' && $_POST['action'] 
                 $patientId = $pdo->lastInsertId();
                 $message = 'تمت إضافة المريض بنجاح.';
             }
+            savePatientEmployerOptions($pdo, (int)$patientId, $employers_extra, $employer_ar, $employer_en);
             $patient = $pdo->prepare("SELECT * FROM patients WHERE id = ?");
             $patient->execute([$patientId]);
-            $patientData = $patient->fetch();
-            $patients = $pdo->query("SELECT * FROM patients ORDER BY name_ar")->fetchAll();
+            $patientData = enrichPatientsWithEmployers($pdo, [$patient->fetch()])[0] ?? null;
+            $patients = enrichPatientsWithEmployers($pdo, $pdo->query("SELECT * FROM patients ORDER BY name_ar")->fetchAll());
             echo json_encode([
                 'success' => true,
                 'message' => $message,
@@ -2654,6 +2730,7 @@ if (isset($_POST['action']) && $_POST['action'] !== 'login' && $_POST['action'] 
             $employer_en = trim($_POST['patient_employer_en'] ?? '');
             $nationality_ar = trim($_POST['patient_nationality_ar'] ?? '');
             $nationality_en = trim($_POST['patient_nationality_en'] ?? '');
+            $employers_extra = trim($_POST['patient_employers_extra'] ?? '');
             if (empty($name) && !empty($name_ar)) $name = $name_ar;
             if ($id <= 0 || empty($name) || empty($identity)) {
                 echo json_encode(['success' => false, 'message' => 'بيانات غير صالحة.']);
@@ -2667,13 +2744,14 @@ if (isset($_POST['action']) && $_POST['action'] !== 'login' && $_POST['action'] 
             }
             $stmt = $pdo->prepare("UPDATE patients SET name = ?, identity_number = ?, phone = ?, folder_link = ?, name_ar = ?, name_en = ?, employer_ar = ?, employer_en = ?, nationality_ar = ?, nationality_en = ? WHERE id = ?");
             $stmt->execute([$name, $identity, $phone, $folder_link, $name_ar, $name_en, $employer_ar, $employer_en, $nationality_ar, $nationality_en, $id]);
+            savePatientEmployerOptions($pdo, $id, $employers_extra, $employer_ar, $employer_en);
             // Cascade update to leaves
             $cascadeStmt = $pdo->prepare("UPDATE sick_leaves SET patient_name_en = ?, employer_ar = ?, employer_en = ? WHERE patient_id = ?");
             $cascadeStmt->execute([$name_en, $employer_ar, $employer_en, $id]);
             $patient = $pdo->prepare("SELECT * FROM patients WHERE id = ?");
             $patient->execute([$id]);
-            $patientData = $patient->fetch();
-            $patients = $pdo->query("SELECT * FROM patients ORDER BY name_ar")->fetchAll();
+            $patientData = enrichPatientsWithEmployers($pdo, [$patient->fetch()])[0] ?? null;
+            $patients = enrichPatientsWithEmployers($pdo, $pdo->query("SELECT * FROM patients ORDER BY name_ar")->fetchAll());
             echo json_encode([
                 'success' => true,
                 'message' => 'تم تعديل المريض بنجاح.',
@@ -2686,7 +2764,7 @@ if (isset($_POST['action']) && $_POST['action'] !== 'login' && $_POST['action'] 
         case 'delete_patient':
             $id = intval($_POST['patient_id'] ?? 0);
             $pdo->prepare("DELETE FROM patients WHERE id = ?")->execute([$id]);
-            $patients = $pdo->query("SELECT * FROM patients ORDER BY name_ar")->fetchAll();
+            $patients = enrichPatientsWithEmployers($pdo, $pdo->query("SELECT * FROM patients ORDER BY name_ar")->fetchAll());
             echo json_encode([
                 'success' => true,
                 'message' => 'تم حذف المريض بنجاح.',
@@ -2730,7 +2808,7 @@ if (isset($_POST['action']) && $_POST['action'] !== 'login' && $_POST['action'] 
                     $insertedPat++;
                 }
             }
-            $patients = $pdo->query("SELECT * FROM patients ORDER BY name_ar")->fetchAll();
+            $patients = enrichPatientsWithEmployers($pdo, $pdo->query("SELECT * FROM patients ORDER BY name_ar")->fetchAll());
             $summaryPat = "تمت معالجة الدفعة: أضيف {$insertedPat}، تم تحديث {$updatedPat}.";
             if (!empty($errorsPat)) $summaryPat .= " أخطاء: " . implode(' | ', array_slice($errorsPat, 0, 3));
             echo json_encode(['success' => true, 'message' => $summaryPat, 'inserted' => $insertedPat, 'updated' => $updatedPat, 'errors' => $errorsPat, 'patients' => $patients, 'stats' => getStats($pdo)]);
@@ -3016,7 +3094,7 @@ if (isset($_POST['action']) && $_POST['action'] !== 'login' && $_POST['action'] 
             break;
 
         case 'fetch_patients':
-            $patients = $pdo->query("SELECT * FROM patients ORDER BY name_ar")->fetchAll();
+            $patients = enrichPatientsWithEmployers($pdo, $pdo->query("SELECT * FROM patients ORDER BY name_ar")->fetchAll());
             echo json_encode(['success' => true, 'patients' => $patients, 'stats' => getStats($pdo)]);
             break;
 
@@ -3730,6 +3808,7 @@ if (isset($_POST['action']) && $_POST['action'] !== 'login' && $_POST['action'] 
             $daysCount = intval($_POST['days_count'] ?? 0);
             $issueTime = normalizeIssueTimeForStorage(trim($_POST['issue_time'] ?? ''), in_array(strtoupper(trim($_POST['issue_period'] ?? '')), ['AM','PM']) ? strtoupper(trim($_POST['issue_period'])) : null);
             $issuePeriod = in_array(strtoupper(trim($_POST['issue_period'] ?? '')), ['AM','PM']) ? strtoupper(trim($_POST['issue_period'])) : null;
+            $employerChoice = trim($_POST['employer_choice'] ?? 'default');
             if ($uid <= 0 || $hospitalId <= 0 || $doctorId <= 0 || !$startDate || !$endDate || $daysCount <= 0) {
                 echo json_encode(['success'=>false,'message'=>'يرجى تعبئة بيانات الإجازة كاملة.']); exit;
             }
@@ -3751,6 +3830,7 @@ if (isset($_POST['action']) && $_POST['action'] !== 'login' && $_POST['action'] 
             $doc = $dStmt->fetch();
             if (!$hosp || !$doc) { echo json_encode(['success'=>false,'message'=>'المستشفى أو الطبيب غير صالح، تأكد أن الطبيب تابع للمستشفى.']); exit; }
             $issueDate = $startDate;
+            [$employerAr, $employerEn] = resolveEmployerChoice($pdo, $patientId, $employerChoice);
             $serviceCode = generateServiceCode($pdo, $hosp['service_prefix'] ?? 'GSL', $issueDate);
             $stmt = $pdo->prepare("INSERT INTO sick_leaves
                 (service_code, patient_id, doctor_id, hospital_id, created_by_user_id, issue_date, issue_time, issue_period, start_date, end_date, days_count,
@@ -3761,12 +3841,12 @@ if (isset($_POST['action']) && $_POST['action'] !== 'login' && $_POST['action'] 
                 $startDate, $endDate, $daysCount,
                 $acct['name_en'] ?? '', $doc['name_en'] ?? '', $doc['title_en'] ?? '',
                 $hosp['name_ar'] ?? '', $hosp['name_en'] ?? '', $hosp['logo_url'] ?? $hosp['logo_path'] ?? '',
-                $acct['employer_ar'] ?? '', $acct['employer_en'] ?? '', 1, 0
+                $employerAr, $employerEn, 1, 0
             ]);
             $records = fetchPatientAccountRecords($pdo, $uid);
             $data = fetchActiveOperationalData($pdo);
             $data['doctors'] = $pdo->query("SELECT d.*, h.name_ar AS hospital_name_ar FROM doctors d LEFT JOIN hospitals h ON d.hospital_id = h.id ORDER BY d.name_ar")->fetchAll();
-            $data['patients'] = $pdo->query("SELECT * FROM patients ORDER BY name_ar")->fetchAll();
+            $data['patients'] = enrichPatientsWithEmployers($pdo, $pdo->query("SELECT * FROM patients ORDER BY name_ar")->fetchAll());
             $data['stats'] = getStats($pdo);
             $data['account_records'] = $records;
             $data['success'] = true;
@@ -3944,7 +4024,7 @@ $loggedIn = is_logged_in();
 
 if ($loggedIn) {
     $doctors = $pdo->query("SELECT d.*, h.name_ar AS hospital_name_ar FROM doctors d LEFT JOIN hospitals h ON d.hospital_id = h.id ORDER BY d.name_ar")->fetchAll();
-    $patients = $pdo->query("SELECT * FROM patients ORDER BY name_ar")->fetchAll();
+    $patients = enrichPatientsWithEmployers($pdo, $pdo->query("SELECT * FROM patients ORDER BY name_ar")->fetchAll());
     $hospitals = getHospitalsList($pdo);
     
     $data = fetchAllData($pdo);
@@ -6262,6 +6342,14 @@ if (!in_array($uiDataViewMode, ['table','compact','cards','zebra','glass','minim
                         </div>
 
                         <!-- جهة العمل -->
+                        <div class="col-md-12">
+                            <label class="form-label">اختيار جهة العمل</label>
+                            <select class="form-select" name="employer_choice" id="employer_choice">
+                                <option value="default">الافتراضي: الى من يهمه الامر</option>
+                                <option value="none">بدون جهة عمل</option>
+                                <option value="manual">إدخال يدوي</option>
+                            </select>
+                        </div>
                         <div class="col-md-6">
                             <label class="form-label">جهة العمل (عربي)</label>
                             <input type="text" class="form-control" name="employer_ar" id="employer_ar" placeholder="الى من يهمه الامر">
@@ -6324,6 +6412,22 @@ if (!in_array($uiDataViewMode, ['table','compact','cards','zebra','glass','minim
                                 <input class="form-check-input" type="checkbox" name="is_paid" id="is_paid">
                                 <label class="form-check-label" for="is_paid">مدفوعة</label>
                             </div>
+                        </div>
+                        <div class="col-md-12">
+                            <label class="form-label">اختيار جهة العمل</label>
+                            <select class="form-select" name="employer_choice_edit" id="employer_choice_edit">
+                                <option value="current">الحالية في الإجازة</option>
+                                <option value="default">الافتراضي: الى من يهمه الامر</option>
+                                <option value="none">بدون جهة عمل</option>
+                            </select>
+                        </div>
+                        <div class="col-md-6">
+                            <label class="form-label">جهة العمل (عربي)</label>
+                            <input type="text" class="form-control" name="employer_ar_edit" id="employer_ar_edit">
+                        </div>
+                        <div class="col-md-6">
+                            <label class="form-label">Employer (English)</label>
+                            <input type="text" class="form-control" name="employer_en_edit" id="employer_en_edit">
                         </div>
                         <div class="col-md-6">
                             <label class="form-label">المبلغ</label>
@@ -7173,6 +7277,7 @@ if (!in_array($uiDataViewMode, ['table','compact','cards','zebra','glass','minim
                     <div class="mb-3"><label class="form-label">الهاتف</label><input type="text" class="form-control" name="phone" id="quick_patient_phone"></div>
                     <div class="mb-3"><label class="form-label">جهة العمل (عربي)</label><input type="text" class="form-control" name="patient_employer_ar" id="quick_patient_employer_ar"></div>
                     <div class="mb-3"><label class="form-label">Employer (EN)</label><input type="text" class="form-control" name="patient_employer_en" id="quick_patient_employer_en"></div>
+                    <div class="mb-3"><label class="form-label">جهات عمل إضافية</label><textarea class="form-control" name="patient_employers_extra" id="quick_patient_employers_extra" rows="3" placeholder="كل سطر: عربي | English"></textarea><div class="form-text">يمكن إدخال عربي فقط أو English فقط أو عربي | English.</div></div>
                     <div class="mb-3"><label class="form-label">الجنسية (عربي)</label><input type="text" class="form-control" name="patient_nationality_ar" id="quick_patient_nationality_ar"></div>
                     <div class="mb-3"><label class="form-label">Nationality (EN)</label><input type="text" class="form-control" name="patient_nationality_en" id="quick_patient_nationality_en"></div>
                     <div class="mb-3"><label class="form-label">رابط المجلد</label><input type="url" class="form-control" name="folder_link" id="quick_patient_folder_link" placeholder="https://..."></div>
@@ -7246,6 +7351,7 @@ if (!in_array($uiDataViewMode, ['table','compact','cards','zebra','glass','minim
                     <div class="mb-3"><label class="form-label">الهاتف</label><input type="text" class="form-control" name="phone" id="edit_patient_phone"></div>
                     <div class="mb-3"><label class="form-label">جهة العمل (عربي)</label><input type="text" class="form-control" name="patient_employer_ar" id="edit_patient_employer_ar"></div>
                     <div class="mb-3"><label class="form-label">Employer (EN)</label><input type="text" class="form-control" name="patient_employer_en" id="edit_patient_employer_en"></div>
+                    <div class="mb-3"><label class="form-label">جهات عمل إضافية</label><textarea class="form-control" name="patient_employers_extra" id="edit_patient_employers_extra" rows="3" placeholder="كل سطر: عربي | English"></textarea><div class="form-text">الجهة الأساسية بالأعلى + هذه الخيارات ستظهر عند إنشاء/تعديل الإجازة.</div></div>
                     <div class="mb-3"><label class="form-label">الجنسية (عربي)</label><input type="text" class="form-control" name="patient_nationality_ar" id="edit_patient_nationality_ar"></div>
                     <div class="mb-3"><label class="form-label">Nationality (EN)</label><input type="text" class="form-control" name="patient_nationality_en" id="edit_patient_nationality_en"></div>
                     <div class="mb-3"><label class="form-label">رابط المجلد</label><input type="url" class="form-control" name="folder_link" id="edit_patient_folder_link"></div>
@@ -7601,6 +7707,13 @@ if (!in_array($uiDataViewMode, ['table','compact','cards','zebra','glass','minim
                         <label class="form-label fw-bold">الطبيب</label>
                         <select class="form-select" id="acct_leave_doctor_id" required disabled>
                             <option value="">-- اختر المستشفى أولاً --</option>
+                        </select>
+                    </div>
+                    <div class="col-md-12">
+                        <label class="form-label fw-bold">جهة العمل</label>
+                        <select class="form-select" id="acct_leave_employer_choice">
+                            <option value="default">الافتراضي: الى من يهمه الامر</option>
+                            <option value="none">بدون جهة عمل</option>
                         </select>
                     </div>
                     <div class="col-md-4">
@@ -8786,6 +8899,33 @@ async function fetchAndPopulateDoctorsForHospital(selectId, hospitalId, selected
     }
 }
 
+function employerOptionsHtml(patient, current = 'default') {
+    const opts = Array.isArray(patient?.employer_options) && patient.employer_options.length ? patient.employer_options : [
+        { value: 'default', label: 'الافتراضي: الى من يهمه الامر', ar: 'الى من يهمه الامر', en: 'TO WHOM IT MAY CONCERN' },
+        { value: 'none', label: 'بدون جهة عمل', ar: '', en: '' }
+    ];
+    return opts.map(o => `<option value="${htmlspecialchars(o.value || '')}" data-ar="${htmlspecialchars(o.ar || '')}" data-en="${htmlspecialchars(o.en || '')}" ${String(current) === String(o.value) ? 'selected' : ''}>${htmlspecialchars(o.label || o.ar || o.en || o.value || '')}</option>`).join('');
+}
+
+function populateEmployerChoice(selectId, patient, current = 'default') {
+    const sel = document.getElementById(selectId);
+    if (!sel) return;
+    sel.innerHTML = employerOptionsHtml(patient, current);
+    if (selectId === 'employer_choice') {
+        sel.insertAdjacentHTML('beforeend', '<option value="manual">إدخال يدوي</option>');
+    }
+}
+
+function applyEmployerChoice(selectId, arId, enId) {
+    const sel = document.getElementById(selectId);
+    if (!sel) return;
+    const opt = sel.options[sel.selectedIndex];
+    const ar = document.getElementById(arId);
+    const en = document.getElementById(enId);
+    if (ar) ar.value = opt?.dataset?.ar || '';
+    if (en) en.value = opt?.dataset?.en || '';
+}
+
 function updatePatientSelects(patients) {
     const sel = document.getElementById('patient_select');
     if (!sel) return;
@@ -9191,6 +9331,15 @@ setupSelectQuickSearch('batch_hospital_search', 'batch_hospital_id');
         document.getElementById('companion_relation_edit').value = leave.companion_relation || '';
         document.getElementById('is_paid_edit').checked = leave.is_paid == 1;
         document.getElementById('payment_amount_edit').value = leave.payment_amount;
+        const editPatientForEmployer = (currentTableData.patients || []).find(p => String(p.id) === String(leave.patient_id));
+        populateEmployerChoice('employer_choice_edit', editPatientForEmployer, 'current');
+        const editEmployerSelect = document.getElementById('employer_choice_edit');
+        if (editEmployerSelect && !Array.from(editEmployerSelect.options).some(o => o.value === 'current')) {
+            editEmployerSelect.insertAdjacentHTML('afterbegin', '<option value="current">الحالية في الإجازة</option>');
+        }
+        if (editEmployerSelect) editEmployerSelect.value = 'current';
+        document.getElementById('employer_ar_edit').value = leave.employer_ar || '';
+        document.getElementById('employer_en_edit').value = leave.employer_en || '';
         document.getElementById('issue_time_edit').value = leave.issue_time || '';
         document.getElementById('issue_period_edit').value = leave.issue_period || 'AM';
 
@@ -9913,6 +10062,10 @@ setupSelectQuickSearch('batch_hospital_search', 'batch_hospital_id');
             document.getElementById('edit_patient_nationality_ar').value = editBtn.dataset.nationalityAr || '';
             document.getElementById('edit_patient_nationality_en').value = editBtn.dataset.nationalityEn || '';
             document.getElementById('edit_patient_folder_link').value = editBtn.dataset.folder || '';
+            const patientRow = (currentTableData.patients || []).find(p => String(p.id) === String(editBtn.dataset.id));
+            const extras = (patientRow?.employer_options || []).filter(o => !['default','none'].includes(String(o.value))).map(o => `${o.ar || ''}${o.en ? ' | ' + o.en : ''}`).join('
+');
+            document.getElementById('edit_patient_employers_extra').value = extras;
             editPatientModal.show();
         }
         if (delBtn) {
@@ -10529,6 +10682,9 @@ setupSelectQuickSearch('batch_hospital_search', 'batch_hospital_id');
                 document.getElementById('acct_leave_days_count').value = '';
                 document.getElementById('acct_leave_issue_time').value = '';
                 document.getElementById('acct_leave_issue_period').value = 'AM';
+                const accountPatient = (acctAllData || []).find(u => String(u.id) === String(createLeaveBtn.dataset.id));
+                const patientObj = (currentTableData.patients || []).find(p => String(p.id) === String(accountPatient?.linked_patient_id || createLeaveBtn.dataset.patientId));
+                populateEmployerChoice('acct_leave_employer_choice', patientObj, 'default');
                 acctCreateLeaveModal.show();
             }
 
@@ -10714,7 +10870,8 @@ setupSelectQuickSearch('batch_hospital_search', 'batch_hospital_id');
                 end_date: endDate,
                 days_count: days,
                 issue_time: document.getElementById('acct_leave_issue_time').value,
-                issue_period: document.getElementById('acct_leave_issue_period').value
+                issue_period: document.getElementById('acct_leave_issue_period').value,
+                employer_choice: document.getElementById('acct_leave_employer_choice').value
             });
             hideLoading();
             if (result.success) {
@@ -12055,6 +12212,10 @@ setupSelectQuickSearch('batch_hospital_search', 'batch_hospital_id');
     // calcDays already defined above with parametric version
 
     // ====== تعبئة بيانات المريض تلقائياً ======
+    document.getElementById('employer_choice')?.addEventListener('change', () => applyEmployerChoice('employer_choice', 'employer_ar', 'employer_en'));
+    document.getElementById('employer_choice_edit')?.addEventListener('change', () => applyEmployerChoice('employer_choice_edit', 'employer_ar_edit', 'employer_en_edit'));
+    document.getElementById('acct_leave_employer_choice')?.addEventListener('change', () => {});
+
     document.getElementById('patient_select')?.addEventListener('change', function() {
         const patientId = this.value;
         if (patientId && patientId !== 'manual') {
@@ -12062,8 +12223,8 @@ setupSelectQuickSearch('batch_hospital_search', 'batch_hospital_id');
             if (p) {
                 const ea = document.getElementById('employer_ar');
                 const ee = document.getElementById('employer_en');
-                if (ea && p.employer_ar) ea.value = p.employer_ar;
-                if (ee && p.employer_en) ee.value = p.employer_en;
+                populateEmployerChoice('employer_choice', p, 'default');
+                applyEmployerChoice('employer_choice', 'employer_ar', 'employer_en');
             }
         }
     });
