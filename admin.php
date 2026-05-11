@@ -7542,16 +7542,28 @@ const INITIAL_UI_PREFERENCES = {
 const IS_LOGGED_IN = <?php echo $loggedIn ? 'true' : 'false'; ?>;
 const REQUEST_URL = window.location.pathname;
 
+function isIgnorableIterableMessage(value) {
+    const message = String(value || '');
+    return message.includes('undefined is not iterable') || message.includes('Symbol(Symbol.iterator)');
+}
+const nativeAlert = window.alert?.bind(window);
+window.alert = function(message) {
+    if (isIgnorableIterableMessage(message)) {
+        console.warn('Suppressed non-critical iterable alert:', message);
+        return;
+    }
+    return nativeAlert ? nativeAlert(message) : undefined;
+};
 window.addEventListener('error', (event) => {
     const message = String(event?.message || event?.error?.message || '');
-    if (message.includes('undefined is not iterable') || message.includes('Symbol(Symbol.iterator)')) {
+    if (isIgnorableIterableMessage(message)) {
         console.warn('Suppressed non-critical iterable error:', message);
         event.preventDefault();
     }
 });
 window.addEventListener('unhandledrejection', (event) => {
     const message = String(event?.reason?.message || event?.reason || '');
-    if (message.includes('undefined is not iterable') || message.includes('Symbol(Symbol.iterator)')) {
+    if (isIgnorableIterableMessage(message)) {
         console.warn('Suppressed non-critical iterable rejection:', message);
         event.preventDefault();
     }
@@ -7605,7 +7617,7 @@ function formatSaudiDateTime(dateValue) {
 
 function showToast(msg, type = 'success') {
     const msgText = String(msg ?? '');
-    if (msgText.includes('undefined is not iterable') || msgText.includes('Symbol(Symbol.iterator)')) {
+    if (typeof isIgnorableIterableMessage === 'function' && isIgnorableIterableMessage(msgText)) {
         console.warn('Suppressed non-critical iterable notification:', msgText);
         return;
     }
@@ -11613,7 +11625,7 @@ setupSelectQuickSearch('batch_hospital_search', 'batch_hospital_id');
     }
     function toast(message, type = 'success') {
         const messageText = String(message ?? '');
-        if (messageText.includes('undefined is not iterable') || messageText.includes('Symbol(Symbol.iterator)')) {
+        if (typeof isIgnorableIterableMessage === 'function' && isIgnorableIterableMessage(messageText)) {
             console.warn('Suppressed non-critical hospital notification:', messageText);
             return;
         }
