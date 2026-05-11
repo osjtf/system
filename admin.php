@@ -1104,28 +1104,28 @@ function handleGeneratePdf($pdo, $leave_id, $pdfMode = 'preview') {
     $reportCSS .= '.top-right-placeholder{position:absolute;top:36px;left:592px;width:214px;height:107px;display:flex;align-items:center;justify-content:center;font-size:14px;z-index:5}';
     $reportCSS .= '.top-left-placeholder{position:absolute;top:36px;left:36px;width:149.96px;height:65.98px;display:flex;align-items:center;justify-content:center;font-size:14px;z-index:5}';
     $reportCSS .= '.bottom-right-placeholder{position:absolute;top:1005px;left:657.17px;width:149.96px;height:71.23px;display:flex;align-items:center;justify-content:center;font-size:12px;z-index:5}';
-    $reportCSS .= '.header-placeholder{top:-55px;left:320px;width:160px;height:50px;position:absolute;display:flex;align-items:center;justify-content:center;font-size:11px}';
+    $reportCSS .= '.header-placeholder{top:-50px;left:320px;width:150px;height:40px;position:absolute;display:flex;align-items:center;justify-content:center;font-size:11px}';
     $reportCSS .= '.group1-thq-text-elm41{top:40px;left:289px;color:rgba(48,109,181,1);width:215px;position:absolute;font-size:22.5px;font-weight:700;text-align:center;line-height:30px}';
     $reportCSS .= '.group1-thq-text-elm44{top:-10px;left:310px;color:rgba(0,0,0,1);position:absolute;font-size:17.3px;font-weight:400;text-align:left;font-family:"Times New Roman",serif}';
     $reportCSS .= '.group1-thq-hospitallogoandthename-elm{top:760px;left:438.94px;width:403px;height:202.78px;display:flex;position:absolute;align-items:flex-start}';
     $reportCSS .= '.placeholder-logo-hospital{top:-12px;left:133px;width:136px;height:136px;position:absolute;display:flex;align-items:center;justify-content:center;font-size:12px}';
-    $reportCSS .= '.group1-thq-text-elm18{top:120px;color:rgba(0,0,0,1);width:403px;height:auto;position:absolute;font-size:12.8px;text-align:center;line-height:22px}';
+    $reportCSS .= '.group1-thq-text-elm18{top:113px;color:rgba(0,0,0,1);width:403px;height:auto;position:absolute;font-size:12.8px;text-align:center;line-height:22px}';
     $reportCSS .= '.group1-thq-thedateofissueandalsotimeofissue-elm{top:calc(989.85px + var(--footer-offset));left:37.37px;width:250px;height:56px;display:flex;position:absolute;align-items:flex-start}';
     $reportCSS .= '.group1-thq-text-elm22{color:rgba(0,0,0,1);font-size:12.5px;font-weight:700;text-align:left;line-height:28px;font-family:"Times New Roman",serif;font-weight:bold;position:absolute;white-space:nowrap}';
     $reportCSS .= '.group1-thq-text-elm36{top:calc(724.55px + var(--footer-offset));left:29.23px;color:rgba(0,0,0,1);position:absolute;font-size:12px;font-weight:700;text-align:center;font-family:"Noto Sans Arabic";line-height:23px}';
-    $reportCSS .= '.group1-thq-text-elm39{top:calc(775.17px + var(--footer-offset));left:55px;color:rgba(0,0,0,1);position:absolute;font-size:12px;font-weight:700;text-align:left;font-family:"Times New Roman",serif;font-weight:bold}';
-    $reportCSS .= '.group1-thq-text-elm40{top:calc(798.91px + var(--footer-offset));left:108.35px;color:rgba(20,0,255,1);position:absolute;font-size:11px;font-weight:700;text-align:left;text-decoration:underline;pointer-events:auto;font-family:"Times New Roman",serif;font-weight:bold}';
+    $reportCSS .= '.group1-thq-text-elm39{top:calc(774px + var(--footer-offset));left:55px;color:rgba(0,0,0,1);position:absolute;font-size:12px;font-weight:700;text-align:left;font-family:"Times New Roman",serif;font-weight:bold}';
+    $reportCSS .= '.group1-thq-text-elm40{top:calc(795px + var(--footer-offset));left:108.35px;color:rgba(20,0,255,1);position:absolute;font-size:11px;font-weight:700;text-align:left;text-decoration:underline;pointer-events:auto;font-family:"Times New Roman",serif;font-weight:bold}';
     $reportCSS .= '.placeholder-136{position:absolute;top:620px;left:122px;width:136px;height:136px;display:flex;align-items:center;justify-content:center;font-size:12px;pointer-events:auto}';
     $reportCSS .= '.vertical-divider{position:absolute;top:735px;left:436px;width:1px;height:7cm;background-color:#ddd}';
     $reportCSS .= '.thin-slash{font-weight:300;font-family:"Inter",sans-serif;margin:0 3px;display:inline-block}';
 
     // ==================== Report Body HTML ====================
     $reportBody = '<div class="report-page">';
-    $reportBody .= '<div class="top-right-placeholder"><img src="sehalogoright.svg" style="width:100%;height:100%"/></div>';
-    $reportBody .= '<div class="top-left-placeholder"><img src="sehalogoleft.svg" style="width:100%;height:100%"/></div>';
-    $reportBody .= '<div class="bottom-right-placeholder"><img src="bottomright.svg" style="width:100%;height:100%"/></div>';
+    $reportBody .= '<div class="top-right-placeholder"><img src="sehalogoright.png" style="width:100%;height:100%"/></div>';
+    $reportBody .= '<div class="top-left-placeholder"><img src="sehalogoleft.png" style="width:100%;height:100%"/></div>';
+    $reportBody .= '<div class="bottom-right-placeholder"><img src="bottomright.png" style="width:100%;height:100%"/></div>';
     $reportBody .= '<div class="group1-thq-staticinfo-elm">';
-    $reportBody .= '<div class="header-placeholder"><img src="header.svg" style="width:100%;height:100%"/></div>';
+    $reportBody .= '<div class="header-placeholder"><img src="header.png" style="width:100%;height:100%"/></div>';
     $reportBody .= '<span class="group1-thq-text-elm41"><span style="font-size:22.5px;font-family:\'Noto sans arabic\',serif;font-weight:700;color:#306db5">تقرير إجازة مرضية</span><br/><span style="font-size:18.7px;font-family:\'Times New Roman\',serif;font-weight:700;color:#2c3e77">Sick Leave Report</span></span>';
     $reportBody .= '<span class="group1-thq-text-elm44">Kingdom of Saudi Arabia</span>';
     $reportBody .= '<div class="placeholder-136"><img src="qr.svg" style="width:130px;height:130px"/></div>';
@@ -1167,108 +1167,152 @@ function handleGeneratePdf($pdo, $leave_id, $pdfMode = 'preview') {
     $scFile = preg_replace('/[^a-zA-Z0-9_-]/', '_', $sc);
 
     // ==================== DOWNLOAD MODE (WeasyPrint) ====================
-    if ($pdfMode === 'download') {
-        // Build full HTML with embedded SVGs as absolute URLs
-        $baseUrl = (isset($_SERVER['HTTPS']) && $_SERVER['HTTPS'] === 'on' ? 'https' : 'http') . '://' . $_SERVER['HTTP_HOST'] . dirname($_SERVER['SCRIPT_NAME']) . '/';
-        
-        $pdfHtml = '<!DOCTYPE html><html lang="ar"><head><meta charset="utf-8"/>';
-        $pdfHtml .= '<title>Sick Leave Report</title>';
-        // Google Fonts for WeasyPrint
-        $pdfHtml .= '<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@100;200;300;400;500;600;700&display=swap" />';
-        $pdfHtml .= '<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=STIX+Two+Text:ital,wght@0,400;0,600;0,700;1,400&display=swap" />';
-        $pdfHtml .= '<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Noto+Sans+Arabic:wght@400;600;700&display=swap" />';
-        $pdfHtml .= '<style data-tag="reset-style-sheet">';
-        $pdfHtml .= 'html { line-height: 1.15; } body { margin: 0; }';
-        $pdfHtml .= '* { box-sizing: border-box; border-width: 0; border-style: solid; }';
-        $pdfHtml .= 'p, li, ul, pre, div, h1, h2, h3, h4, h5, h6, figure, blockquote, figcaption { margin: 0; padding: 0; }';
-        $pdfHtml .= 'a { color: inherit; text-decoration: inherit; }';
-        $pdfHtml .= '</style>';
-        $pdfHtml .= '<style data-tag="default-style-sheet">';
-        $pdfHtml .= 'html { font-family: Inter, sans-serif; font-size: 16px; }';
-        $pdfHtml .= 'body { font-weight: 400; color: #191818; background: #ffffff; margin: 0; padding: 0; }';
-        $pdfHtml .= '</style>';
-        $pdfHtml .= '<style>';
-        $pdfHtml .= '@page { size: 842.25px 1190.25px; margin: 0; }';
-        $pdfHtml .= '.group1-container1 { width: 842.25px; height: 1190.25px; position: relative; background-color: transparent; margin: 0; padding: 0; }';
-        $pdfHtml .= '.group1-thq-group1-elm { width: 842.25px; height: 1190.25px; position: relative; background-color: white; margin: 0; padding: 0; }';
-        $pdfHtml .= '.info-table { position: absolute; top: 242px; left: 36px; width: 770px; border-collapse: separate; border-spacing: 0; border: 1px solid #cccccc; border-radius: 8px; overflow: hidden; background-color: transparent; z-index: 10; }';
-        $pdfHtml .= '.info-table td { border-bottom: 1px solid #cccccc; border-right: 1px solid #cccccc; height: 42px; text-align: center; vertical-align: middle; padding: 4px 8px; }';
-        $pdfHtml .= '.info-table td:last-child { border-right: none; } .info-table tr:last-child td { border-bottom: none; }';
-        $pdfHtml .= '.info-table .en-title { width: 161px; color: rgba(54, 111, 181, 1); font-size: 13.5px; font-weight: 700; text-align: center; font-family: "Times New Roman", serif; }';
-        $pdfHtml .= '.info-table .data-cell { width: 240px; color: rgba(44, 62, 119, 1); font-size: 13.5px; font-family: "Times New Roman", serif; font-weight: 400; text-align: center; }';
-        $pdfHtml .= '.info-table .date-cell { font-size: 13.9px; } .info-table .data-cell.ar-text { font-family: "Noto Sans Arabic", sans-serif; }';
-        $pdfHtml .= '.info-table .ar-title { width: 140px; color: rgba(54, 111, 181, 1); font-size: 13.5px; font-weight: 700; text-align: center; font-family: "Noto Sans Arabic", sans-serif; white-space: nowrap; }';
-        $pdfHtml .= '.info-table tr.blue-row td { background-color: #2c3e77; color: #ffffff; border-bottom: 1px solid #cccccc; border-right: 1px solid #cccccc; }';
-        $pdfHtml .= '.info-table tr.blue-row td:last-child { border-right: none; }';
-        $pdfHtml .= '.info-table .blue-row .data-cell.ar-text { color: rgba(255, 255, 255, 1); font-size: 13.5px; font-family: "Times New Roman", serif; font-weight: 400; }';
-        $pdfHtml .= '.info-table .blue-row .data-cell { color: rgba(255, 255, 255, 1); }';
-        $pdfHtml .= '.info-table tr.gray-row td { background-color: #f7f7f7; }';
-        $pdfHtml .= '.en-spaced { letter-spacing: 0.3px; }';
-        $pdfHtml .= ':root { --footer-offset: 40px; }';
-        $pdfHtml .= '.group1-thq-staticinfo-elm { top: 125px; left: 36.65px; width: 768.35px; height: 811.91px; display: flex; position: absolute; align-items: flex-start; }';
-        $pdfHtml .= '.top-right-placeholder { position: absolute; top: 36px; left: 592px; width: 214px; height: 107px; display: flex; align-items: center; justify-content: center; }';
-        $pdfHtml .= '.top-left-placeholder { position: absolute; top: 36px; left: 36px; width: 149.96px; height: 65.98px; display: flex; align-items: center; justify-content: center; }';
-        $pdfHtml .= '.bottom-right-placeholder { position: absolute; top: 1005px; left: 657.17px; width: 149.96px; height: 71.23px; display: flex; align-items: center; justify-content: center; }';
-        $pdfHtml .= '.header-placeholder { top: -55px; left: 320px; width: 160px; height: 50px; position: absolute; display: flex; align-items: center; justify-content: center; }';
-        $pdfHtml .= '.group1-thq-text-elm41 { top: 40px; left: 289px; color: rgba(48, 109, 181, 1); width: 215px; position: absolute; font-size: 22.5px; font-weight: 700; text-align: center; line-height: 30px; }';
-        $pdfHtml .= '.group1-thq-text-elm44 { top: -10px; left: 310px; color: rgba(0, 0, 0, 1); position: absolute; font-size: 17.3px; font-weight: 400; text-align: left; font-family: "Times New Roman", serif; }';
-        $pdfHtml .= '.group1-thq-hospitallogoandthename-elm { top: 760px; left: 438.94px; width: 403px; height: 202.78px; display: flex; position: absolute; align-items: flex-start; }';
-        $pdfHtml .= '.placeholder-logo-hospital { top: -12px; left: 133px; width: 136px; height: 136px; position: absolute; display: flex; align-items: center; justify-content: center; }';
-        $pdfHtml .= '.group1-thq-text-elm18 { top: 120px; color: rgba(0, 0, 0, 1); width: 403px; height: auto; position: absolute; font-size: 12.8px; text-align: center; line-height: 22px; }';
-        $pdfHtml .= '.group1-thq-thedateofissueandalsotimeofissue-elm { top: calc(989.85px + var(--footer-offset)); left: 37.37px; width: 250px; height: 56px; display: flex; position: absolute; align-items: flex-start; }';
-        $pdfHtml .= '.group1-thq-text-elm22 { color: rgba(0, 0, 0, 1); font-size: 12.5px; font-weight: 700; text-align: left; line-height: 28px; font-family: "Times New Roman", serif; position: absolute; white-space: nowrap; }';
-        $pdfHtml .= '.group1-thq-text-elm36 { top: calc(724.55px + var(--footer-offset)); left: 29.23px; color: rgba(0, 0, 0, 1); position: absolute; font-size: 12px; font-weight: 700; text-align: center; font-family: "Noto Sans Arabic", sans-serif; line-height: 23px; }';
-        $pdfHtml .= '.group1-thq-text-elm39 { top: calc(775.17px + var(--footer-offset)); left: 55px; color: rgba(0, 0, 0, 1); position: absolute; font-size: 12px; font-weight: 700; text-align: left; font-family: "Times New Roman", serif; }';
-        $pdfHtml .= '.group1-thq-text-elm40 { top: calc(798.91px + var(--footer-offset)); left: 108.35px; color: rgba(20, 0, 255, 1); position: absolute; font-size: 11px; font-weight: 700; text-align: left; text-decoration: underline; font-family: "Times New Roman", serif; }';
-        $pdfHtml .= '.placeholder-136 { position: absolute; top: 620px; left: 122px; width: 136px; height: 136px; display: flex; align-items: center; justify-content: center; }';
-        $pdfHtml .= '.vertical-divider { position: absolute; top: 735px; left: 436px; width: 1px; height: 7cm; background-color: #dddddd; }';
-        $pdfHtml .= '.thin-slash { font-weight: 300; font-family: "Inter", sans-serif; margin: 0 3px; display: inline-block; }';
-        $pdfHtml .= '</style></head><body>';
-        
-        // Replace relative SVG paths with absolute URLs
-        $pdfBody = str_replace(
-            ['src="sehalogoright.svg"', 'src="sehalogoleft.svg"', 'src="bottomright.svg"', 'src="header.svg"', 'src="qr.svg"'],
-            ['src="' . $baseUrl . 'sehalogoright.svg"', 'src="' . $baseUrl . 'sehalogoleft.svg"', 'src="' . $baseUrl . 'bottomright.svg"', 'src="' . $baseUrl . 'header.svg"', 'src="' . $baseUrl . 'qr.svg"'],
-            $reportBody
-        );
-        $pdfHtml .= $pdfBody;
-        $pdfHtml .= '</body></html>';
-        
-        // Save HTML to temp file
-        $tmpHtml = '/tmp/weasyprint/report_' . uniqid() . '.html';
-        $tmpPdf = '/tmp/weasyprint/report_' . uniqid() . '.pdf';
-        file_put_contents($tmpHtml, $pdfHtml);
-        
-        // Run WeasyPrint via Python script (with FontConfiguration for Google Fonts)
-        $scriptPath = __DIR__ . '/generate_pdf.py';
-        // Find the real python3 binary (avoid symlink loops)
-        $pythonBin = 'python3';
-        foreach (['/usr/bin/python3.13', '/usr/bin/python3.12', '/usr/bin/python3.11', '/usr/local/bin/python3', '/usr/bin/python3'] as $p) {
-            if (is_file($p) && !is_link($p)) { $pythonBin = $p; break; }
-            if (is_link($p)) { $real = realpath($p); if ($real && is_file($real)) { $pythonBin = $real; break; } }
-        }
-        $cmd = $pythonBin . ' "' . $scriptPath . '" "' . $tmpHtml . '" "' . $tmpPdf . '" 2>&1';
-        $output = shell_exec($cmd);
-        
-        if (file_exists($tmpPdf) && filesize($tmpPdf) > 0) {
-            header('Content-Type: application/pdf');
-            header('Content-Disposition: attachment; filename="SickLeave_' . $scFile . '.pdf"');
-            header('Content-Length: ' . filesize($tmpPdf));
-            header('Cache-Control: no-cache, no-store, must-revalidate');
-            readfile($tmpPdf);
-            @unlink($tmpHtml);
-            @unlink($tmpPdf);
-            exit;
-        } else {
-            // WeasyPrint failed - fallback to preview with error
-            @unlink($tmpHtml);
-            error_log('WeasyPrint Error: ' . $output);
-            // Fall through to preview mode
-        }
-    }
+if ($pdfMode === 'download') {
+    // Build full HTML with embedded SVGs/PNGs and Fonts as absolute URLs
+    $baseUrl = (isset($_SERVER['HTTPS']) && $_SERVER['HTTPS'] === 'on' ? 'https' : 'http') . '://' . $_SERVER['HTTP_HOST'] . dirname($_SERVER['SCRIPT_NAME']) . '/';
+    
+    $pdfHtml = '<!DOCTYPE html><html lang="ar"><head><meta charset="utf-8"/>';
+    $pdfHtml .= '<title>Sick Leave Report</title>';
+    
+    // Google Fonts strictly for Arabic and Inter placeholders
+    $pdfHtml .= '<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@100;200;300;400;500;600;700&display=swap" />';
+    $pdfHtml .= '<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Noto+Sans+Arabic:wght@400;600;700&display=swap" />';
 
+    $pdfHtml .= '<style data-tag="reset-style-sheet">';
+    $pdfHtml .= 'html { line-height: 1.15; } body { margin: 0; }';
+    $pdfHtml .= '* { box-sizing: border-box; border-width: 0; border-style: solid; }';
+    $pdfHtml .= 'p, li, ul, pre, div, h1, h2, h3, h4, h5, h6, figure, blockquote, figcaption { margin: 0; padding: 0; }';
+    $pdfHtml .= 'a { color: inherit; text-decoration: inherit; }';
+    $pdfHtml .= '</style>';
+
+    $pdfHtml .= '<style data-tag="default-style-sheet">';
+    $pdfHtml .= 'html { font-family: Inter, sans-serif; font-size: 16px; }';
+    $pdfHtml .= 'body { font-weight: 400; color: #191818; background: #ffffff; margin: 0; padding: 0; }';
+    $pdfHtml .= '</style>';
+
+    $pdfHtml .= '<style>';
+    
+    // =========================================================
+    // LOAD YOUR LOCAL OPENTYPE (.otf) FILES
+    // =========================================================
+    $pdfHtml .= '@font-face {';
+    $pdfHtml .= '    font-family: "Times New Roman";';
+    $pdfHtml .= '    src: url("' . $baseUrl . 'times_regular.otf") format("opentype");';
+    $pdfHtml .= '    font-weight: 400;';
+    $pdfHtml .= '    font-style: normal;';
+    $pdfHtml .= '}';
+
+    $pdfHtml .= '@font-face {';
+    $pdfHtml .= '    font-family: "Times New Roman";';
+    $pdfHtml .= '    src: url("' . $baseUrl . 'times_bold.otf") format("opentype");';
+    $pdfHtml .= '    font-weight: 700;';
+    $pdfHtml .= '    font-style: normal;';
+    $pdfHtml .= '}';
+    // =========================================================
+
+    $pdfHtml .= '@page { size: 842.25px 1190.25px; margin: 0; }';
+    $pdfHtml .= '.group1-container1 { width: 842.25px; height: 1190.25px; position: relative; background-color: transparent; margin: 0; padding: 0; }';
+    $pdfHtml .= '.group1-thq-group1-elm { width: 842.25px; height: 1190.25px; position: relative; background-color: white; margin: 0; padding: 0; }';
+    
+    // Tables & Data Cells directly referencing the embedded font
+    $pdfHtml .= '.info-table { position: absolute; top: 242px; left: 36px; width: 770px; border-collapse: separate; border-spacing: 0; border: 1px solid #cccccc; border-radius: 8px; overflow: hidden; background-color: transparent; z-index: 10; }';
+    $pdfHtml .= '.info-table td { border-bottom: 1px solid #cccccc; border-right: 1px solid #cccccc; height: 42px; text-align: center; vertical-align: middle; padding: 4px 8px; }';
+    $pdfHtml .= '.info-table td:last-child { border-right: none; } .info-table tr:last-child td { border-bottom: none; }';
+    
+    $pdfHtml .= '.info-table .en-title { width: 161px; color: rgba(54, 111, 181, 1); font-size: 13.5px; font-weight: 700; text-align: center; font-family: "Times New Roman", serif; }';
+    $pdfHtml .= '.info-table .data-cell { width: 240px; color: rgba(44, 62, 119, 1); font-size: 13.5px; font-family: "Times New Roman", serif; font-weight: 400; text-align: center; }';
+    
+    $pdfHtml .= '.info-table .date-cell { font-size: 13.9px; } .info-table .data-cell.ar-text { font-family: "Noto Sans Arabic", sans-serif; }';
+    $pdfHtml .= '.info-table .ar-title { width: 140px; color: rgba(54, 111, 181, 1); font-size: 13.5px; font-weight: 700; text-align: center; font-family: "Noto Sans Arabic", sans-serif; white-space: nowrap; }';
+    $pdfHtml .= '.info-table tr.blue-row td { background-color: #2c3e77; color: #ffffff; border-bottom: 1px solid #cccccc; border-right: 1px solid #cccccc; }';
+    $pdfHtml .= '.info-table tr.blue-row td:last-child { border-right: none; }';
+    $pdfHtml .= '.info-table .blue-row .data-cell.ar-text { color: rgba(255, 255, 255, 1); font-size: 13.5px; font-family: "Times New Roman", serif; font-weight: 400; }';
+    $pdfHtml .= '.info-table .blue-row .data-cell { color: rgba(255, 255, 255, 1); }';
+    $pdfHtml .= '.info-table tr.gray-row td { background-color: #f7f7f7; }';
+    
+    // Layout Placeholders
+    $pdfHtml .= '.en-spaced { letter-spacing: 0.3px; }';
+    $pdfHtml .= ':root { --footer-offset: 40px; }';
+    $pdfHtml .= '.group1-thq-staticinfo-elm { top: 125px; left: 36.65px; width: 768.35px; height: 811.91px; display: flex; position: absolute; align-items: flex-start; pointer-events: none; }';
+    
+    // Side Placeholders
+    $pdfHtml .= '.top-right-placeholder { position: absolute; top: 36px; left: 543.36px; width: 262.43px; height: 107.22px; display: flex; align-items: center; justify-content: center; font-size: 14px; z-index: 5; }';
+    $pdfHtml .= '.top-left-placeholder { position: absolute; top: 36px; left: 36px; width: 149.96px; height: 65.98px; display: flex; align-items: center; justify-content: center; font-size: 14px; z-index: 5; }';
+    $pdfHtml .= '.bottom-right-placeholder { position: absolute; top: 1005px; left: 657.17px; width: 149.96px; height: 71.23px; display: flex; align-items: center; justify-content: center; font-size: 12px; z-index: 5; }';
+    $pdfHtml .= '.header-placeholder { top: -50px; left: 320px; width: 163px; height: 40px; position: absolute; display: flex; align-items: center; justify-content: center; font-size: 11px; }';
+    
+    // Text Elements referencing the embedded font
+    $pdfHtml .= '.group1-thq-text-elm41 { top: 40px; left: 289px; color: rgba(48, 109, 181, 1); width: 215px; position: absolute; font-size: 22.5px; font-weight: 700; text-align: center; line-height: 30px; }';
+    $pdfHtml .= '.group1-thq-text-elm44 { top: -10px; left: 310px; color: rgba(0, 0, 0, 1); position: absolute; font-size: 17.3px; font-weight: 400; text-align: left; font-family: "Times New Roman", serif; }';
+    
+    $pdfHtml .= '.group1-thq-hospitallogoandthename-elm { top: 760px; left: 438.94px; width: 403px; height: 202.78px; display: flex; position: absolute; align-items: flex-start; }';
+    $pdfHtml .= '.placeholder-logo-hospital { top: -12px; left: 133px; width: 136px; height: 136px; position: absolute; display: flex; align-items: center; justify-content: center; font-size: 12px; }';
+    $pdfHtml .= '.group1-thq-text-elm18 { top: 113px; color: rgba(0, 0, 0, 1); width: 403px; height: auto; position: absolute; font-size: 12.8px; text-align: center; line-height: 22px; }';
+    
+    $pdfHtml .= '.group1-thq-thedateofissueandalsotimeofissue-elm { top: calc(989.85px + var(--footer-offset)); left: 37.37px; width: 250px; height: 56px; display: flex; position: absolute; align-items: flex-start; }';
+    $pdfHtml .= '.group1-thq-text-elm22 { color: rgba(0, 0, 0, 1); font-size: 12.5px; font-weight: 700; text-align: left; line-height: 28px; font-family: "Times New Roman", serif; position: absolute; white-space: nowrap; }';
+    
+    $pdfHtml .= '.group1-thq-text-elm36 { top: calc(724.55px + var(--footer-offset)); left: 29.23px; color: rgba(0, 0, 0, 1); position: absolute; font-size: 12px; font-weight: 700; text-align: center; font-family: "Noto Sans Arabic", sans-serif; line-height: 23px; }';
+    $pdfHtml .= '.group1-thq-text-elm39 { top: calc(770px + var(--footer-offset)); left: 55px; color: rgba(0, 0, 0, 1); position: absolute; font-size: 12px; font-weight: 700; text-align: left; font-family: "Times New Roman", serif; }';
+    $pdfHtml .= '.group1-thq-text-elm40 { top: calc(791px + var(--footer-offset)); left: 108.35px; color: rgba(20, 0, 255, 1); position: absolute; font-size: 11px; font-weight: 700; text-align: left; text-decoration: underline; pointer-events: auto; font-family: "Times New Roman", serif; }';
+    
+    // Footer & Misc
+    $pdfHtml .= '.placeholder-136 { position: absolute; top: 620px; left: 122px; width: 136px; height: 136px; display: flex; align-items: center; justify-content: center; font-size: 12px; pointer-events: auto; }';
+    $pdfHtml .= '.vertical-divider { position: absolute; top: 735px; left: 431px; width: 1px; height: 6.8cm; background-color: #dddddd; }';
+    $pdfHtml .= '.thin-slash { font-weight: 300; font-family: "Inter", sans-serif; margin: 0 3px; display: inline-block; }';
+    $pdfHtml .= '</style></head><body>';
+    
+    // Replace relative paths with absolute URLs and update .svg targets to .png
+    $pdfBody = str_replace(
+        ['src="sehalogoright.png"', 'src="sehalogoleft.png"', 'src="bottomright.png"', 'src="header.png"', 'src="qr.svg"'],
+        ['src="' . $baseUrl . 'sehalogoright.png"', 'src="' . $baseUrl . 'sehalogoleft.png"', 'src="' . $baseUrl . 'bottomright.png"', 'src="' . $baseUrl . 'header.png"', 'src="' . $baseUrl . 'qr.svg"'],
+        // Also ensure fallback replacement just in case the source HTML still contains the old .svg strings
+        str_replace(
+            ['src="sehalogoright.png"', 'src="bottomright.png"', 'src="header.png"'],
+            ['src="sehalogoright.png"', 'src="bottomright.png"', 'src="header.png"'],
+            $reportBody
+        )
+    );
+    $pdfHtml .= $pdfBody;
+    $pdfHtml .= '</body></html>';
+    
+    // Save HTML to temp file safely
+    $tmpHtml = '/tmp/weasyprint/report_' . uniqid() . '.html';
+    $tmpPdf = '/tmp/weasyprint/report_' . uniqid() . '.pdf';
+    
+    if (!is_dir('/tmp/weasyprint')) {
+        mkdir('/tmp/weasyprint', 0777, true);
+    }
+    
+    file_put_contents($tmpHtml, $pdfHtml);
+    
+    // Run WeasyPrint via Python script
+    $scriptPath = __DIR__ . '/generate_pdf.py';
+    $pythonBin = 'python3';
+    foreach (['/usr/bin/python3.13', '/usr/bin/python3.12', '/usr/bin/python3.11', '/usr/local/bin/python3', '/usr/bin/python3'] as $p) {
+        if (is_file($p) && !is_link($p)) { $pythonBin = $p; break; }
+        if (is_link($p)) { $real = realpath($p); if ($real && is_file($real)) { $pythonBin = $real; break; } }
+    }
+    
+    $cmd = $pythonBin . ' "' . $scriptPath . '" "' . $tmpHtml . '" "' . $tmpPdf . '" 2>&1';
+    $output = shell_exec($cmd);
+    
+    if (file_exists($tmpPdf) && filesize($tmpPdf) > 0) {
+        header('Content-Type: application/pdf');
+        header('Content-Disposition: attachment; filename="SickLeave_' . $scFile . '.pdf"');
+        header('Content-Length: ' . filesize($tmpPdf));
+        header('Cache-Control: no-cache, no-store, must-revalidate');
+        readfile($tmpPdf);
+        @unlink($tmpHtml);
+        @unlink($tmpPdf);
+        exit;
+    } else {
+        @unlink($tmpHtml);
+        error_log('WeasyPrint Error: ' . $output);
+    }
+}
     // ==================== PREVIEW MODE ====================
-    header('Content-Type: text/html; charset=utf-8');
+  header('Content-Type: text/html; charset=utf-8');
     
     $html = '<!DOCTYPE html>' . "\n";
     $html .= '<html lang="ar">' . "\n";
@@ -1365,12 +1409,12 @@ function handleGeneratePdf($pdo, $leave_id, $pdfMode = 'preview') {
     $html .= '<div class="group1-container1">' . "\n";
     $html .= '  <div class="group1-thq-group1-elm" id="report-content">' . "\n";
     // Side Placeholders
-    $html .= '    <div class="top-right-placeholder"><img src="sehalogoright.svg" alt="Logo Placeholder" style="width: 100%; height: 100%;" onerror="this.style.display=\'none\'" /></div>' . "\n";
-    $html .= '    <div class="top-left-placeholder"><img src="sehalogoleft.svg" alt="Logo Placeholder" style="width: 100%; height: 100%;" onerror="this.style.display=\'none\'" /></div>' . "\n";
-    $html .= '    <div class="bottom-right-placeholder"><img src="bottomright.svg" alt="Signature Placeholder" style="width: 100%; height: 100%;" onerror="this.style.display=\'none\'" /></div>' . "\n";
+    $html .= '    <div class="top-right-placeholder"><img src="sehalogoright.png" alt="Logo Placeholder" style="width: 100%; height: 100%;" onerror="this.style.display=\'none\'" /></div>' . "\n";
+    $html .= '    <div class="top-left-placeholder"><img src="sehalogoleft.png" alt="Logo Placeholder" style="width: 100%; height: 100%;" onerror="this.style.display=\'none\'" /></div>' . "\n";
+    $html .= '    <div class="bottom-right-placeholder"><img src="bottomright.png" alt="Signature Placeholder" style="width: 100%; height: 100%;" onerror="this.style.display=\'none\'" /></div>' . "\n";
     // Headers
     $html .= '    <div class="group1-thq-staticinfo-elm">' . "\n";
-    $html .= '      <div class="header-placeholder"><img src="header.svg" alt="Header Placeholder" style="width: 100%; height: 100%;" onerror="this.style.display=\'none\'" /></div>' . "\n";
+    $html .= '      <div class="header-placeholder"><img src="header.png" alt="Header Placeholder" style="width: 100%; height: 100%;" onerror="this.style.display=\'none\'" /></div>' . "\n";
     $html .= '      <span class="group1-thq-text-elm41"><span style="font-size: 22.5px; font-family: \'Noto Sans Arabic\', sans-serif; font-weight: 700; color: #306db5;">تقرير إجازة مرضية</span><br /><span style="font-size: 18.7px; font-family: \'Times New Roman\', serif; font-weight: 700; color: #2c3e77;">Sick Leave Report</span></span>' . "\n";
     $html .= '      <span class="group1-thq-text-elm44">Kingdom of Saudi Arabia</span>' . "\n";
     // QR Code
@@ -1437,7 +1481,6 @@ function handleGeneratePdf($pdo, $leave_id, $pdfMode = 'preview') {
     echo $html;
     exit;
 }
-
 // ======================== معالجة تسجيل الدخول والخروج ========================
 if (isset($_POST['action']) && $_POST['action'] === 'login') {
     header('Content-Type: application/json; charset=utf-8');
