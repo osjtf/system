@@ -2,6 +2,7 @@
 /**
  * بوابة المرضى - user.php
  * المرضى يُنشئون إجازات مرضية حقيقية بنفس قالب لوحة التحكم
+ * (نسخة مطورة بتصميم احترافي + Dark Mode + بقاء بنفس الصفحة)
  */
 
 ini_set('session.use_only_cookies', '1');
@@ -112,7 +113,6 @@ function fmtDateEnUser($d) {
 }
 
 function getUsedDaysUser(PDO $pdo, int $patientId, int $userId): int {
-    // احسب الأيام المستخدمة من الإجازات الحقيقية التي أنشأها هذا المستخدم
     $stmt = $pdo->prepare("SELECT COALESCE(SUM(days_count),0) FROM sick_leaves WHERE patient_id = ? AND created_by_user_id = ? AND deleted_at IS NULL");
     $stmt->execute([$patientId, $userId]);
     return (int)$stmt->fetchColumn();
@@ -193,7 +193,6 @@ if (isPatientLoggedIn() && !checkPatientActive($pdo)) {
 if ($action === 'get_user_notifications' && isPatientLoggedIn()) {
     header('Content-Type: application/json; charset=utf-8');
     $uid = (int)$_SESSION['patient_user_id'];
-    // Ensure table exists
     $pdo->exec("CREATE TABLE IF NOT EXISTS user_notifications (
         id INT AUTO_INCREMENT PRIMARY KEY,
         user_id INT NOT NULL,
@@ -237,7 +236,6 @@ if ($action === 'create_sick_leave' && isPatientLoggedIn()) {
     $patientId = (int)$_SESSION['patient_id'];
     $userId    = (int)$_SESSION['patient_user_id'];
 
-    // تحديث الحصة من DB
     $paStmt = $pdo->prepare("SELECT allowed_days FROM patient_accounts WHERE user_id = ?");
     $paStmt->execute([$userId]);
     $paRow = $paStmt->fetch();
@@ -258,7 +256,6 @@ if ($action === 'create_sick_leave' && isPatientLoggedIn()) {
         exit;
     }
 
-    // التحقق من الحصة
     $usedDays = getUsedDaysUser($pdo, $patientId, $userId);
     $remainingDays = $allowedDays - $usedDays;
 
@@ -267,7 +264,6 @@ if ($action === 'create_sick_leave' && isPatientLoggedIn()) {
         exit;
     }
 
-    // تحديد الوقت
     $issueTime = null;
     $issuePeriod = null;
 
@@ -288,7 +284,6 @@ if ($action === 'create_sick_leave' && isPatientLoggedIn()) {
         $issuePeriod = $manualPeriod;
     }
 
-    // جلب بيانات المستشفى والطبيب والمريض
     $hospStmt = $pdo->prepare("SELECT * FROM hospitals WHERE id = ?");
     $hospStmt->execute([$hospitalId]);
     $hosp = $hospStmt->fetch();
@@ -306,11 +301,9 @@ if ($action === 'create_sick_leave' && isPatientLoggedIn()) {
         exit;
     }
 
-    // توليد رمز الخدمة
     $prefix = $hosp['service_prefix'] ?? 'GSL';
     $serviceCode = generateServiceCodeUser($pdo, $prefix, $startDate);
 
-    // إدراج الإجازة في sick_leaves
     $issueDate = date('Y-m-d');
     $stmt = $pdo->prepare("INSERT INTO sick_leaves 
         (service_code, patient_id, doctor_id, hospital_id, created_by_user_id,
@@ -344,7 +337,7 @@ if ($action === 'create_sick_leave' && isPatientLoggedIn()) {
 
     echo json_encode([
         'success'        => true,
-        'message'        => 'تم إنشاء الإجازة المرضية بنجاح.',
+        'message'        => 'تم إنشاء الإجازة المرضية بنجاح وتوثيقها في السجل.',
         'leave_id'       => $leaveId,
         'service_code'   => $serviceCode,
         'remaining_days' => $remainingDays - $daysCount,
@@ -384,7 +377,6 @@ if ($action === 'generate_pdf' && isPatientLoggedIn()) {
         exit;
     }
 
-    // ===== نفس منطق handleGeneratePdf من admin.php =====
     $sc       = htmlspecialchars($lv['service_code'] ?? '', ENT_QUOTES);
     $days     = (int)($lv['days_count'] ?? 1);
     $daysEn   = $days . ($days === 1 ? ' day' : ' days');
@@ -418,7 +410,6 @@ if ($action === 'generate_pdf' && isPatientLoggedIn()) {
     $hospNameEn = htmlspecialchars($lv['h_name_en'] ?? '', ENT_QUOTES);
     $hospLicense = $lv['h_license'] ?? '';
 
-    // شعار المستشفى
     $hospLogoData = $lv['h_logo_data'] ?? '';
     $hospLogoUrl  = $lv['h_logo_url'] ?? '';
     $hospLogoPath = $lv['h_logo_path'] ?? '';
@@ -442,10 +433,8 @@ if ($action === 'generate_pdf' && isPatientLoggedIn()) {
         $licenseHtml = '<span style="font-family: \'Noto Sans Arabic\', sans-serif; font-weight: 700;">رقم الترخيص :</span> <span style="font-family: \'Times New Roman\', serif; font-weight: 700;">' . htmlspecialchars($hospLicense) . '</span>';
     }
 
-    // الوقت
     $issuePeriod = $lv['issue_period'] ?? 'AM';
     $issueTimeRaw = $lv['issue_time'] ?? '09:00';
-    // normalize to 12h
     if (preg_match('/^(\d{1,2}):(\d{2})/', $issueTimeRaw, $tm)) {
         $h = (int)$tm[1]; $mn = (int)$tm[2];
         if ($h > 12) $h -= 12;
@@ -465,7 +454,6 @@ if ($action === 'generate_pdf' && isPatientLoggedIn()) {
     $durationEn = $daysEn . ' ( ' . $startEn . ' to ' . $endEn . ' )';
     $durationAr = '<span style="font-family: \'Times New Roman\', serif; font-size: 14.5px; font-weight: 400;">' . $daysAr . '</span> <span style="font-family: \'Noto Sans Arabic\', sans-serif; font-size: 14.5px; font-weight: 400;">' . $daysArWord . '</span> ( ' . formatHijriDateSpanUser($startHj) . ' <span style="font-family: \'Noto Sans Arabic\', sans-serif; font-size: 13.5px; font-weight: 400;">إلى</span> ' . formatHijriDateSpanUser($endHj) . ' )';
 
-    // ===== وضع التحميل المباشر (WeasyPrint) =====
     if ($pdfMode === 'download') {
         $baseUrl = (isset($_SERVER['HTTPS']) && $_SERVER['HTTPS'] === 'on' ? 'https' : 'http') . '://' . $_SERVER['HTTP_HOST'] . dirname($_SERVER['SCRIPT_NAME']) . '/';
         $scFile = preg_replace('/[^a-zA-Z0-9_-]/', '_', $sc);
@@ -543,7 +531,6 @@ if ($action === 'generate_pdf' && isPatientLoggedIn()) {
             @unlink($tmpPdf);
             exit;
         }
-        // إذا فشل WeasyPrint، نكمل بوضع المعاينة
         @unlink($tmpHtml);
     }
 
@@ -553,20 +540,14 @@ if ($action === 'generate_pdf' && isPatientLoggedIn()) {
 <html lang="ar">
 <head>
 <title>تقرير إجازة مرضية - Sick Leave Report</title>
-<meta property="og:title" content="Sick Leave Report" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
 <meta charset="utf-8" />
-<style data-tag="reset-style-sheet">
-html { line-height: 1.15; }
-body { margin: 0; }
+<style>
+html { line-height: 1.15; font-family: Inter, sans-serif; font-size: 16px; }
+body { margin: 0; font-weight: 400; color: #191818; background: #FBFAF9; overflow-x: hidden; }
 * { box-sizing: border-box; border-width: 0; border-style: solid; -webkit-font-smoothing: antialiased; }
-p, li, ul, pre, div, h1, h2, h3, h4, h5, h6, figure, blockquote, figcaption { margin: 0; padding: 0; }
+p, li, ul, pre, div, h1, h2, h3, h4, h5, h6 { margin: 0; padding: 0; }
 a { color: inherit; text-decoration: inherit; }
-html { scroll-behavior: smooth }
-</style>
-<style data-tag="default-style-sheet">
-html { font-family: Inter, sans-serif; font-size: 16px; -webkit-text-size-adjust: 100%; }
-body { font-weight: 400; color: #191818; background: #FBFAF9; overflow-x: hidden; }
 </style>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@100;200;300;400;500;600;700&display=swap" />
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=STIX+Two+Text:ital,wght@0,400;0,600;0,700;1,400&display=swap" />
@@ -574,36 +555,35 @@ body { font-weight: 400; color: #191818; background: #FBFAF9; overflow-x: hidden
 <style>
 .group1-container1 { width: 100%; display: flex; overflow-x: hidden; min-height: 100vh; align-items: center; flex-direction: column; background-color: #f0f0f0; padding-top: 20px; padding-bottom: 20px; }
 .group1-thq-group1-elm { width: 842.25px; height: 1190.25px; display: flex; position: relative; align-items: flex-start; flex-shrink: 0; box-shadow: 0px 4px 15px rgba(0,0,0,0.1); background-color: white; }
-.info-table { position: absolute; top: 242px; left: 36px; width: 770px; border-collapse: separate; border-spacing: 0; border: 1px solid #cccccc; border-radius: 8px; overflow: hidden; background-color: transparent; z-index: 10; }
+.info-table { position: absolute; top: 242px; left: 36px; width: 770px; border-collapse: separate; border-spacing: 0; border: 1px solid #cccccc; border-radius: 8px; overflow: hidden; z-index: 10; }
 .info-table td { border-bottom: 1px solid #cccccc; border-right: 1px solid #cccccc; height: 42px; text-align: center; vertical-align: middle; padding: 4px 8px; }
 .info-table td:last-child { border-right: none; } .info-table tr:last-child td { border-bottom: none; }
-.info-table .en-title { width: 161px; color: rgba(54, 111, 181, 1); font-size: 13.5px; font-weight: 700; text-align: center; font-family: "Times New Roman", serif; }
-.info-table .data-cell { width: 240px; color: rgba(44, 62, 119, 1); font-size: 13.5px; font-family: "Times New Roman", serif; font-weight: 400; text-align: center; }
+.info-table .en-title { width: 161px; color: rgba(54, 111, 181, 1); font-size: 13.5px; font-weight: 700; font-family: "Times New Roman", serif; }
+.info-table .data-cell { width: 240px; color: rgba(44, 62, 119, 1); font-size: 13.5px; font-family: "Times New Roman", serif; }
 .info-table .date-cell { font-size: 13.9px; } .info-table .data-cell.ar-text { font-family: "Noto Sans Arabic", sans-serif; }
-.info-table .ar-title { width: 140px; color: rgba(54, 111, 181, 1); font-size: 13.5px; font-weight: 700; text-align: center; font-family: "Noto Sans Arabic", sans-serif; white-space: nowrap; }
+.info-table .ar-title { width: 140px; color: rgba(54, 111, 181, 1); font-size: 13.5px; font-weight: 700; font-family: "Noto Sans Arabic", sans-serif; white-space: nowrap; }
 .info-table tr.blue-row td { background-color: #2c3e77; color: #ffffff; border-bottom: 1px solid #cccccc; border-right: 1px solid #cccccc; }
 .info-table tr.blue-row td:last-child { border-right: none; }
-.info-table .blue-row .data-cell.ar-text { color: rgba(255, 255, 255, 1); font-size: 13.5px; font-family: "Times New Roman", serif; font-weight: 400; }
-.info-table .blue-row .data-cell { color: rgba(255, 255, 255, 1); }
+.info-table .blue-row .data-cell.ar-text, .info-table .blue-row .data-cell { color: #ffffff; }
 .info-table tr.gray-row td { background-color: #f7f7f7; }
 .en-spaced { letter-spacing: 0.3px; }
 :root { --footer-offset: 40px; }
 .group1-thq-staticinfo-elm { top: 125px; left: 36.65px; width: 768.35px; height: 811.91px; display: flex; position: absolute; align-items: flex-start; pointer-events: none; }
-.top-right-placeholder { position: absolute; top: 36px; left: 592px; width: 214px; height: 107px; display: flex; align-items: center; justify-content: center; font-size: 14px; z-index: 5; }
-.top-left-placeholder { position: absolute; top: 36px; left: 36px; width: 149.96px; height: 65.98px; display: flex; align-items: center; justify-content: center; font-size: 14px; z-index: 5; }
-.bottom-right-placeholder { position: absolute; top: 1005px; left: 657.17px; width: 149.96px; height: 71.23px; display: flex; align-items: center; justify-content: center; font-size: 12px; z-index: 5; }
-.header-placeholder { top: -55px; left: 320px; width: 160px; height: 50px; position: absolute; display: flex; align-items: center; justify-content: center; font-size: 11px; }
+.top-right-placeholder { position: absolute; top: 36px; left: 592px; width: 214px; height: 107px; display: flex; align-items: center; justify-content: center; z-index: 5; }
+.top-left-placeholder { position: absolute; top: 36px; left: 36px; width: 149.96px; height: 65.98px; display: flex; align-items: center; justify-content: center; z-index: 5; }
+.bottom-right-placeholder { position: absolute; top: 1005px; left: 657.17px; width: 149.96px; height: 71.23px; display: flex; align-items: center; justify-content: center; z-index: 5; }
+.header-placeholder { top: -55px; left: 320px; width: 160px; height: 50px; position: absolute; display: flex; align-items: center; justify-content: center; }
 .group1-thq-text-elm41 { top: 40px; left: 289px; color: rgba(48, 109, 181, 1); width: 215px; position: absolute; font-size: 22.5px; font-weight: 700; text-align: center; line-height: 30px; }
-.group1-thq-text-elm44 { top: -10px; left: 310px; color: rgba(0, 0, 0, 1); position: absolute; font-size: 17.3px; font-weight: 400; text-align: left; font-family: "Times New Roman", serif; }
+.group1-thq-text-elm44 { top: -10px; left: 310px; color: rgba(0, 0, 0, 1); position: absolute; font-size: 17.3px; font-family: "Times New Roman", serif; }
 .group1-thq-hospitallogoandthename-elm { top: 760px; left: 438.94px; width: 403px; height: 202.78px; display: flex; position: absolute; align-items: flex-start; }
-.placeholder-logo-hospital { top: -12px; left: 133px; width: 136px; height: 136px; position: absolute; display: flex; align-items: center; justify-content: center; font-size: 12px; }
-.group1-thq-text-elm18 { top: 120px; color: rgba(0, 0, 0, 1); width: 403px; height: auto; position: absolute; font-size: 12.8px; text-align: center; line-height: 22px; }
+.placeholder-logo-hospital { top: -12px; left: 133px; width: 136px; height: 136px; position: absolute; display: flex; align-items: center; justify-content: center; }
+.group1-thq-text-elm18 { top: 120px; color: rgba(0, 0, 0, 1); width: 403px; position: absolute; font-size: 12.8px; text-align: center; line-height: 22px; }
 .group1-thq-thedateofissueandalsotimeofissue-elm { top: calc(989.85px + var(--footer-offset)); left: 37.37px; width: 250px; height: 56px; display: flex; position: absolute; align-items: flex-start; }
-.group1-thq-text-elm22 { color: rgba(0, 0, 0, 1); font-size: 12.5px; font-weight: 700; text-align: left; line-height: 28px; font-family: "Times New Roman", serif; position: absolute; white-space: nowrap; }
+.group1-thq-text-elm22 { color: rgba(0, 0, 0, 1); font-size: 12.5px; font-weight: 700; line-height: 28px; font-family: "Times New Roman", serif; position: absolute; white-space: nowrap; }
 .group1-thq-text-elm36 { top: calc(724.55px + var(--footer-offset)); left: 29.23px; color: rgba(0, 0, 0, 1); position: absolute; font-size: 12px; font-weight: 700; text-align: center; font-family: "Noto Sans Arabic", sans-serif; line-height: 23px; }
-.group1-thq-text-elm39 { top: calc(775.17px + var(--footer-offset)); left: 55px; color: rgba(0, 0, 0, 1); position: absolute; font-size: 12px; font-weight: 700; text-align: left; font-family: "Times New Roman", serif; }
-.group1-thq-text-elm40 { top: calc(798.91px + var(--footer-offset)); left: 108.35px; color: rgba(20, 0, 255, 1); position: absolute; font-size: 11px; font-weight: 700; text-align: left; text-decoration: underline; pointer-events: auto; font-family: "Times New Roman", serif; }
-.placeholder-136 { position: absolute; top: 620px; left: 122px; width: 136px; height: 136px; display: flex; align-items: center; justify-content: center; font-size: 12px; pointer-events: auto; }
+.group1-thq-text-elm39 { top: calc(775.17px + var(--footer-offset)); left: 55px; color: rgba(0, 0, 0, 1); position: absolute; font-size: 12px; font-weight: 700; font-family: "Times New Roman", serif; }
+.group1-thq-text-elm40 { top: calc(798.91px + var(--footer-offset)); left: 108.35px; color: rgba(20, 0, 255, 1); position: absolute; font-size: 11px; font-weight: 700; text-decoration: underline; pointer-events: auto; font-family: "Times New Roman", serif; }
+.placeholder-136 { position: absolute; top: 620px; left: 122px; width: 136px; height: 136px; display: flex; align-items: center; justify-content: center; pointer-events: auto; }
 .vertical-divider { position: absolute; top: 735px; left: 436px; width: 1px; height: 7cm; background-color: #dddddd; }
 .thin-slash { font-weight: 300; font-family: "Inter", sans-serif; margin: 0 3px; display: inline-block; }
 .controls { position: fixed; bottom: 30px; right: 30px; display: flex; gap: 15px; z-index: 1000; }
@@ -617,11 +597,10 @@ body { font-weight: 400; color: #191818; background: #FBFAF9; overflow-x: hidden
 }
 @media print {
   @page { size: 842.25px 1190.25px; margin: 0; }
-  body { -webkit-print-color-adjust: exact !important; print-color-adjust: exact !important; background: white !important; }
+  body { background: white !important; }
   .controls { display: none !important; }
   .group1-container1 { padding: 0 !important; background-color: transparent !important; }
   .group1-thq-group1-elm { box-shadow: none !important; margin: 0 !important; transform: scale(1) !important; }
-  a { color: rgba(20, 0, 255, 1) !important; text-decoration: underline !important; }
 }
 </style>
 <script>
@@ -630,19 +609,10 @@ function downloadPDF() {
   btn.textContent = 'جاري التحميل...';
   btn.disabled = true;
   var url = window.location.href;
-  if (url.indexOf('pdf_mode=') > -1) {
-    url = url.replace(/pdf_mode=[^&]*/, 'pdf_mode=download');
-  } else {
-    url += (url.indexOf('?') > -1 ? '&' : '?') + 'pdf_mode=download';
-  }
-  // إزالة autoprint من الرابط إن وجد
-  url = url.replace(/[&?]autoprint=\d/, '');
-  var a = document.createElement('a');
-  a.href = url;
-  a.download = '';
-  document.body.appendChild(a);
-  a.click();
-  document.body.removeChild(a);
+  if (url.indexOf('pdf_mode=') > -1) { url = url.replace(/pdf_mode=[^&]*/, 'pdf_mode=download'); }
+  else { url += (url.indexOf('?') > -1 ? '&' : '?') + 'pdf_mode=download'; }
+  var a = document.createElement('a'); a.href = url; a.download = '';
+  document.body.appendChild(a); a.click(); document.body.removeChild(a);
   setTimeout(function() { btn.textContent = 'تحميل ملف PDF'; btn.disabled = false; }, 3000);
 }
 </script>
@@ -718,7 +688,6 @@ if (isPatientLoggedIn()) {
     $patientId = (int)$_SESSION['patient_id'];
     $userId    = (int)$_SESSION['patient_user_id'];
 
-    // تحديث الحصة من DB
     $stmt2 = $pdo->prepare("SELECT allowed_days FROM patient_accounts WHERE user_id = ?");
     $stmt2->execute([$userId]);
     $paRow = $stmt2->fetch();
@@ -727,12 +696,10 @@ if (isPatientLoggedIn()) {
         $allowedDays = (int)$paRow['allowed_days'];
     }
 
-    // بيانات المريض
     $stmt = $pdo->prepare("SELECT * FROM patients WHERE id = ?");
     $stmt->execute([$patientId]);
     $patientData = $stmt->fetch();
 
-    // إجازاتي الحقيقية
     $stmt = $pdo->prepare("
         SELECT sl.*, h.name_ar AS h_name_ar, d.name_ar AS d_name_ar, d.title_ar AS d_title_ar
         FROM sick_leaves sl
@@ -744,10 +711,8 @@ if (isPatientLoggedIn()) {
     $stmt->execute([$patientId, $userId]);
     $myLeaves = $stmt->fetchAll();
 
-    // المستشفيات
     $hospitals = $pdo->query("SELECT id, name_ar, name_en FROM hospitals ORDER BY name_ar")->fetchAll();
 
-    // الأيام المستخدمة
     $usedDays = getUsedDaysUser($pdo, $patientId, $userId);
     $remainingDays = max(0, $allowedDays - $usedDays);
 }
@@ -760,29 +725,64 @@ if (isPatientLoggedIn()) {
 <title>بوابة المرضى - Patient Portal</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Cairo:wght@300;400;500;600;700;800;900&display=swap" rel="stylesheet">
+<script>
+// تفعيل الوضع الليلي مباشرة قبل تحميل الصفحة لتجنب الوميض الأبيض (FOUC)
+(function() {
+  const currentTheme = localStorage.getItem('theme') || 'light';
+  document.documentElement.setAttribute('data-theme', currentTheme);
+})();
+</script>
 <style>
+/* ================= المتغيرات والألوان (نظام احترافي) ================= */
 :root {
   --primary: #1e40af;
   --primary-light: #3b82f6;
-  --primary-glow: rgba(59,130,246,0.3);
+  --primary-glow: rgba(59,130,246,0.25);
   --secondary: #0f172a;
   --accent: #06b6d4;
   --success: #10b981;
+  --success-bg: #d1fae5;
+  --success-text: #059669;
   --warning: #f59e0b;
   --danger: #ef4444;
-  --bg: #f0f4ff;
+  --bg: #f8fafc;
   --card: #ffffff;
-  --text: #1e293b;
+  --text: #0f172a;
   --text-muted: #64748b;
   --border: #e2e8f0;
-  --radius: 14px;
-  --radius-lg: 20px;
-  --shadow: 0 4px 24px rgba(30,64,175,0.08);
-  --shadow-lg: 0 12px 48px rgba(30,64,175,0.15);
-  --transition: all 0.3s cubic-bezier(0.4,0,0.2,1);
+  --input-bg: #f1f5f9;
+  --table-hdr: #f1f5f9;
+  --table-hover: #f8faff;
+  --radius: 16px;
+  --radius-lg: 24px;
+  --shadow: 0 4px 20px rgba(0, 0, 0, 0.04);
+  --shadow-lg: 0 12px 40px rgba(30, 64, 175, 0.08);
+  --transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+  --nav-bg: linear-gradient(135deg, #0f172a, #1e3a8a);
 }
+
+[data-theme="dark"] {
+  --primary: #3b82f6;
+  --primary-light: #60a5fa;
+  --primary-glow: rgba(96,165,250,0.15);
+  --secondary: #f8fafc;
+  --bg: #0b0f19;
+  --card: #111827;
+  --text: #f1f5f9;
+  --text-muted: #94a3b8;
+  --border: #1f2937;
+  --input-bg: #1f2937;
+  --table-hdr: #1f2937;
+  --table-hover: #161f33;
+  --shadow: 0 4px 20px rgba(0, 0, 0, 0.4);
+  --shadow-lg: 0 12px 40px rgba(0, 0, 0, 0.6);
+  --success-bg: rgba(16, 185, 129, 0.15);
+  --success-text: #34d399;
+  --nav-bg: linear-gradient(135deg, #05070c, #0f172a);
+}
+
 * { margin:0; padding:0; box-sizing:border-box; }
-body { font-family:'Cairo',sans-serif; background:var(--bg); color:var(--text); min-height:100vh; direction:rtl; }
+body { font-family:'Cairo',sans-serif; background:var(--bg); color:var(--text); min-height:100vh; direction:rtl; transition: background-color 0.4s ease, color 0.4s ease; }
 
 /* ═══ صفحة تسجيل الدخول ═══ */
 .login-page {
@@ -791,16 +791,11 @@ body { font-family:'Cairo',sans-serif; background:var(--bg); color:var(--text); 
   background-size:400% 400%; animation:gradientShift 15s ease infinite;
   padding:20px; position:relative; overflow:hidden;
 }
-.login-page::before {
-  content:''; position:absolute; width:600px; height:600px;
-  background:radial-gradient(circle,rgba(59,130,246,0.15) 0%,transparent 70%);
-  top:-200px; right:-200px; border-radius:50%; animation:float 8s ease-in-out infinite;
-}
 .login-card {
-  background:rgba(255,255,255,0.95); backdrop-filter:blur(30px);
-  border-radius:24px; padding:48px 40px; width:100%; max-width:440px;
-  box-shadow:0 40px 100px rgba(0,0,0,0.3); animation:slideUp 0.7s cubic-bezier(0.34,1.56,0.64,1);
-  position:relative; z-index:2;
+  background:var(--card); backdrop-filter:blur(30px);
+  border-radius:var(--radius-lg); padding:48px 40px; width:100%; max-width:440px;
+  box-shadow:0 40px 100px rgba(0,0,0,0.5); animation:slideUp 0.7s cubic-bezier(0.34,1.56,0.64,1);
+  border:1px solid var(--border); position:relative; z-index:2;
 }
 .login-icon { text-align:center; font-size:64px; margin-bottom:16px; animation:float 4s ease-in-out infinite; }
 .login-card h2 { text-align:center; font-size:26px; font-weight:800; color:var(--primary); margin-bottom:6px; }
@@ -808,116 +803,127 @@ body { font-family:'Cairo',sans-serif; background:var(--bg); color:var(--text); 
 .form-group { margin-bottom:18px; }
 .form-group label { display:block; font-size:13px; font-weight:600; color:var(--text); margin-bottom:8px; }
 .form-control {
-  width:100%; padding:12px 16px; border:2px solid var(--border); border-radius:10px;
-  font-family:'Cairo',sans-serif; font-size:15px; color:var(--text); background:#f8fafc;
+  width:100%; padding:12px 16px; border:2px solid var(--border); border-radius:12px;
+  font-family:'Cairo',sans-serif; font-size:15px; color:var(--text); background:var(--input-bg);
   transition:var(--transition); outline:none;
 }
-.form-control:focus { border-color:var(--primary-light); background:#fff; box-shadow:0 0 0 4px var(--primary-glow); }
+.form-control:focus { border-color:var(--primary-light); background:var(--card); box-shadow:0 0 0 4px var(--primary-glow); }
+
 .btn {
   display:inline-flex; align-items:center; justify-content:center; gap:8px;
-  padding:12px 24px; border:none; border-radius:10px; font-family:'Cairo',sans-serif;
+  padding:12px 24px; border:none; border-radius:12px; font-family:'Cairo',sans-serif;
   font-size:15px; font-weight:700; cursor:pointer; transition:var(--transition); text-decoration:none;
 }
-.btn-primary { background:linear-gradient(135deg,var(--primary),var(--primary-light)); color:#fff; box-shadow:0 4px 16px var(--primary-glow); }
-.btn-primary:hover { transform:translateY(-2px); box-shadow:0 8px 24px var(--primary-glow); }
+.btn-primary { background:linear-gradient(135deg, #1e40af, var(--primary-light)); color:#fff; box-shadow:0 4px 16px var(--primary-glow); }
+.btn-primary:hover { transform:translateY(-2px); box-shadow:0 8px 24px var(--primary-glow); filter: brightness(1.1); }
 .btn-full { width:100%; }
-.alert { padding:12px 16px; border-radius:10px; font-size:14px; font-weight:600; margin-bottom:16px; }
-.alert-danger { background:#fef2f2; color:#dc2626; border:1px solid #fecaca; }
-.alert-success { background:#f0fdf4; color:#16a34a; border:1px solid #bbf7d0; }
-.alert-warning { background:#fffbeb; color:#d97706; border:1px solid #fde68a; }
+
+.alert { padding:12px 16px; border-radius:12px; font-size:14px; font-weight:600; margin-bottom:16px; }
+.alert-danger { background:rgba(239, 68, 68, 0.1); color:var(--danger); border:1px solid rgba(239, 68, 68, 0.2); }
+.alert-success { background:var(--success-bg); color:var(--success-text); border:1px solid rgba(16, 185, 129, 0.2); }
+.alert-warning { background:rgba(245, 158, 11, 0.1); color:var(--warning); border:1px solid rgba(245, 158, 11, 0.2); }
 
 /* ═══ الشريط العلوي ═══ */
 .navbar {
-  background:linear-gradient(135deg,#0f172a,#1e3a8a); padding:14px 28px;
+  background:var(--nav-bg); padding:14px 28px;
   display:flex; align-items:center; justify-content:space-between;
-  box-shadow:0 4px 24px rgba(0,0,0,0.2); position:sticky; top:0; z-index:100;
+  box-shadow:0 4px 24px rgba(0,0,0,0.3); position:sticky; top:0; z-index:100;
+  transition: var(--transition);
 }
 .navbar .brand { display:flex; align-items:center; gap:12px; color:#fff; font-size:18px; font-weight:800; }
-.navbar .brand-icon { width:40px; height:40px; background:linear-gradient(135deg,var(--primary-light),var(--accent)); border-radius:10px; display:flex; align-items:center; justify-content:center; font-size:20px; }
-.navbar .user-info { display:flex; align-items:center; gap:12px; color:rgba(255,255,255,0.9); font-size:14px; }
-.navbar .user-badge { background:rgba(255,255,255,0.1); border:1px solid rgba(255,255,255,0.15); padding:6px 14px; border-radius:50px; display:flex; align-items:center; gap:8px; }
-.btn-logout { background:rgba(239,68,68,0.15); color:#fca5a5; border:1px solid rgba(239,68,68,0.3); padding:7px 16px; border-radius:8px; font-family:'Cairo',sans-serif; font-size:13px; font-weight:600; cursor:pointer; transition:var(--transition); }
-.btn-logout:hover { background:rgba(239,68,68,0.3); color:#fff; }
+.navbar .brand-icon { width:40px; height:40px; background:linear-gradient(135deg,var(--primary-light),var(--accent)); border-radius:12px; display:flex; align-items:center; justify-content:center; font-size:20px; }
+.navbar .user-actions { display:flex; align-items:center; gap:12px; }
+.navbar .user-badge { background:rgba(255,255,255,0.08); border:1px solid rgba(255,255,255,0.15); padding:6px 14px; border-radius:50px; display:flex; align-items:center; gap:8px; color:#fff; font-size:14px; font-weight:600; }
+.btn-icon-nav { background:rgba(255,255,255,0.08); border:1px solid rgba(255,255,255,0.15); color:#fff; width:40px; height:40px; border-radius:12px; cursor:pointer; font-size:18px; display:flex; align-items:center; justify-content:center; transition:var(--transition); }
+.btn-icon-nav:hover { background:rgba(255,255,255,0.2); transform: scale(1.05); }
+
+.btn-logout { background:rgba(239,68,68,0.15); color:#fca5a5; border:1px solid rgba(239,68,68,0.3); padding:8px 16px; border-radius:12px; font-family:'Cairo',sans-serif; font-size:13px; font-weight:700; cursor:pointer; transition:var(--transition); }
+.btn-logout:hover { background:rgba(239,68,68,0.4); color:#fff; }
 
 /* ═══ المحتوى ═══ */
-.main-content { max-width:1100px; margin:0 auto; padding:28px 20px; }
-.stats-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(200px,1fr)); gap:16px; margin-bottom:28px; }
-.stat-card { background:var(--card); border-radius:var(--radius); padding:20px 24px; box-shadow:var(--shadow); border:1px solid var(--border); display:flex; align-items:center; gap:16px; transition:var(--transition); animation:cardAppear 0.5s ease both; }
-.stat-card:hover { transform:translateY(-3px); box-shadow:var(--shadow-lg); }
-.stat-icon { width:52px; height:52px; border-radius:12px; display:flex; align-items:center; justify-content:center; font-size:24px; flex-shrink:0; }
-.stat-icon.blue { background:linear-gradient(135deg,#dbeafe,#bfdbfe); }
-.stat-icon.green { background:linear-gradient(135deg,#d1fae5,#a7f3d0); }
-.stat-icon.orange { background:linear-gradient(135deg,#fef3c7,#fde68a); }
-.stat-icon.red { background:linear-gradient(135deg,#fee2e2,#fecaca); }
-.stat-info .num { font-size:28px; font-weight:800; color:var(--text); line-height:1; }
-.stat-info .label { font-size:13px; color:var(--text-muted); margin-top:4px; }
-.card { background:var(--card); border-radius:var(--radius-lg); box-shadow:var(--shadow); border:1px solid var(--border); overflow:hidden; margin-bottom:24px; animation:cardAppear 0.5s ease both; }
-.card-header { padding:20px 24px; border-bottom:1px solid var(--border); display:flex; align-items:center; justify-content:space-between; background:linear-gradient(135deg,#f8faff,#eff6ff); }
-.card-header h3 { font-size:17px; font-weight:700; color:var(--primary); display:flex; align-items:center; gap:10px; }
-.card-body { padding:24px; }
-.patient-info-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(220px,1fr)); gap:14px; }
-.info-field { background:#f8fafc; border:1px solid var(--border); border-radius:10px; padding:12px 16px; }
-.info-field .field-label { font-size:11px; font-weight:600; color:var(--text-muted); text-transform:uppercase; letter-spacing:0.5px; margin-bottom:6px; }
-.info-field .field-value { font-size:15px; font-weight:600; color:var(--text); }
-.info-field .field-value-en { font-size:12px; color:var(--text-muted); direction:ltr; text-align:left; margin-top:2px; }
-.quota-bar-wrap { background:#f1f5f9; border-radius:50px; height:12px; overflow:hidden; margin:10px 0; }
-.quota-bar { height:100%; border-radius:50px; background:linear-gradient(90deg,var(--success),#34d399); transition:width 1s ease; }
+.main-content { max-width:1150px; margin:0 auto; padding:32px 20px; }
+.stats-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(220px,1fr)); gap:20px; margin-bottom:32px; }
+.stat-card { background:var(--card); border-radius:var(--radius); padding:20px 24px; box-shadow:var(--shadow); border:1px solid var(--border); display:flex; align-items:center; gap:16px; transition:var(--transition); }
+.stat-card:hover { transform:translateY(-4px); box-shadow:var(--shadow-lg); border-color: var(--primary-light); }
+.stat-icon { width:56px; height:56px; border-radius:14px; display:flex; align-items:center; justify-content:center; font-size:26px; flex-shrink:0; }
+.stat-icon.blue { background:rgba(59, 130, 246, 0.15); color:#3b82f6; }
+.stat-icon.green { background:rgba(16, 185, 129, 0.15); color:#10b981; }
+.stat-icon.orange { background:rgba(245, 158, 11, 0.15); color:#f59e0b; }
+.stat-icon.red { background:rgba(239, 68, 68, 0.15); color:#ef4444; }
+.stat-info .num { font-size:30px; font-weight:800; color:var(--text); line-height:1; }
+.stat-info .label { font-size:13px; color:var(--text-muted); margin-top:6px; font-weight:600; }
+
+.card { background:var(--card); border-radius:var(--radius-lg); box-shadow:var(--shadow); border:1px solid var(--border); overflow:hidden; margin-bottom:28px; transition:var(--transition); }
+.card-header { padding:20px 28px; border-bottom:1px solid var(--border); display:flex; align-items:center; justify-content:space-between; background:var(--table-hdr); }
+.card-header h3 { font-size:18px; font-weight:700; color:var(--primary); display:flex; align-items:center; gap:10px; }
+.card-body { padding:28px; }
+
+.patient-info-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(220px,1fr)); gap:16px; }
+.info-field { background:var(--input-bg); border:1px solid var(--border); border-radius:12px; padding:14px 18px; transition:var(--transition); }
+.info-field:hover { border-color: var(--text-muted); }
+.info-field .field-label { font-size:11px; font-weight:700; color:var(--text-muted); text-transform:uppercase; letter-spacing:0.5px; margin-bottom:6px; }
+.info-field .field-value { font-size:16px; font-weight:700; color:var(--text); }
+.info-field .field-value-en { font-size:12px; color:var(--text-muted); direction:ltr; text-align:left; margin-top:2px; font-family: 'Inter', sans-serif; }
+
+.quota-bar-wrap { background:var(--input-bg); border-radius:50px; height:14px; overflow:hidden; margin:12px 0; border:1px solid var(--border); }
+.quota-bar { height:100%; border-radius:50px; background:linear-gradient(90deg,var(--success),#34d399); transition:width 1s cubic-bezier(0.4, 0, 0.2, 1); }
 .quota-bar.warning { background:linear-gradient(90deg,var(--warning),#fbbf24); }
 .quota-bar.danger { background:linear-gradient(90deg,var(--danger),#f87171); }
-.leave-form-grid { display:grid; grid-template-columns:1fr 1fr; gap:18px; }
-@media (max-width:640px) { .leave-form-grid { grid-template-columns:1fr; } .stats-grid { grid-template-columns:1fr 1fr; } }
-.form-label { display:block; font-size:13px; font-weight:600; color:var(--text); margin-bottom:8px; }
-.form-select { width:100%; padding:11px 16px; border:2px solid var(--border); border-radius:10px; font-family:'Cairo',sans-serif; font-size:14px; color:var(--text); background:#f8fafc; transition:var(--transition); outline:none; cursor:pointer; }
-.form-select:focus { border-color:var(--primary-light); background:#fff; box-shadow:0 0 0 4px var(--primary-glow); }
+
+.leave-form-grid { display:grid; grid-template-columns:1fr 1fr; gap:20px; }
+@media (max-width:768px) { .leave-form-grid { grid-template-columns:1fr; } }
+.form-label { display:block; font-size:13px; font-weight:700; color:var(--text); margin-bottom:8px; }
+.form-select { width:100%; padding:12px 16px; border:2px solid var(--border); border-radius:12px; font-family:'Cairo',sans-serif; font-size:14px; color:var(--text); background:var(--input-bg); transition:var(--transition); outline:none; cursor:pointer; font-weight:600; }
+.form-select:focus { border-color:var(--primary-light); background:var(--card); box-shadow:0 0 0 4px var(--primary-glow); }
+.form-select option { background: var(--card); color: var(--text); }
+
 .time-mode-tabs { display:flex; gap:8px; margin-bottom:12px; }
-.time-tab { flex:1; padding:9px; border:2px solid var(--border); border-radius:8px; background:#f8fafc; font-family:'Cairo',sans-serif; font-size:13px; font-weight:600; cursor:pointer; transition:var(--transition); text-align:center; color:var(--text-muted); }
-.time-tab.active { border-color:var(--primary-light); background:#eff6ff; color:var(--primary); }
-.time-tab:hover:not(.active) { border-color:#94a3b8; background:#f1f5f9; }
+.time-tab { flex:1; padding:10px; border:2px solid var(--border); border-radius:10px; background:var(--input-bg); font-family:'Cairo',sans-serif; font-size:13px; font-weight:700; cursor:pointer; transition:var(--transition); text-align:center; color:var(--text-muted); }
+.time-tab.active { border-color:var(--primary-light); background:var(--primary-glow); color:var(--primary); }
+.time-tab:hover:not(.active) { border-color:var(--text-muted); }
+
 .leaves-table { width:100%; border-collapse:collapse; font-size:14px; }
-.leaves-table th { background:#f1f5f9; padding:12px 14px; text-align:right; font-weight:700; color:var(--text-muted); font-size:12px; text-transform:uppercase; letter-spacing:0.5px; border-bottom:2px solid var(--border); }
-.leaves-table td { padding:14px; border-bottom:1px solid #f1f5f9; vertical-align:middle; }
-.leaves-table tr:hover td { background:#f8faff; }
-.btn-sm { padding:6px 14px; font-size:13px; border-radius:8px; }
-.btn-outline { background:transparent; border:2px solid var(--primary-light); color:var(--primary); }
-.btn-outline:hover { background:var(--primary); color:#fff; }
-.modal-overlay { position:fixed; inset:0; background:rgba(0,0,0,0.5); backdrop-filter:blur(4px); z-index:1000; display:flex; align-items:center; justify-content:center; padding:20px; opacity:0; pointer-events:none; transition:opacity 0.3s ease; }
-.modal-overlay.active { opacity:1; pointer-events:all; }
-.modal-box { background:#fff; border-radius:20px; width:100%; max-width:560px; max-height:90vh; overflow-y:auto; box-shadow:0 40px 100px rgba(0,0,0,0.3); transform:scale(0.9) translateY(20px); transition:transform 0.3s cubic-bezier(0.34,1.56,0.64,1); }
-.modal-overlay.active .modal-box { transform:scale(1) translateY(0); }
-.modal-header { padding:20px 24px; border-bottom:1px solid var(--border); display:flex; align-items:center; justify-content:space-between; background:linear-gradient(135deg,#f8faff,#eff6ff); }
-.modal-header h4 { font-size:17px; font-weight:700; color:var(--primary); }
-.modal-close { width:32px; height:32px; border:none; background:#f1f5f9; border-radius:8px; cursor:pointer; font-size:18px; display:flex; align-items:center; justify-content:center; transition:var(--transition); color:var(--text-muted); }
-.modal-close:hover { background:#fee2e2; color:var(--danger); }
-.modal-body { padding:24px; }
-.modal-footer { padding:16px 24px; border-top:1px solid var(--border); display:flex; gap:10px; justify-content:flex-end; }
-.toast-container { position:fixed; top:80px; left:50%; transform:translateX(-50%); z-index:9999; display:flex; flex-direction:column; gap:10px; pointer-events:none; }
-.toast { background:#fff; border-radius:12px; padding:14px 20px; box-shadow:0 8px 32px rgba(0,0,0,0.15); font-size:14px; font-weight:600; display:flex; align-items:center; gap:10px; min-width:280px; max-width:400px; animation:slideDown 0.4s ease; border-right:4px solid var(--primary); }
+.leaves-table th { background:var(--table-hdr); padding:14px 16px; text-align:right; font-weight:700; color:var(--text-muted); font-size:12px; text-transform:uppercase; letter-spacing:0.5px; border-bottom:2px solid var(--border); }
+.leaves-table td { padding:16px; border-bottom:1px solid var(--border); vertical-align:middle; color:var(--text); font-weight:600; }
+.leaves-table tr:hover td { background:var(--table-hover); }
+
+.btn-sm { padding:8px 16px; font-size:13px; border-radius:10px; }
+.btn-outline { background:transparent; border:2px solid var(--primary-light); color:var(--primary); font-weight:700; }
+.btn-outline:hover { background:var(--primary-light); color:#fff; border-color:var(--primary-light); }
+
+.toast-container { position:fixed; top:90px; left:50%; transform:translateX(-50%); z-index:9999; display:flex; flex-direction:column; gap:12px; pointer-events:none; }
+.toast { background:var(--card); border:1px solid var(--border); border-radius:14px; padding:16px 24px; box-shadow:0 20px 50px rgba(0,0,0,0.3); font-size:15px; font-weight:700; display:flex; align-items:center; gap:12px; min-width:320px; max-width:450px; animation:slideDown 0.4s cubic-bezier(0.34,1.56,0.64,1); border-right:5px solid var(--primary); color:var(--text); }
 .toast.success { border-color:var(--success); }
 .toast.error { border-color:var(--danger); }
 .toast.warning { border-color:var(--warning); }
-.spinner { width:20px; height:20px; border:3px solid rgba(255,255,255,0.3); border-top-color:#fff; border-radius:50%; animation:spin 0.8s linear infinite; display:inline-block; }
-.empty-state { text-align:center; padding:48px 20px; color:var(--text-muted); }
-.empty-state .empty-icon { font-size:56px; margin-bottom:16px; opacity:0.5; }
-.empty-state h4 { font-size:17px; font-weight:700; margin-bottom:8px; color:var(--text); }
-.empty-state p { font-size:14px; }
-.days-counter { display:flex; align-items:center; gap:6px; font-size:13px; font-weight:600; color:var(--text-muted); margin-top:8px; }
+
+.spinner { width:20px; height:20px; border:3px solid rgba(255,255,255,0.3); border-top-color:#fff; border-radius:50%; animation:spin 0.8s linear infinite; display:inline-block; vertical-align: middle; }
+.empty-state { text-align:center; padding:60px 20px; color:var(--text-muted); }
+.empty-state .empty-icon { font-size:64px; margin-bottom:16px; opacity:0.6; }
+.empty-state h4 { font-size:18px; font-weight:800; margin-bottom:8px; color:var(--text); }
+.empty-state p { font-size:14px; font-weight:600; }
+
+.days-counter { display:flex; align-items:center; gap:8px; font-size:13px; font-weight:700; color:var(--text-muted); margin-top:8px; }
 .days-counter .used { color:var(--danger); }
 .days-counter .remaining { color:var(--success); }
 .days-counter .total { color:var(--primary); }
-.full-span { grid-column:1 / -1; }
+
 @keyframes gradientShift { 0%{background-position:0% 50%} 50%{background-position:100% 50%} 100%{background-position:0% 50%} }
-@keyframes float { 0%,100%{transform:translateY(0)} 50%{transform:translateY(-12px)} }
+@keyframes float { 0%,100%{transform:translateY(0)} 50%{transform:translateY(-10px)} }
 @keyframes slideUp { from{opacity:0;transform:translateY(40px)} to{opacity:1;transform:translateY(0)} }
 @keyframes slideDown { from{opacity:0;transform:translateY(-20px)} to{opacity:1;transform:translateY(0)} }
-@keyframes cardAppear { from{opacity:0;transform:translateY(16px)} to{opacity:1;transform:translateY(0)} }
 @keyframes spin { to{transform:rotate(360deg)} }
-@media (max-width:768px) { .navbar{padding:12px 16px} .main-content{padding:16px 12px} .card-body{padding:16px} .login-card{padding:32px 24px} .leaves-table{font-size:12px} .leaves-table th,.leaves-table td{padding:10px 8px} }
+
+/* لوحة الإشعارات */
+.notif-panel-box { background:var(--card); border:1px solid var(--border); border-radius:16px; box-shadow:0 20px 60px rgba(0,0,0,0.5); overflow:hidden; }
+.notif-item { padding:14px 18px; border-bottom:1px solid var(--border); transition:var(--transition); }
+.notif-item:hover { background:var(--table-hover); }
+.notif-item.unread { background:var(--primary-glow); }
 </style>
 </head>
 <body>
 
 <?php if (!isPatientLoggedIn()): ?>
-<!-- صفحة تسجيل الدخول -->
 <div class="login-page">
   <div class="login-card">
     <div class="login-icon">🏥</div>
@@ -945,45 +951,50 @@ body { font-family:'Cairo',sans-serif; background:var(--bg); color:var(--text); 
         <input type="password" id="password" name="password" class="form-control"
                placeholder="أدخل كلمة المرور" autocomplete="current-password" required>
       </div>
-      <button type="submit" class="btn btn-primary btn-full" style="margin-top:8px;">
+      <button type="submit" class="btn btn-primary btn-full" style="margin-top:10px;">
         🔐 تسجيل الدخول
       </button>
     </form>
-    <p style="text-align:center;margin-top:20px;font-size:12px;color:#94a3b8;">
+    <p style="text-align:center;margin-top:24px;font-size:13px;color:var(--text-muted);font-weight:600;">
       للحصول على حساب، يرجى التواصل مع الإدارة
     </p>
   </div>
 </div>
 
 <?php else: ?>
-<!-- لوحة تحكم المريض -->
 <nav class="navbar">
   <div class="brand">
     <div class="brand-icon">🏥</div>
     <span>بوابة المرضى</span>
   </div>
-  <div class="user-info">
-    <!-- زر الإشعارات -->
+  
+  <div class="user-actions">
+    <button id="themeToggleBtn" class="btn-icon-nav" onclick="toggleTheme()" title="تبديل المظهر">
+      <span id="themeIcon">☀️</span>
+    </button>
+
     <div style="position:relative;">
-      <button id="notifBell" onclick="toggleNotifPanel()" style="background:rgba(255,255,255,0.1);border:1px solid rgba(255,255,255,0.2);color:#fff;width:40px;height:40px;border-radius:10px;cursor:pointer;font-size:20px;display:flex;align-items:center;justify-content:center;position:relative;transition:all 0.3s;">
+      <button id="notifBell" class="btn-icon-nav" onclick="toggleNotifPanel()" title="الإشعارات" style="position:relative;">
         🔔
         <span id="notifBadge" style="display:none;position:absolute;top:-4px;right:-4px;background:#ef4444;color:#fff;border-radius:50%;width:18px;height:18px;font-size:11px;font-weight:700;align-items:center;justify-content:center;"></span>
       </button>
-      <!-- لوحة الإشعارات -->
-      <div id="notifPanel" style="display:none;position:absolute;top:50px;left:0;width:320px;background:#fff;border-radius:14px;box-shadow:0 20px 60px rgba(0,0,0,0.3);z-index:999;overflow:hidden;border:1px solid #e2e8f0;">
-        <div style="padding:14px 16px;background:linear-gradient(135deg,#1e40af,#3b82f6);color:#fff;display:flex;align-items:center;justify-content:space-between;">
+      
+      <div id="notifPanel" class="notif-panel-box" style="display:none;position:absolute;top:54px;left:0;width:340px;z-index:999;">
+        <div style="padding:14px 18px;background:linear-gradient(135deg,#1e40af,#3b82f6);color:#fff;display:flex;align-items:center;justify-content:space-between;">
           <span style="font-weight:700;font-size:14px;">🔔 الإشعارات</span>
-          <button onclick="markAllRead()" style="background:rgba(255,255,255,0.2);border:none;color:#fff;padding:4px 10px;border-radius:6px;font-size:12px;cursor:pointer;font-family:'Cairo',sans-serif;">تحديد كمقروء</button>
+          <button onclick="markAllRead()" style="background:rgba(255,255,255,0.2);border:none;color:#fff;padding:4px 10px;border-radius:8px;font-size:12px;cursor:pointer;font-family:'Cairo',sans-serif;font-weight:700;">تحديد كمقروء</button>
         </div>
-        <div id="notifList" style="max-height:300px;overflow-y:auto;padding:8px 0;">
-          <div style="text-align:center;padding:20px;color:#94a3b8;font-size:13px;">جاري التحميل...</div>
+        <div id="notifList" style="max-height:320px;overflow-y:auto;">
+          <div style="text-align:center;padding:24px;color:var(--text-muted);font-size:13px;font-weight:600;">جاري التحميل...</div>
         </div>
       </div>
     </div>
+
     <div class="user-badge">
       <span>👤</span>
       <span><?= htmlspecialchars($_SESSION['patient_display_name']) ?></span>
     </div>
+
     <form method="POST" action="user.php" style="margin:0;">
       <input type="hidden" name="action" value="logout">
       <button type="submit" class="btn-logout">تسجيل الخروج</button>
@@ -993,7 +1004,6 @@ body { font-family:'Cairo',sans-serif; background:var(--bg); color:var(--text); 
 
 <div class="main-content">
 
-  <!-- بطاقات الإحصاء -->
   <div class="stats-grid">
     <div class="stat-card">
       <div class="stat-icon blue">📋</div>
@@ -1006,7 +1016,7 @@ body { font-family:'Cairo',sans-serif; background:var(--bg); color:var(--text); 
       <div class="stat-icon green">✅</div>
       <div class="stat-info">
         <div class="num"><?= $remainingDays ?></div>
-        <div class="label">الأيام المتبقية</div>
+        <div class="label">الأيام المتبقية الحالية</div>
       </div>
     </div>
     <div class="stat-card">
@@ -1020,17 +1030,16 @@ body { font-family:'Cairo',sans-serif; background:var(--bg); color:var(--text); 
       <div class="stat-icon red">📄</div>
       <div class="stat-info">
         <div class="num"><?= count($myLeaves) ?></div>
-        <div class="label">إجمالي الإجازات</div>
+        <div class="label">إجمالي الإجازات المُصدرة</div>
       </div>
     </div>
   </div>
 
-  <!-- بيانات المريض -->
   <?php if ($patientData): ?>
   <div class="card">
     <div class="card-header">
-      <h3>👤 بياناتي الشخصية</h3>
-      <span style="font-size:12px;color:var(--text-muted);">للعرض فقط</span>
+      <h3>👤 بياناتي الشخصية والوظيفية</h3>
+      <span style="font-size:12px;color:var(--text-muted);font-weight:700;background:var(--input-bg);padding:4px 12px;border-radius:8px;">للعرض فقط</span>
     </div>
     <div class="card-body">
       <div class="patient-info-grid">
@@ -1067,11 +1076,10 @@ body { font-family:'Cairo',sans-serif; background:var(--bg); color:var(--text); 
         <?php endif; ?>
       </div>
 
-      <!-- شريط الحصة -->
-      <div style="margin-top:20px;">
+      <div style="margin-top:24px;">
         <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;">
-          <span style="font-size:13px;font-weight:700;color:var(--text);">حصة الإجازات المرضية</span>
-          <span style="font-size:13px;font-weight:700;color:var(--primary);"><?= $usedDays ?> / <?= $allowedDays ?> يوم</span>
+          <span style="font-size:14px;font-weight:700;color:var(--text);">حصة الإجازات المرضية المستهلكة</span>
+          <span style="font-size:14px;font-weight:800;color:var(--primary);"><?= $usedDays ?> / <?= $allowedDays ?> يوم</span>
         </div>
         <?php
           $pct = $allowedDays > 0 ? min(100, round($usedDays / $allowedDays * 100)) : 0;
@@ -1085,96 +1093,89 @@ body { font-family:'Cairo',sans-serif; background:var(--bg); color:var(--text); 
           <span>•</span>
           <span>متبقي: <span class="remaining"><?= $remainingDays ?></span></span>
           <span>•</span>
-          <span>المسموح: <span class="total"><?= $allowedDays ?></span></span>
+          <span>المسموح الكلي: <span class="total"><?= $allowedDays ?></span></span>
         </div>
       </div>
     </div>
   </div>
   <?php endif; ?>
 
-  <!-- نموذج إنشاء إجازة مرضية -->
   <?php if ($remainingDays > 0): ?>
   <div class="card">
     <div class="card-header">
-      <h3>📝 إنشاء إجازة مرضية جديدة</h3>
-      <span style="font-size:12px;background:#d1fae5;color:#059669;padding:4px 12px;border-radius:50px;font-weight:700;">
-        متبقي: <?= $remainingDays ?> يوم
+      <h3>📝 إصدار إجازة مرضية جديدة (فورية)</h3>
+      <span style="font-size:13px;background:var(--success-bg);color:var(--success-text);padding:6px 14px;border-radius:50px;font-weight:800;">
+        الرصيد المتاح: <?= $remainingDays ?> يوم
       </span>
     </div>
     <div class="card-body">
       <form id="leaveForm">
         <div class="leave-form-grid">
 
-          <!-- المستشفى -->
           <div>
-            <label class="form-label">🏥 المستشفى / المنشأة <span style="color:red">*</span></label>
+            <label class="form-label">🏥 المستشفى / المنشأة الطبية <span style="color:var(--danger)">*</span></label>
             <select class="form-select" id="hospitalSelect" name="hospital_id" required onchange="loadDoctors(this.value)">
-              <option value="">-- اختر المستشفى --</option>
+              <option value="">-- يرجى اختيار المنشأة --</option>
               <?php foreach ($hospitals as $h): ?>
               <option value="<?= $h['id'] ?>"><?= htmlspecialchars($h['name_ar']) ?></option>
               <?php endforeach; ?>
             </select>
           </div>
 
-          <!-- الطبيب -->
           <div>
-            <label class="form-label">👨‍⚕️ الطبيب <span style="color:red">*</span></label>
+            <label class="form-label">👨‍⚕️ الطبيب المعالج <span style="color:var(--danger)">*</span></label>
             <select class="form-select" id="doctorSelect" name="doctor_id" required>
               <option value="">-- اختر المستشفى أولاً --</option>
             </select>
           </div>
 
-          <!-- تاريخ البداية -->
           <div>
-            <label class="form-label">📅 تاريخ بداية الإجازة <span style="color:red">*</span></label>
+            <label class="form-label">📅 تاريخ بداية الإجازة <span style="color:var(--danger)">*</span></label>
             <input type="date" class="form-control" id="startDate" name="start_date" required
                    min="<?= date('Y-m-d') ?>" onchange="calcDays()">
           </div>
 
-          <!-- تاريخ النهاية -->
           <div>
-            <label class="form-label">📅 تاريخ نهاية الإجازة <span style="color:red">*</span></label>
+            <label class="form-label">📅 تاريخ نهاية الإجازة <span style="color:var(--danger)">*</span></label>
             <input type="date" class="form-control" id="endDate" name="end_date" required
                    min="<?= date('Y-m-d') ?>" onchange="calcDays()">
           </div>
 
-          <!-- عدد الأيام -->
           <div>
-            <label class="form-label">🔢 عدد الأيام</label>
+            <label class="form-label">🔢 المدة المحسوبة</label>
             <input type="number" class="form-control" id="daysDisplay" readonly
-                   placeholder="سيُحسب تلقائياً" style="background:#f1f5f9;cursor:not-allowed;">
+                   placeholder="تُحسب برمجياً وبشكل تلقائي" style="background:var(--input-bg);cursor:not-allowed;font-weight:700;">
             <input type="hidden" id="daysCount" name="days_count">
-            <div id="daysWarning" style="display:none;margin-top:6px;" class="alert alert-warning"></div>
+            <div id="daysWarning" style="display:none;margin-top:10px;" class="alert alert-warning"></div>
           </div>
 
-          <!-- وقت الإصدار -->
           <div>
-            <label class="form-label">🕐 وقت إصدار الإجازة</label>
+            <label class="form-label">🕐 توقيت التوثيق والإصدار</label>
             <div class="time-mode-tabs">
               <button type="button" class="time-tab active" onclick="setTimeMode('auto',this)">تلقائي</button>
               <button type="button" class="time-tab" onclick="setTimeMode('random',this)">عشوائي</button>
-              <button type="button" class="time-tab" onclick="setTimeMode('manual',this)">يدوي</button>
+              <button type="button" class="time-tab" onclick="setTimeMode('manual',this)">تحديد يدوي</button>
             </div>
             <input type="hidden" id="timeModeInput" name="time_mode" value="auto">
             <div id="manualTimeFields" style="display:none;">
-              <div style="display:flex;gap:8px;align-items:center;">
+              <div style="display:flex;gap:10px;align-items:center;">
                 <input type="time" class="form-control" id="manualTimeInput" name="manual_time" style="flex:1;">
-                <select class="form-select" name="manual_period" style="width:100px;">
+                <select class="form-select" name="manual_period" style="width:110px;">
                   <option value="AM">صباحاً</option>
                   <option value="PM">مساءً</option>
                 </select>
               </div>
             </div>
-            <div id="autoTimeInfo" style="font-size:12px;color:var(--text-muted);margin-top:6px;">
-              ⏰ سيُستخدم وقت الإنشاء تلقائياً
+            <div id="autoTimeInfo" style="font-size:12px;color:var(--text-muted);margin-top:6px;font-weight:600;">
+              ⏰ سيُعتمد التوقيت الفعلي للحظة الضغط على الزر
             </div>
           </div>
 
         </div>
 
-        <div style="margin-top:20px;display:flex;gap:12px;justify-content:flex-end;">
-          <button type="button" class="btn btn-primary" onclick="createLeave()" id="submitBtn">
-            📄 إنشاء الإجازة
+        <div style="margin-top:28px;display:flex;justify-content:flex-end;">
+          <button type="button" class="btn btn-primary" onclick="createLeave()" id="submitBtn" style="padding:14px 32px;font-size:16px;">
+            📄 اعتماد وإصدار الإجازة الفورية
           </button>
         </div>
       </form>
@@ -1185,41 +1186,39 @@ body { font-family:'Cairo',sans-serif; background:var(--bg); color:var(--text); 
     <div class="card-body">
       <div class="empty-state">
         <div class="empty-icon">🚫</div>
-        <h4>لا يمكن إنشاء إجازة مرضية</h4>
-        <p style="margin-bottom:20px;">
+        <h4>تعذر إصدار إجازات إضافية</h4>
+        <p style="margin-bottom:24px;max-width:600px;margin-left:auto;margin-right:auto;">
           <?php if ($allowedDays === 0): ?>
-            لم يتم تخصيص أيام إجازة لحسابك بعد. يرجى التواصل مع الإدارة لطلب إجازات إضافية.
+            لم يتم تخصيص رصيد أيام لحسابك حتى الآن. يرجى التواصل مع الإدارة الطبية لتفعيل رصيدك.
           <?php else: ?>
-            لقد استنفدت جميع أيام الإجازة المسموحة (<?= $allowedDays ?> يوم). لطلب إجازات إضافية يرجى التواصل معنا.
+            لقد استنفدت كامل رصيدك المسموح به (<?= $allowedDays ?> يوم). لطلب تمديد أو استثناء يرجى التواصل معنا.
           <?php endif; ?>
         </p>
         <a href="https://wa.me/966573436223" target="_blank"
-           style="display:inline-flex;align-items:center;gap:10px;background:linear-gradient(135deg,#25d366,#128c7e);color:#fff;padding:14px 28px;border-radius:12px;font-size:16px;font-weight:700;text-decoration:none;box-shadow:0 4px 16px rgba(37,211,102,0.4);transition:all 0.3s;"
-           onmouseover="this.style.transform='translateY(-2px)';this.style.boxShadow='0 8px 24px rgba(37,211,102,0.5)'"
-           onmouseout="this.style.transform='translateY(0)';this.style.boxShadow='0 4px 16px rgba(37,211,102,0.4)'">
-          <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="white">
+           style="display:inline-flex;align-items:center;gap:10px;background:linear-gradient(135deg,#25d366,#128c7e);color:#fff;padding:14px 32px;border-radius:14px;font-size:16px;font-weight:800;text-decoration:none;box-shadow:0 8px 24px rgba(37,211,102,0.3);transition:var(--transition);"
+           onmouseover="this.style.transform='translateY(-3px)'"
+           onmouseout="this.style.transform='translateY(0)'">
+          <svg xmlns="http://www.w3.org/2000/svg" width="22" height="22" viewBox="0 0 24 24" fill="white">
             <path d="M17.472 14.382c-.297-.149-1.758-.867-2.03-.967-.273-.099-.471-.148-.67.15-.197.297-.767.966-.94 1.164-.173.199-.347.223-.644.075-.297-.15-1.255-.463-2.39-1.475-.883-.788-1.48-1.761-1.653-2.059-.173-.297-.018-.458.13-.606.134-.133.298-.347.446-.52.149-.174.198-.298.298-.497.099-.198.05-.371-.025-.52-.075-.149-.669-1.612-.916-2.207-.242-.579-.487-.5-.669-.51-.173-.008-.371-.01-.57-.01-.198 0-.52.074-.792.372-.272.297-1.04 1.016-1.04 2.479 0 1.462 1.065 2.875 1.213 3.074.149.198 2.096 3.2 5.077 4.487.709.306 1.262.489 1.694.625.712.227 1.36.195 1.871.118.571-.085 1.758-.719 2.006-1.413.248-.694.248-1.289.173-1.413-.074-.124-.272-.198-.57-.347m-5.421 7.403h-.004a9.87 9.87 0 01-5.031-1.378l-.361-.214-3.741.982.998-3.648-.235-.374a9.86 9.86 0 01-1.51-5.26c.001-5.45 4.436-9.884 9.888-9.884 2.64 0 5.122 1.03 6.988 2.898a9.825 9.825 0 012.893 6.994c-.003 5.45-4.437 9.884-9.885 9.884m8.413-18.297A11.815 11.815 0 0012.05 0C5.495 0 .16 5.335.157 11.892c0 2.096.547 4.142 1.588 5.945L.057 24l6.305-1.654a11.882 11.882 0 005.683 1.448h.005c6.554 0 11.89-5.335 11.893-11.893a11.821 11.821 0 00-3.48-8.413z"/>
           </svg>
-          تواصل معنا على واتساب لطلب إجازات إضافية
+          تواصل مع الدعم الفني (واتساب)
         </a>
-        <p style="margin-top:12px;font-size:12px;color:#94a3b8;">اضغط على الزر أعلاه للتواصل المباشر عبر واتساب</p>
       </div>
     </div>
   </div>
   <?php endif; ?>
 
-  <!-- سجل الإجازات -->
   <div class="card">
     <div class="card-header">
-      <h3>📋 سجل إجازاتي المرضية</h3>
-      <span style="font-size:12px;color:var(--text-muted);"><?= count($myLeaves) ?> إجازة</span>
+      <h3>📋 السجل التاريخي لإجازاتي المرضية</h3>
+      <span style="font-size:13px;color:var(--text-muted);font-weight:700;"><?= count($myLeaves) ?> وثيقة معتمدة</span>
     </div>
     <div class="card-body" style="padding:0;">
       <?php if (empty($myLeaves)): ?>
       <div class="empty-state">
         <div class="empty-icon">📭</div>
-        <h4>لا توجد إجازات بعد</h4>
-        <p>لم تُنشئ أي إجازة مرضية حتى الآن.</p>
+        <h4>لا توجد وثائق في السجل</h4>
+        <p>لم تقم بإصدار أي إجازة مرضية حتى الآن.</p>
       </div>
       <?php else: ?>
       <div style="overflow-x:auto;">
@@ -1227,41 +1226,41 @@ body { font-family:'Cairo',sans-serif; background:var(--bg); color:var(--text); 
           <thead>
             <tr>
               <th>#</th>
-              <th>رمز الإجازة</th>
-              <th>المستشفى</th>
-              <th>الطبيب</th>
-              <th>من</th>
-              <th>إلى</th>
-              <th>الأيام</th>
-              <th>الوقت</th>
-              <th>PDF</th>
+              <th>الرمز الموحد</th>
+              <th>المنشأة الطبية</th>
+              <th>الطبيب المعالج</th>
+              <th>من تاريخ</th>
+              <th>إلى تاريخ</th>
+              <th>المدة</th>
+              <th>توقيت الإصدار</th>
+              <th>الوثيقة (PDF)</th>
             </tr>
           </thead>
           <tbody>
             <?php foreach ($myLeaves as $i => $lv): ?>
             <tr>
-              <td style="color:var(--text-muted);font-size:12px;"><?= $i + 1 ?></td>
-              <td style="font-weight:700;color:var(--primary);font-size:12px;direction:ltr;text-align:right;"><?= htmlspecialchars($lv['service_code'] ?? '') ?></td>
-              <td style="font-weight:600;"><?= htmlspecialchars($lv['h_name_ar'] ?? '') ?></td>
+              <td style="color:var(--text-muted);font-size:13px;"><?= $i + 1 ?></td>
+              <td style="font-weight:800;color:var(--primary);font-size:13px;direction:ltr;text-align:right;"><?= htmlspecialchars($lv['service_code'] ?? '') ?></td>
+              <td style="font-weight:700;"><?= htmlspecialchars($lv['h_name_ar'] ?? '') ?></td>
               <td>
-                <div style="font-weight:600;"><?= htmlspecialchars($lv['d_name_ar'] ?? '') ?></div>
-                <div style="font-size:11px;color:var(--text-muted);"><?= htmlspecialchars($lv['d_title_ar'] ?? '') ?></div>
+                <div style="font-weight:700;color:var(--text);"><?= htmlspecialchars($lv['d_name_ar'] ?? '') ?></div>
+                <div style="font-size:11px;color:var(--text-muted);font-weight:600;"><?= htmlspecialchars($lv['d_title_ar'] ?? '') ?></div>
               </td>
-              <td style="direction:ltr;text-align:right;"><?= fmtDateUser($lv['start_date']) ?></td>
-              <td style="direction:ltr;text-align:right;"><?= fmtDateUser($lv['end_date']) ?></td>
+              <td style="direction:ltr;text-align:right;font-family:'Inter',sans-serif;"><?= fmtDateUser($lv['start_date']) ?></td>
+              <td style="direction:ltr;text-align:right;font-family:'Inter',sans-serif;"><?= fmtDateUser($lv['end_date']) ?></td>
               <td>
-                <span style="background:#eff6ff;color:var(--primary);padding:3px 10px;border-radius:50px;font-weight:700;font-size:13px;">
-                  <?= $lv['days_count'] ?>
+                <span style="background:var(--primary-glow);color:var(--primary);padding:4px 12px;border-radius:50px;font-weight:800;font-size:13px;">
+                  <?= $lv['days_count'] ?> يوم
                 </span>
               </td>
-              <td style="font-size:12px;direction:ltr;text-align:right;">
+              <td style="font-size:13px;direction:ltr;text-align:right;font-family:'Inter',sans-serif;">
                 <?= htmlspecialchars($lv['issue_time'] ?? '') ?>
                 <?= $lv['issue_period'] === 'AM' ? 'ص' : ($lv['issue_period'] === 'PM' ? 'م' : '') ?>
               </td>
               <td>
-                <a href="user.php?action=generate_pdf&leave_id=<?= $lv['id'] ?>"
-                   target="_blank" class="btn btn-outline btn-sm">
-                  📄 PDF
+                <a href="user.php?action=generate_pdf&leave_id=<?= $lv['id'] ?>&pdf_mode=download"
+                   class="btn btn-outline btn-sm">
+                  📄 تحميل PDF
                 </a>
               </td>
             </tr>
@@ -1273,31 +1272,51 @@ body { font-family:'Cairo',sans-serif; background:var(--bg); color:var(--text); 
     </div>
   </div>
 
-</div><!-- /main-content -->
-
-<!-- Toast Container -->
-<div class="toast-container" id="toastContainer"></div>
+</div><div class="toast-container" id="toastContainer"></div>
 
 <script>
 const MAX_DAYS = <?= $remainingDays ?>;
 
+// ================= إدارة الوضع الليلي (Dark Mode) =================
+function toggleTheme() {
+  const root = document.documentElement;
+  const current = root.getAttribute('data-theme');
+  const newTheme = current === 'dark' ? 'light' : 'dark';
+  
+  root.setAttribute('data-theme', newTheme);
+  localStorage.setItem('theme', newTheme);
+  updateThemeIcon(newTheme);
+}
+
+function updateThemeIcon(theme) {
+  const icon = document.getElementById('themeIcon');
+  if (icon) { icon.textContent = theme === 'dark' ? '🌙' : '☀️'; }
+}
+
+// ضبط الأيقونة عند التحميل
+document.addEventListener('DOMContentLoaded', () => {
+  const current = document.documentElement.getAttribute('data-theme') || 'light';
+  updateThemeIcon(current);
+});
+
+// ================= دوال التحكم بالنموذج والإرسال =================
 function loadDoctors(hospitalId) {
   const sel = document.getElementById('doctorSelect');
-  sel.innerHTML = '<option value="">جاري التحميل...</option>';
+  sel.innerHTML = '<option value="">جاري جلب الأطباء...</option>';
   if (!hospitalId) { sel.innerHTML = '<option value="">-- اختر المستشفى أولاً --</option>'; return; }
   fetch('user.php?action=get_doctors_by_hospital&hospital_id=' + hospitalId)
     .then(r => r.json())
     .then(data => {
       if (data.success && data.doctors.length > 0) {
-        sel.innerHTML = '<option value="">-- اختر الطبيب --</option>';
+        sel.innerHTML = '<option value="">-- يرجى اختيار الطبيب --</option>';
         data.doctors.forEach(d => {
-          sel.innerHTML += `<option value="${d.id}">${d.name_ar} — ${d.title_ar}</option>`;
+          sel.innerHTML += `<option value="${d.id}">${d.name_ar} — (${d.title_ar})</option>`;
         });
       } else {
-        sel.innerHTML = '<option value="">لا يوجد أطباء مرتبطون بهذا المستشفى</option>';
+        sel.innerHTML = '<option value="">لا يوجد أطباء متاحين حالياً</option>';
       }
     })
-    .catch(() => { sel.innerHTML = '<option value="">خطأ في التحميل</option>'; });
+    .catch(() => { sel.innerHTML = '<option value="">فشل التحميل</option>'; });
 }
 
 function calcDays() {
@@ -1311,15 +1330,15 @@ function calcDays() {
   if (e < s) {
     display.value = ''; hidden.value = '';
     warning.style.display = 'block';
-    warning.textContent = '⚠️ تاريخ النهاية يجب أن يكون بعد تاريخ البداية.';
+    warning.innerHTML = '⚠️ <b>خطأ:</b> تاريخ النهاية يجب أن يكون بعد تاريخ البداية.';
     return;
   }
   const diff = Math.round((e - s) / (1000 * 60 * 60 * 24)) + 1;
-  display.value = diff + ' يوم';
+  display.value = diff + ' أيام';
   hidden.value  = diff;
   if (diff > MAX_DAYS) {
     warning.style.display = 'block';
-    warning.textContent = `⚠️ عدد الأيام (${diff}) يتجاوز الحصة المتبقية (${MAX_DAYS} يوم).`;
+    warning.innerHTML = `⚠️ <b>تنبيه:</b> المدة المطلوبة (${diff} أيام) تتجاوز الرصيد المتاح (${MAX_DAYS} يوم).`;
   } else {
     warning.style.display = 'none';
   }
@@ -1333,8 +1352,8 @@ function setTimeMode(mode, btn) {
   const mf = document.getElementById('manualTimeFields');
   const ai = document.getElementById('autoTimeInfo');
   if (mode === 'manual') { mf.style.display = 'block'; ai.style.display = 'none'; }
-  else if (mode === 'random') { mf.style.display = 'none'; ai.style.display = 'block'; ai.textContent = '🎲 سيتم اختيار وقت عشوائي بين 8 صباحاً و 5 مساءً'; }
-  else { mf.style.display = 'none'; ai.style.display = 'block'; ai.textContent = '⏰ سيُستخدم وقت الإنشاء تلقائياً'; }
+  else if (mode === 'random') { mf.style.display = 'none'; ai.style.display = 'block'; ai.textContent = '🎲 سيتم توليد توقيت عشوائي ذكي خلال ساعات الدوام الرسمي'; }
+  else { mf.style.display = 'none'; ai.style.display = 'block'; ai.textContent = '⏰ سيُعتمد التوقيت الفعلي للحظة الضغط على الزر'; }
 }
 
 function createLeave() {
@@ -1344,16 +1363,16 @@ function createLeave() {
   const endDate    = document.getElementById('endDate').value;
   const daysCount  = document.getElementById('daysCount').value;
 
-  if (!hospitalId) { showToast('يرجى اختيار المستشفى.', 'error'); return; }
-  if (!doctorId)   { showToast('يرجى اختيار الطبيب.', 'error'); return; }
-  if (!startDate)  { showToast('يرجى تحديد تاريخ البداية.', 'error'); return; }
-  if (!endDate)    { showToast('يرجى تحديد تاريخ النهاية.', 'error'); return; }
-  if (!daysCount || parseInt(daysCount) <= 0) { showToast('يرجى التحقق من التواريخ.', 'error'); return; }
-  if (parseInt(daysCount) > MAX_DAYS) { showToast(`عدد الأيام يتجاوز الحصة المتبقية (${MAX_DAYS} يوم).`, 'error'); return; }
+  if (!hospitalId) { showToast('يرجى اختيار المنشأة الطبية أولاً.', 'error'); return; }
+  if (!doctorId)   { showToast('يرجى تحديد الطبيب المعالج.', 'error'); return; }
+  if (!startDate)  { showToast('تاريخ بداية الإجازة مطلوب.', 'error'); return; }
+  if (!endDate)    { showToast('تاريخ نهاية الإجازة مطلوب.', 'error'); return; }
+  if (!daysCount || parseInt(daysCount) <= 0) { showToast('يرجى ضبط التواريخ بشكل صحيح.', 'error'); return; }
+  if (parseInt(daysCount) > MAX_DAYS) { showToast(`المدة المطلوبة تتجاوز رصيدك الحالي المتبقي (${MAX_DAYS} يوم).`, 'error'); return; }
 
   const btn = document.getElementById('submitBtn');
   btn.disabled = true;
-  btn.innerHTML = '<span class="spinner"></span> جاري الإنشاء...';
+  btn.innerHTML = '<span class="spinner"></span> جاري التوثيق والإصدار...';
 
   const formData = new FormData(document.getElementById('leaveForm'));
   formData.append('action', 'create_sick_leave');
@@ -1362,41 +1381,42 @@ function createLeave() {
     .then(r => r.json())
     .then(data => {
       if (data.success) {
-        showToast('✅ ' + data.message + ' — رمز الإجازة: ' + data.service_code, 'success');
+        showToast('✅ ' + data.message + ' (الرمز: ' + data.service_code + ')', 'success');
+        
+        // التعديل المطلوب: تحديث الصفحة فقط وإظهار الإجازة بالجدول بدون فتح نافذة جديدة
         setTimeout(() => {
-          // فتح صفحة PDF مع زر التحميل
-          window.open('user.php?action=generate_pdf&leave_id=' + data.leave_id, '_blank');
-          setTimeout(() => location.reload(), 1000);
+          location.reload();
         }, 1500);
+
       } else {
-        showToast(data.message || 'حدث خطأ.', 'error');
+        showToast(data.message || 'حدث خطأ غير متوقع.', 'error');
         btn.disabled = false;
-        btn.innerHTML = '📄 إنشاء الإجازة';
+        btn.innerHTML = '📄 اعتماد وإصدار الإجازة الفورية';
       }
     })
     .catch(() => {
-      showToast('خطأ في الاتصال. يرجى المحاولة مجدداً.', 'error');
+      showToast('مشكلة في الاتصال بالخادم. يرجى المحاولة لاحقاً.', 'error');
       btn.disabled = false;
-      btn.innerHTML = '📄 إنشاء الإجازة';
+      btn.innerHTML = '📄 اعتماد وإصدار الإجازة الفورية';
     });
 }
 
 function showToast(msg, type = 'success') {
   const container = document.getElementById('toastContainer');
-  const icons = { success: '✅', error: '❌', warning: '⚠️' };
+  const icons = { success: '✨', error: '❌', warning: '⚠️' };
   const toast = document.createElement('div');
   toast.className = `toast ${type}`;
-  toast.innerHTML = `<span>${icons[type] || '💬'}</span><span>${msg}</span>`;
+  toast.innerHTML = `<span style="font-size:18px;">${icons[type] || '💬'}</span><span style="flex:1;">${msg}</span>`;
   container.appendChild(toast);
   setTimeout(() => {
     toast.style.opacity = '0';
     toast.style.transform = 'translateY(-10px)';
-    toast.style.transition = 'all 0.3s ease';
-    setTimeout(() => toast.remove(), 300);
+    toast.style.transition = 'all 0.4s ease';
+    setTimeout(() => toast.remove(), 400);
   }, 5000);
 }
 
-// ===== نظام الإشعارات =====
+// ================= نظام الإشعارات =================
 let notifPanelOpen = false;
 
 function toggleNotifPanel() {
@@ -1406,7 +1426,6 @@ function toggleNotifPanel() {
   if (notifPanelOpen) loadNotifications();
 }
 
-// إغلاق اللوحة عند النقر خارجها
 document.addEventListener('click', function(e) {
   const bell = document.getElementById('notifBell');
   const panel = document.getElementById('notifPanel');
@@ -1430,13 +1449,13 @@ async function loadNotifications() {
         badge.style.display = 'none';
       }
       if (!data.notifications || data.notifications.length === 0) {
-        list.innerHTML = '<div style="text-align:center;padding:24px;color:#94a3b8;font-size:13px;">لا توجد إشعارات</div>';
+        list.innerHTML = '<div style="text-align:center;padding:24px;color:var(--text-muted);font-size:13px;font-weight:600;">لا توجد إشعارات حالياً</div>';
         return;
       }
       list.innerHTML = data.notifications.map(n => `
-        <div style="padding:12px 16px;border-bottom:1px solid #f1f5f9;background:${n.is_read == 0 ? '#eff6ff' : '#fff'};transition:background 0.3s;">
-          <div style="font-size:13px;font-weight:${n.is_read == 0 ? '700' : '400'};color:#1e293b;line-height:1.5;">${escapeHtml(n.message)}</div>
-          <div style="font-size:11px;color:#94a3b8;margin-top:4px;">${n.created_at}</div>
+        <div class="notif-item ${n.is_read == 0 ? 'unread' : ''}">
+          <div style="font-size:13px;font-weight:${n.is_read == 0 ? '800' : '600'};color:var(--text);line-height:1.5;">${escapeHtml(n.message)}</div>
+          <div style="font-size:11px;color:var(--text-muted);margin-top:6px;font-family:'Inter',sans-serif;">${n.created_at}</div>
         </div>
       `).join('');
     }
@@ -1459,7 +1478,6 @@ function escapeHtml(str) {
   return d.innerHTML;
 }
 
-// تحميل عدد الإشعارات غير المقروءة عند فتح الصفحة
 (async function() {
   try {
     const res = await fetch('user.php?action=get_user_notifications');
