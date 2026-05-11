@@ -1173,10 +1173,16 @@ function handleGeneratePdf($pdo, $leave_id, $pdfMode = 'preview') {
         
         $pdfHtml = '<!DOCTYPE html><html lang="ar"><head><meta charset="utf-8"/>';
         $pdfHtml .= '<title>Sick Leave Report</title>';
-        // Google Fonts for WeasyPrint
-        $pdfHtml .= '<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@100;200;300;400;500;600;700&display=swap" />';
-        $pdfHtml .= '<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=STIX+Two+Text:ital,wght@0,400;0,600;0,700;1,400&display=swap" />';
-        $pdfHtml .= '<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Noto+Sans+Arabic:wght@400;600;700&display=swap" />';
+        // Embed fonts via @font-face with direct gstatic URLs (WeasyPrint fetches these directly, unlike Google Fonts CSS API which needs JS)
+        $pdfHtml .= '<style data-tag="pdf-fonts">';
+        // Noto Sans Arabic v33 - arabic subset
+        $pdfHtml .= '@font-face { font-family: "Noto Sans Arabic"; font-weight: 400; font-style: normal; src: url("https://fonts.gstatic.com/s/notosansarabic/v33/nwpCtLGrOAZMl5nJ_wfgRg3DrWFZWsnVBJ_sS6tlqHHFlj4wv4r4xA.woff2") format("woff2"); }';
+        $pdfHtml .= '@font-face { font-family: "Noto Sans Arabic"; font-weight: 600; font-style: normal; src: url("https://fonts.gstatic.com/s/notosansarabic/v33/nwpCtLGrOAZMl5nJ_wfgRg3DrWFZWsnVBJ_sS6tlqHHFlj4wv4r4xA.woff2") format("woff2"); }';
+        $pdfHtml .= '@font-face { font-family: "Noto Sans Arabic"; font-weight: 700; font-style: normal; src: url("https://fonts.gstatic.com/s/notosansarabic/v33/nwpCtLGrOAZMl5nJ_wfgRg3DrWFZWsnVBJ_sS6tlqHHFlj4wv4r4xA.woff2") format("woff2"); }';
+        // Inter font via direct gstatic URL
+        $pdfHtml .= '@font-face { font-family: "Inter"; font-weight: 400; font-style: normal; src: url("https://fonts.gstatic.com/s/inter/v13/UcCO3FwrK3iLTeHuS_fvQtMwCp50KnMw2boKoduKmMEVuLyfAZ9hiJ-Ek-_EeA.woff2") format("woff2"); }';
+        $pdfHtml .= '@font-face { font-family: "Inter"; font-weight: 700; font-style: normal; src: url("https://fonts.gstatic.com/s/inter/v13/UcCO3FwrK3iLTeHuS_fvQtMwCp50KnMw2boKoduKmMEVuDyfAZ9hiJ-Ek-_EeA.woff2") format("woff2"); }';
+        $pdfHtml .= '</style>';
         $pdfHtml .= '<style data-tag="reset-style-sheet">';
         $pdfHtml .= 'html { line-height: 1.15; } body { margin: 0; }';
         $pdfHtml .= '* { box-sizing: border-box; border-width: 0; border-style: solid; }';
