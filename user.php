@@ -1,8 +1,7 @@
 <?php
 /**
  * بوابة المرضى - user.php
- * المرضى يُنشئون إجازات مرضية حقيقية بنفس قالب لوحة التحكم
- * (نسخة مطورة بتصميم احترافي + Dark Mode + بقاء بنفس الصفحة)
+ * تصميم احترافي خيالي مع أمان عالي وريسبونسيف كامل
  */
 
 ini_set('session.use_only_cookies', '1');
@@ -21,7 +20,8 @@ header('X-Frame-Options: DENY');
 header('X-Content-Type-Options: nosniff');
 header('Referrer-Policy: strict-origin-when-cross-origin');
 header('Permissions-Policy: geolocation=(), microphone=(), camera=()');
-header('Content-Security-Policy: default-src \'self\'; script-src \'self\' \'unsafe-inline\' https://cdn.jsdelivr.net https://cdnjs.cloudflare.com; style-src \'self\' \'unsafe-inline\' https://cdn.jsdelivr.net https://cdnjs.cloudflare.com https://fonts.googleapis.com; font-src \'self\' https://fonts.gstatic.com https://cdnjs.cloudflare.com https://cdn.jsdelivr.net; img-src \'self\' data: https:; connect-src \'self\';');
+header('Content-Security-Policy: default-src \'self\'; script-src \'self\' \'unsafe-inline\' https://cdn.jsdelivr.net https://cdnjs.cloudflare.com; style-src \'self\' \'unsafe-inline\' https://cdn.jsdelivr.net https://cdnjs.cloudflare.com https://fonts.googleapis.com; font-src \'self\' https://fonts.gstatic.com https://cdnjs.cloudflare.com; img-src \'self\' data: https:; connect-src \'self\';');
+header('Strict-Transport-Security: max-age=31536000; includeSubDomains');
 
 // منع عرض أخطاء PHP للمستخدمين
 ini_set('display_errors', '0');
@@ -173,17 +173,13 @@ $action = $_POST['action'] ?? $_GET['action'] ?? '';
 
 // تسجيل الدخول
 if ($action === 'patient_login') {
-    // التحقق من CSRF
     if (!patient_verify_csrf($_POST['csrf_token'] ?? '')) {
         $loginError = 'طلب غير صالح. يرجى إعادة المحاولة.';
-        // إعادة توليد التوكن
         unset($_SESSION['patient_csrf_token']);
     } else {
-
         $username = trim($_POST['username'] ?? '');
         $password = $_POST['password'] ?? '';
 
-        // حماية من هجمات القوة الغاشمة
         $maxAttempts = 5;
         $lockMinutes = 15;
         $_SESSION['patient_login_attempts'] = $_SESSION['patient_login_attempts'] ?? 0;
@@ -195,13 +191,11 @@ if ($action === 'patient_login') {
         } elseif (empty($username) || empty($password)) {
             $loginError = 'يرجى إدخال اسم المستخدم وكلمة المرور.';
         } else {
-            // جلب المستخدم مع التحقق من وجود حساب مريض مرتبط به فقط
             $stmtCheck = $pdo->prepare("SELECT u.*, pa.patient_id, pa.allowed_days, pa.expiry_date FROM admin_users u INNER JOIN patient_accounts pa ON pa.user_id = u.id WHERE u.username = ? AND u.is_active = 1");
             $stmtCheck->execute([$username]);
             $userCheck = $stmtCheck->fetch();
 
             if ($userCheck && password_verify($password, $userCheck['password_hash'])) {
-                // التحقق من أن الحساب مرتبط بمريض فعلاً
                 if (empty($userCheck['patient_id']) || (int)$userCheck['patient_id'] <= 0) {
                     $_SESSION['patient_login_attempts'] = intval($_SESSION['patient_login_attempts'] ?? 0) + 1;
                     $loginError = 'اسم المستخدم أو كلمة المرور غير صحيحة.';
@@ -233,7 +227,7 @@ if ($action === 'patient_login') {
                 }
             }
         }
-    } // نهاية التحقق من CSRF
+    }
 }
 
 // تسجيل الخروج
@@ -405,7 +399,7 @@ if ($action === 'create_sick_leave' && isPatientLoggedIn()) {
     exit;
 }
 
-// توليد PDF للإجازة (نفس قالب لوحة التحكم)
+// توليد PDF للإجازة
 if ($action === 'generate_pdf' && isPatientLoggedIn()) {
     $baseUrl = (isset($_SERVER['HTTPS']) && $_SERVER['HTTPS'] === 'on' ? 'https' : 'http') . '://' . $_SERVER['HTTP_HOST'] . dirname($_SERVER['SCRIPT_NAME']) . '/';
     $leaveId = (int)($_GET['leave_id'] ?? 0);
@@ -504,6 +498,7 @@ if ($action === 'generate_pdf' && isPatientLoggedIn()) {
     } else {
         $issueTimeDisplay = $issueTimeRaw;
     }
+
     $issueDateObj = DateTime::createFromFormat('Y-m-d', $issueG);
     $dayNameEn   = $issueDateObj ? $issueDateObj->format('l') : '';
     $monthNameEn = $issueDateObj ? $issueDateObj->format('F') : '';
@@ -515,340 +510,199 @@ if ($action === 'generate_pdf' && isPatientLoggedIn()) {
     $durationEn = $daysEn . ' ( ' . $startEn . ' to ' . $endEn . ' )';
     $durationAr = '<span style="font-family: \'Times New Roman\', serif; font-size: 14.5px; font-weight: 400;">' . $daysAr . '</span> <span style="font-family: \'Noto Sans Arabic\', sans-serif; font-size: 14.5px; font-weight: 400;">' . $daysArWord . '</span> ( ' . formatHijriDateSpanUser($startHj) . ' <span style="font-family: \'Noto Sans Arabic\', sans-serif; font-size: 13.5px; font-weight: 400;">إلى</span> ' . formatHijriDateSpanUser($endHj) . ' )';
 
-   if ($pdfMode === 'download') {
+    // PDF download mode - use same template as admin
+    if ($pdfMode === 'download') {
         $scFile = preg_replace('/[^a-zA-Z0-9_-]/', '_', $sc);
-
-        // Build full HTML with embedded PNGs/SVGs and Fonts as absolute URLs
-        $baseUrl = (isset($_SERVER['HTTPS']) && $_SERVER['HTTPS'] === 'on' ? 'https' : 'http') . '://' . $_SERVER['HTTP_HOST'] . dirname($_SERVER['SCRIPT_NAME']) . '/';
 
         $pdfHtml  = '<!DOCTYPE html><html lang="ar"><head><meta charset="utf-8"/>';
         $pdfHtml .= '<title>Sick Leave Report</title>';
-        
-        // Google Fonts strictly for Arabic and Inter placeholders
         $pdfHtml .= '<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@100;200;300;400;500;600;700&display=swap" />';
         $pdfHtml .= '<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=STIX+Two+Text:ital,wght@0,400;0,600;0,700;1,400&display=swap" />';
         $pdfHtml .= '<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Noto+Sans+Arabic:wght@400;600;700&display=swap" />';
-        
-        $pdfHtml .= '<style data-tag="reset-style-sheet">';
-        $pdfHtml .= 'html{line-height:1.15}body{margin:0}*{box-sizing:border-box;border-width:0;border-style:solid}p,li,ul,pre,div,h1,h2,h3,h4,h5,h6,figure,blockquote,figcaption{margin:0;padding:0}a{color:inherit;text-decoration:inherit}';
-        $pdfHtml .= '</style>';
-
-        $pdfHtml .= '<style data-tag="default-style-sheet">';
-        $pdfHtml .= 'html{font-family:Inter,sans-serif;font-size:16px}body{font-weight:400;color:#191818;background:#ffffff;margin:0;padding:0}';
-        $pdfHtml .= '</style>';
-        
-        // =========================================================
-        // LOAD YOUR LOCAL OPENTYPE (.otf) FILES
-        // =========================================================
+        $pdfHtml .= '<style data-tag="reset-style-sheet">html{line-height:1.15}body{margin:0}*{box-sizing:border-box;border-width:0;border-style:solid}p,li,ul,pre,div,h1,h2,h3,h4,h5,h6,figure,blockquote,figcaption{margin:0;padding:0}a{color:inherit;text-decoration:inherit}</style>';
+        $pdfHtml .= '<style data-tag="default-style-sheet">html{font-family:Inter,sans-serif;font-size:16px}body{font-weight:400;color:#191818;background:#ffffff;margin:0;padding:0}</style>';
         $pdfHtml .= '<style>';
-        $pdfHtml .= '@font-face {';
-        $pdfHtml .= '    font-family: "Times New Roman";';
-        $pdfHtml .= '    src: url("' . $baseUrl . 'times_regular.otf") format("opentype");';
-        $pdfHtml .= '    font-weight: 400;';
-        $pdfHtml .= '    font-style: normal;';
-        $pdfHtml .= '}';
-
-        $pdfHtml .= '@font-face {';
-        $pdfHtml .= '    font-family: "Times New Roman";';
-        $pdfHtml .= '    src: url("' . $baseUrl . 'times_bold.otf") format("opentype");';
-        $pdfHtml .= '    font-weight: 700;';
-        $pdfHtml .= '    font-style: normal;';
-        $pdfHtml .= '}';
+        $pdfHtml .= '@font-face { font-family: "Times New Roman"; src: url("' . $baseUrl . 'times_regular.otf") format("opentype"); font-weight: 400; font-style: normal; }';
+        $pdfHtml .= '@font-face { font-family: "Times New Roman"; src: url("' . $baseUrl . 'times_bold.otf") format("opentype"); font-weight: 700; font-style: normal; }';
         $pdfHtml .= '</style>';
-        // =========================================================
-
         $pdfHtml .= '<style>';
         $pdfHtml .= '@page { size: 842.25px 1190.25px; margin: 0; }';
         $pdfHtml .= '.group1-container1 { width: 842.25px; height: 1190.25px; position: relative; background-color: transparent; margin: 0; padding: 0; }';
         $pdfHtml .= '.group1-thq-group1-elm { width: 842.25px; height: 1190.25px; position: relative; background-color: white; margin: 0; padding: 0; }';
-        
-        // Tables & Data Cells directly referencing the embedded font
         $pdfHtml .= '.info-table { position: absolute; top: 242px; left: 36px; width: 770px; border-collapse: separate; border-spacing: 0; border: 1px solid #cccccc; border-radius: 8px; overflow: hidden; background-color: transparent; z-index: 10; }';
         $pdfHtml .= '.info-table td { border-bottom: 1px solid #cccccc; border-right: 1px solid #cccccc; height: 42px; text-align: center; vertical-align: middle; padding: 4px 8px; }';
         $pdfHtml .= '.info-table td:last-child { border-right: none; } .info-table tr:last-child td { border-bottom: none; }';
-        
         $pdfHtml .= '.info-table .en-title { width: 161px; color: rgba(54, 111, 181, 1); font-size: 13.5px; font-weight: 700; text-align: center; font-family: "Times New Roman", serif; }';
         $pdfHtml .= '.info-table .data-cell { width: 240px; color: rgba(44, 62, 119, 1); font-size: 13.5px; font-family: "Times New Roman", serif; font-weight: 400; text-align: center; }';
-        
         $pdfHtml .= '.info-table .date-cell { font-size: 13.9px; } .info-table .data-cell.ar-text { font-family: "Noto Sans Arabic", sans-serif; }';
         $pdfHtml .= '.info-table .ar-title { width: 140px; color: rgba(54, 111, 181, 1); font-size: 13.5px; font-weight: 700; text-align: center; font-family: "Noto Sans Arabic", sans-serif; white-space: nowrap; }';
-        $pdfHtml .= '.info-table tr.blue-row td { background-color: #2c3e77; color: #ffffff; border-bottom: 1px solid #cccccc; border-right: 1px solid #cccccc; }';
-        $pdfHtml .= '.info-table tr.blue-row td:last-child { border-right: none; }';
-        $pdfHtml .= '.info-table .blue-row .data-cell.ar-text { color: rgba(255, 255, 255, 1); font-size: 13.5px; font-family: "Times New Roman", serif; font-weight: 400; }';
+        $pdfHtml .= '.info-table tr.blue-row td { background-color: #2c3e77; color: #ffffff; }';
         $pdfHtml .= '.info-table .blue-row .data-cell { color: rgba(255, 255, 255, 1); }';
         $pdfHtml .= '.info-table tr.gray-row td { background-color: #f7f7f7; }';
-        
-        // Layout Placeholders & Pointers
-        $pdfHtml .= '.en-spaced { letter-spacing: 0.3px; }';
         $pdfHtml .= ':root { --footer-offset: 40px; }';
         $pdfHtml .= '.group1-thq-staticinfo-elm { top: 125px; left: 36.65px; width: 768.35px; height: 811.91px; display: flex; position: absolute; align-items: flex-start; pointer-events: none; }';
-        
-        // Side Placeholders (Synced with updated CSS specs)
-        $pdfHtml .= '.top-right-placeholder { position: absolute; top: 36px; left: 543.36px; width: 262.43px; height: 107.22px; display: flex; align-items: center; justify-content: center; font-size: 14px; z-index: 5; }';
-        $pdfHtml .= '.top-left-placeholder { position: absolute; top: 36px; left: 36px; width: 149.96px; height: 65.98px; display: flex; align-items: center; justify-content: center; font-size: 14px; z-index: 5; }';
-        $pdfHtml .= '.bottom-right-placeholder { position: absolute; top: 1005px; left: 657.17px; width: 149.96px; height: 71.23px; display: flex; align-items: center; justify-content: center; font-size: 12px; z-index: 5; }';
-        $pdfHtml .= '.header-placeholder { top: -50px; left: 320px; width: 163px; height: 40px; position: absolute; display: flex; align-items: center; justify-content: center; font-size: 11px; }';
-        
-        // Text Elements referencing the embedded font
+        $pdfHtml .= '.top-right-placeholder { position: absolute; top: 36px; left: 543.36px; width: 262.43px; height: 107.22px; display: flex; align-items: center; justify-content: center; z-index: 5; }';
+        $pdfHtml .= '.top-left-placeholder { position: absolute; top: 36px; left: 36px; width: 149.96px; height: 65.98px; display: flex; align-items: center; justify-content: center; z-index: 5; }';
+        $pdfHtml .= '.bottom-right-placeholder { position: absolute; top: 1005px; left: 657.17px; width: 149.96px; height: 71.23px; display: flex; align-items: center; justify-content: center; z-index: 5; }';
+        $pdfHtml .= '.header-placeholder { top: -50px; left: 320px; width: 163px; height: 40px; position: absolute; display: flex; align-items: center; justify-content: center; }';
         $pdfHtml .= '.group1-thq-text-elm41 { top: 40px; left: 289px; color: rgba(48, 109, 181, 1); width: 215px; position: absolute; font-size: 22.5px; font-weight: 700; text-align: center; line-height: 30px; }';
-        $pdfHtml .= '.group1-thq-text-elm44 { top: -10px; left: 310px; color: rgba(0, 0, 0, 1); position: absolute; font-size: 17.3px; font-weight: 400; text-align: left; font-family: "Times New Roman", serif; }';
-        
+        $pdfHtml .= '.group1-thq-text-elm44 { top: -10px; left: 310px; color: rgba(0, 0, 0, 1); position: absolute; font-size: 17.3px; font-weight: 400; font-family: "Times New Roman", serif; }';
         $pdfHtml .= '.group1-thq-hospitallogoandthename-elm { top: 760px; left: 438.94px; width: 403px; height: 202.78px; display: flex; position: absolute; align-items: flex-start; }';
-        $pdfHtml .= '.placeholder-logo-hospital { top: -12px; left: 133px; width: 136px; height: 136px; position: absolute; display: flex; align-items: center; justify-content: center; font-size: 12px; }';
+        $pdfHtml .= '.placeholder-logo-hospital { top: -12px; left: 133px; width: 136px; height: 136px; position: absolute; display: flex; align-items: center; justify-content: center; }';
         $pdfHtml .= '.group1-thq-text-elm18 { top: 113px; color: rgba(0, 0, 0, 1); width: 403px; height: auto; position: absolute; font-size: 12.8px; text-align: center; line-height: 22px; }';
-        
         $pdfHtml .= '.group1-thq-thedateofissueandalsotimeofissue-elm { top: calc(989.85px + var(--footer-offset)); left: 37.37px; width: 250px; height: 56px; display: flex; position: absolute; align-items: flex-start; }';
         $pdfHtml .= '.group1-thq-text-elm22 { color: rgba(0, 0, 0, 1); font-size: 12.5px; font-weight: 700; text-align: left; line-height: 28px; font-family: "Times New Roman", serif; position: absolute; white-space: nowrap; }';
-        
         $pdfHtml .= '.group1-thq-text-elm36 { top: calc(724.55px + var(--footer-offset)); left: 29.23px; color: rgba(0, 0, 0, 1); position: absolute; font-size: 12px; font-weight: 700; text-align: center; font-family: "Noto Sans Arabic", sans-serif; line-height: 23px; }';
-        $pdfHtml .= '.group1-thq-text-elm39 { top: calc(770px + var(--footer-offset)); left: 55px; color: rgba(0, 0, 0, 1); position: absolute; font-size: 12px; font-weight: 700; text-align: left; font-family: "Times New Roman", serif; }';
-        $pdfHtml .= '.group1-thq-text-elm40 { top: calc(791px + var(--footer-offset)); left: 108.35px; color: rgba(20, 0, 255, 1); position: absolute; font-size: 11px; font-weight: 700; text-align: left; text-decoration: underline; pointer-events: auto; font-family: "Times New Roman", serif; }';
-        
-        // Footer & Misc
-        $pdfHtml .= '.placeholder-136 { position: absolute; top: 620px; left: 122px; width: 136px; height: 136px; display: flex; align-items: center; justify-content: center; font-size: 12px; pointer-events: auto; }';
+        $pdfHtml .= '.group1-thq-text-elm39 { top: calc(770px + var(--footer-offset)); left: 55px; color: rgba(0, 0, 0, 1); position: absolute; font-size: 12px; font-weight: 700; font-family: "Times New Roman", serif; }';
+        $pdfHtml .= '.group1-thq-text-elm40 { top: calc(791px + var(--footer-offset)); left: 108.35px; color: rgba(20, 0, 255, 1); position: absolute; font-size: 11px; font-weight: 700; text-decoration: underline; pointer-events: auto; font-family: "Times New Roman", serif; }';
+        $pdfHtml .= '.placeholder-136 { position: absolute; top: 620px; left: 122px; width: 136px; height: 136px; display: flex; align-items: center; justify-content: center; pointer-events: auto; }';
         $pdfHtml .= '.vertical-divider { position: absolute; top: 735px; left: 431px; width: 1px; height: 6.8cm; background-color: #dddddd; }';
         $pdfHtml .= '.thin-slash { font-weight: 300; font-family: "Inter", sans-serif; margin: 0 3px; display: inline-block; }';
         $pdfHtml .= '</style></head><body>';
 
-        // Construct body layout using .png targets
-        $reportBodyPdf  = '<div class="group1-container1"><div class="group1-thq-group1-elm">';
-        $reportBodyPdf .= '<div class="top-right-placeholder"><img src="' . $baseUrl . 'sehalogoright.png" style="width:100%;height:100%"/></div>';
-        $reportBodyPdf .= '<div class="top-left-placeholder"><img src="' . $baseUrl . 'sehalogoleft.png" style="width:100%;height:100%"/></div>';
-        $reportBodyPdf .= '<div class="bottom-right-placeholder"><img src="' . $baseUrl . 'bottomright.png" style="width:100%;height:100%"/></div>';
-        $reportBodyPdf .= '<div class="group1-thq-staticinfo-elm">';
-        $reportBodyPdf .= '<div class="header-placeholder"><img src="' . $baseUrl . 'header.png" style="width:100%;height:100%"/></div>';
-        $reportBodyPdf .= '<span class="group1-thq-text-elm41"><span style="font-size:22.5px;font-family:\'Noto Sans Arabic\',sans-serif;font-weight:700;color:#306db5">تقرير إجازة مرضية</span><br/><span style="font-size:18.7px;font-family:\'Times New Roman\',serif;font-weight:700;color:#2c3e77">Sick Leave Report</span></span>';
-        $reportBodyPdf .= '<span class="group1-thq-text-elm44">Kingdom of Saudi Arabia</span>';
-        $reportBodyPdf .= '<div class="placeholder-136"><img src="' . $baseUrl . 'qr.svg" style="width:130px;height:130px"/></div>';
-        $reportBodyPdf .= '<span class="group1-thq-text-elm36" dir="rtl">للتحقق من بيانات التقرير يرجى التأكد من زيارة موقع منصة صحة<br/>الرسمي</span>';
-        $reportBodyPdf .= '<span class="group1-thq-text-elm39">To check the report please visit Seha\'s official website</span>';
-        $reportBodyPdf .= '<span class="group1-thq-text-elm40"><a href="https://seha-sa-iniquiries-slenquiry.up.railway.app/" target="_blank">www.seha.sa/#/inquiries/slenquiry</a></span>';
-        $reportBodyPdf .= '</div>';
-        $reportBodyPdf .= '<table class="info-table" cellpadding="0" cellspacing="0"><tbody>';
-        $reportBodyPdf .= '<tr><td class="en-title">Leave ID</td><td class="data-cell" colspan="2">' . $sc . '</td><td class="ar-title">رمز الإجازة</td></tr>';
-        $reportBodyPdf .= '<tr class="blue-row"><td class="en-title" style="color:white">Leave Duration</td><td class="data-cell">' . $durationEn . '</td><td class="data-cell ar-text" dir="rtl">' . $durationAr . '</td><td class="ar-title" style="color:white">مدة الإجازة</td></tr>';
-        $reportBodyPdf .= '<tr><td class="en-title">Admission Date</td><td class="data-cell date-cell">' . $startEn . '</td><td class="data-cell date-cell" dir="ltr">' . $startHj . '</td><td class="ar-title">تاريخ الدخول</td></tr>';
-        $reportBodyPdf .= '<tr class="gray-row"><td class="en-title">Discharge Date</td><td class="data-cell date-cell">' . $endEn . '</td><td class="data-cell date-cell" dir="ltr">' . $endHj . '</td><td class="ar-title">تاريخ الخروج</td></tr>';
-        $reportBodyPdf .= '<tr><td class="en-title">Issue Date</td><td class="data-cell" colspan="2">' . $issueEn . '</td><td class="ar-title">تاريخ الإصدار</td></tr>';
-        $reportBodyPdf .= '<tr class="gray-row"><td class="en-title">Patient Name</td><td class="data-cell en-spaced">' . $patNameEn . '</td><td class="data-cell ar-text">' . $patNameAr . '</td><td class="ar-title">الاسم</td></tr>';
-        $reportBodyPdf .= '<tr><td class="en-title">National ID / Iqama</td><td class="data-cell" colspan="2">' . $patId . '</td><td class="ar-title">رقم الهوية<span class="thin-slash">/</span>الإقامة</td></tr>';
-        $reportBodyPdf .= '<tr class="gray-row"><td class="en-title">Nationality</td><td class="data-cell en-spaced">' . $natEn . '</td><td class="data-cell ar-text">' . $natAr . '</td><td class="ar-title">الجنسية</td></tr>';
-        $reportBodyPdf .= '<tr><td class="en-title">Employer</td><td class="data-cell en-spaced">' . $empEn . '</td><td class="data-cell ar-text">' . $empAr . '</td><td class="ar-title">جهة العمل</td></tr>';
-        $reportBodyPdf .= '<tr class="gray-row"><td class="en-title">Physician Name</td><td class="data-cell en-spaced">' . $docNameEn . '</td><td class="data-cell ar-text">' . $docNameAr . '</td><td class="ar-title">اسم الطبيب المعالج</td></tr>';
-        $reportBodyPdf .= '<tr><td class="en-title">Position</td><td class="data-cell en-spaced">' . $docTitleEn . '</td><td class="data-cell ar-text">' . $docTitleAr . '</td><td class="ar-title">المسمى الوظيفي</td></tr>';
-        $reportBodyPdf .= '</tbody></table>';
-        $reportBodyPdf .= '<div class="vertical-divider"></div>';
-        $reportBodyPdf .= '<div class="group1-thq-hospitallogoandthename-elm">';
-        $reportBodyPdf .= '<div class="placeholder-logo-hospital">' . $hospLogoHtml . '</div>';
-        $reportBodyPdf .= '<span class="group1-thq-text-elm18"><span style="font-family:\'Noto Sans Arabic\',sans-serif;font-weight:700">' . $hospNameAr . '</span><br/><span class="en-spaced" style="font-family:\'Times New Roman\',serif;font-weight:700">' . $hospNameEn . '</span><br/>';
-        if (!empty($licenseHtml)) $reportBodyPdf .= $licenseHtml;
-        $reportBodyPdf .= '</span></div>';
-        $reportBodyPdf .= '<div class="group1-thq-thedateofissueandalsotimeofissue-elm"><span class="group1-thq-text-elm22"><span>' . $timestampLine . '</span><br/><span>' . $dateLine . '</span></span></div>';
-        $reportBodyPdf .= '</div></div>';
+        $pdfHtml .= '<div class="group1-container1"><div class="group1-thq-group1-elm">';
+        $pdfHtml .= '<div class="top-right-placeholder"><img src="' . $baseUrl . 'sehalogoright.png" style="width:100%;height:100%"/></div>';
+        $pdfHtml .= '<div class="top-left-placeholder"><img src="' . $baseUrl . 'sehalogoleft.png" style="width:100%;height:100%"/></div>';
+        $pdfHtml .= '<div class="bottom-right-placeholder"><img src="' . $baseUrl . 'bottomright.png" style="width:100%;height:100%"/></div>';
+        $pdfHtml .= '<div class="group1-thq-staticinfo-elm">';
+        $pdfHtml .= '<div class="header-placeholder"><img src="' . $baseUrl . 'header.png" style="width:100%;height:100%"/></div>';
+        $pdfHtml .= '<span class="group1-thq-text-elm41"><span style="font-size:22.5px;font-family:\'Noto Sans Arabic\',sans-serif;font-weight:700;color:#306db5">تقرير إجازة مرضية</span><br/><span style="font-size:18.7px;font-family:\'Times New Roman\',serif;font-weight:700;color:#2c3e77">Sick Leave Report</span></span>';
+        $pdfHtml .= '<span class="group1-thq-text-elm44">Kingdom of Saudi Arabia</span>';
+        $pdfHtml .= '<div class="placeholder-136"><img src="' . $baseUrl . 'qr.svg" style="width:130px;height:130px"/></div>';
+        $pdfHtml .= '<span class="group1-thq-text-elm36" dir="rtl">للتحقق من بيانات التقرير يرجى التأكد من زيارة موقع منصة صحة<br/>الرسمي</span>';
+        $pdfHtml .= '<span class="group1-thq-text-elm39">To check the report please visit Seha\'s official website</span>';
+        $pdfHtml .= '<span class="group1-thq-text-elm40"><a href="https://seha-sa-iniquiries-slenquiry.up.railway.app/" target="_blank">www.seha.sa/#/inquiries/slenquiry</a></span>';
+        $pdfHtml .= '</div>';
+        $pdfHtml .= '<table class="info-table" cellpadding="0" cellspacing="0"><tbody>';
+        $pdfHtml .= '<tr><td class="en-title">Leave ID</td><td class="data-cell" colspan="2">' . $sc . '</td><td class="ar-title">رمز الإجازة</td></tr>';
+        $pdfHtml .= '<tr class="blue-row"><td class="en-title" style="color:white">Leave Duration</td><td class="data-cell">' . $durationEn . '</td><td class="data-cell ar-text" dir="rtl">' . $durationAr . '</td><td class="ar-title" style="color:white">مدة الإجازة</td></tr>';
+        $pdfHtml .= '<tr><td class="en-title">Admission Date</td><td class="data-cell date-cell">' . $startEn . '</td><td class="data-cell date-cell" dir="ltr">' . $startHj . '</td><td class="ar-title">تاريخ الدخول</td></tr>';
+        $pdfHtml .= '<tr class="gray-row"><td class="en-title">Discharge Date</td><td class="data-cell date-cell">' . $endEn . '</td><td class="data-cell date-cell" dir="ltr">' . $endHj . '</td><td class="ar-title">تاريخ الخروج</td></tr>';
+        $pdfHtml .= '<tr><td class="en-title">Issue Date</td><td class="data-cell" colspan="2">' . $issueEn . '</td><td class="ar-title">تاريخ الإصدار</td></tr>';
+        $pdfHtml .= '<tr class="gray-row"><td class="en-title">Patient Name</td><td class="data-cell en-spaced">' . $patNameEn . '</td><td class="data-cell ar-text">' . $patNameAr . '</td><td class="ar-title">الاسم</td></tr>';
+        $pdfHtml .= '<tr><td class="en-title">National ID / Iqama</td><td class="data-cell" colspan="2">' . $patId . '</td><td class="ar-title">رقم الهوية / الإقامة</td></tr>';
+        $pdfHtml .= '<tr class="gray-row"><td class="en-title">Nationality</td><td class="data-cell en-spaced">' . $natEn . '</td><td class="data-cell ar-text">' . $natAr . '</td><td class="ar-title">الجنسية</td></tr>';
+        $pdfHtml .= '<tr><td class="en-title">Employer</td><td class="data-cell en-spaced">' . $empEn . '</td><td class="data-cell ar-text">' . $empAr . '</td><td class="ar-title">جهة العمل</td></tr>';
+        $pdfHtml .= '<tr class="gray-row"><td class="en-title">Physician Name</td><td class="data-cell en-spaced">' . $docNameEn . '</td><td class="data-cell ar-text">' . $docNameAr . '</td><td class="ar-title">اسم الطبيب المعالج</td></tr>';
+        $pdfHtml .= '<tr><td class="en-title">Position</td><td class="data-cell en-spaced">' . $docTitleEn . '</td><td class="data-cell ar-text">' . $docTitleAr . '</td><td class="ar-title">المسمى الوظيفي</td></tr>';
+        $pdfHtml .= '</tbody></table>';
+        $pdfHtml .= '<div class="vertical-divider"></div>';
+        $pdfHtml .= '<div class="group1-thq-hospitallogoandthename-elm">';
+        $pdfHtml .= '<div class="placeholder-logo-hospital">' . $hospLogoHtml . '</div>';
+        $pdfHtml .= '<span class="group1-thq-text-elm18"><span style="font-family:\'Noto Sans Arabic\',sans-serif;font-weight:700">' . $hospNameAr . '</span><br/><span style="font-family:\'Times New Roman\',serif;font-weight:700">' . $hospNameEn . '</span><br/>' . $licenseHtml . '</span>';
+        $pdfHtml .= '</div>';
+        $pdfHtml .= '<div class="group1-thq-thedateofissueandalsotimeofissue-elm"><span class="group1-thq-text-elm22"><span>' . $timestampLine . '</span><br/><span>' . $dateLine . '</span></span></div>';
+        $pdfHtml .= '</div></div></body></html>';
 
-        // Sweep string replacements to ensure any remaining dynamic outputs map absolutely to .png targets
-        $pdfBody = str_replace(
-            ['src="sehalogoright.png"', 'src="sehalogoleft.png"', 'src="bottomright.png"', 'src="header.png"', 'src="qr.svg"'],
-            ['src="' . $baseUrl . 'sehalogoright.png"', 'src="' . $baseUrl . 'sehalogoleft.png"', 'src="' . $baseUrl . 'bottomright.png"', 'src="' . $baseUrl . 'header.png"', 'src="' . $baseUrl . 'qr.svg"'],
-            // Fallback sweep just in case original variable layers still contain old SVG extensions
-            str_replace(
-                ['src="sehalogoright.svg"', 'src="sehalogoleft.svg"', 'src="bottomright.svg"', 'src="header.svg"'],
-                ['src="sehalogoright.png"', 'src="sehalogoleft.png"', 'src="bottomright.png"', 'src="header.png"'],
-                $reportBodyPdf
-            )
-        );
-        
-        $pdfHtml .= $pdfBody;
-        $pdfHtml .= '</body></html>';
-
-        @mkdir('/tmp/weasyprint', 0777, true);
-        $tmpHtml = '/tmp/weasyprint/user_report_' . uniqid() . '.html';
-        $tmpPdf  = '/tmp/weasyprint/user_report_' . uniqid() . '.pdf';
-        file_put_contents($tmpHtml, $pdfHtml);
+        $tmpDir = '/tmp/weasyprint';
+        if (!is_dir($tmpDir)) mkdir($tmpDir, 0755, true);
+        $htmlFile = $tmpDir . '/leave_' . $leaveId . '_' . time() . '.html';
+        $pdfFile  = $tmpDir . '/leave_' . $leaveId . '_' . time() . '.pdf';
+        file_put_contents($htmlFile, $pdfHtml);
 
         $scriptPath = __DIR__ . '/generate_pdf.py';
-        $pythonBin = 'python3';
-        foreach (['/usr/bin/python3.13', '/usr/bin/python3.12', '/usr/bin/python3.11', '/usr/local/bin/python3', '/usr/bin/python3'] as $p) {
-            if (is_file($p) && !is_link($p)) { $pythonBin = $p; break; }
-            if (is_link($p)) { $real = realpath($p); if ($real && is_file($real)) { $pythonBin = $real; break; } }
-        }
-        
-        $cmd = $pythonBin . ' "' . $scriptPath . '" "' . $tmpHtml . '" "' . $tmpPdf . '" 2>&1';
+        $cmd = "python3 " . escapeshellarg($scriptPath) . " " . escapeshellarg($htmlFile) . " " . escapeshellarg($pdfFile) . " 2>&1";
         $output = shell_exec($cmd);
 
-        if (file_exists($tmpPdf) && filesize($tmpPdf) > 0) {
+        if (file_exists($pdfFile) && filesize($pdfFile) > 0) {
             header('Content-Type: application/pdf');
             header('Content-Disposition: attachment; filename="SickLeave_' . $scFile . '.pdf"');
-            header('Content-Length: ' . filesize($tmpPdf));
-            header('Cache-Control: no-cache, no-store, must-revalidate');
-            readfile($tmpPdf);
-            @unlink($tmpHtml);
-            @unlink($tmpPdf);
-            exit;
+            header('Content-Length: ' . filesize($pdfFile));
+            readfile($pdfFile);
+            @unlink($htmlFile);
+            @unlink($pdfFile);
         } else {
-            error_log('WeasyPrint Error: ' . $output);
+            echo '<h2 style="text-align:center;padding:50px;font-family:sans-serif;">تعذّر إنشاء ملف PDF</h2>';
+            echo '<pre>' . htmlspecialchars($output ?? '') . '</pre>';
         }
-        @unlink($tmpHtml);
-   }
+        exit;
+    }
 
-   header('Content-Type: text/html; charset=utf-8');
-?>
-<!DOCTYPE html>
-<html lang="ar">
-<head>
-<title>تقرير إجازة مرضية - Sick Leave Report</title>
-<meta name="viewport" content="width=device-width, initial-scale=1.0" />
-<meta charset="utf-8" />
-<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@100;200;300;400;500;600;700&display=swap" />
-<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=STIX+Two+Text:ital,wght@0,400;0,600;0,700;1,400&display=swap" />
-<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Noto+Sans+Arabic:wght@400;600;700&display=swap" />
+    // Preview mode - show HTML report with download button
+    ?><!DOCTYPE html><html lang="ar"><head><meta charset="utf-8"/><meta name="viewport" content="width=device-width,initial-scale=1"/>
+<title>Sick Leave Report - <?= $sc ?></title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@100;200;300;400;500;600;700&display=swap"/>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Noto+Sans+Arabic:wght@400;600;700&display=swap"/>
 <style>
-/* ========================================================= */
-/* تضمين خطوط Times New Roman بصيغة (.otf) لنسخة المتصفح   */
-/* ========================================================= */
-@font-face {
-    font-family: "Times New Roman";
-    src: url("<?= $baseUrl ?>times_regular.otf") format("opentype");
-    font-weight: 400;
-    font-style: normal;
-}
-
-@font-face {
-    font-family: "Times New Roman";
-    src: url("<?= $baseUrl ?>times_bold.otf") format("opentype");
-    font-weight: 700;
-    font-style: normal;
-}
-/* ========================================================= */
-
-html { line-height: 1.15; font-family: Inter, sans-serif; font-size: 16px; }
-body { margin: 0; font-weight: 400; color: #191818; background: #FBFAF9; overflow-x: hidden; }
-* { box-sizing: border-box; border-width: 0; border-style: solid; -webkit-font-smoothing: antialiased; }
-p, li, ul, pre, div, h1, h2, h3, h4, h5, h6 { margin: 0; padding: 0; }
-a { color: inherit; text-decoration: inherit; }
-
-.group1-container1 { width: 100%; display: flex; overflow-x: hidden; min-height: 100vh; align-items: center; flex-direction: column; background-color: #f0f0f0; padding-top: 20px; padding-bottom: 20px; }
-.group1-thq-group1-elm { width: 842.25px; height: 1190.25px; display: flex; position: relative; align-items: flex-start; flex-shrink: 0; box-shadow: 0px 4px 15px rgba(0,0,0,0.1); background-color: white; }
-.info-table { position: absolute; top: 242px; left: 36px; width: 770px; border-collapse: separate; border-spacing: 0; border: 1px solid #cccccc; border-radius: 8px; overflow: hidden; z-index: 10; }
-.info-table td { border-bottom: 1px solid #cccccc; border-right: 1px solid #cccccc; height: 42px; text-align: center; vertical-align: middle; padding: 4px 8px; }
-.info-table td:last-child { border-right: none; } .info-table tr:last-child td { border-bottom: none; }
-.info-table .en-title { width: 161px; color: rgba(54, 111, 181, 1); font-size: 13.5px; font-weight: 700; font-family: "Times New Roman", serif; }
-.info-table .data-cell { width: 240px; color: rgba(44, 62, 119, 1); font-size: 13.5px; font-family: "Times New Roman", serif; font-weight: 400; }
-.info-table .date-cell { font-size: 13.9px; } .info-table .data-cell.ar-text { font-family: "Noto Sans Arabic", sans-serif; }
-.info-table .ar-title { width: 140px; color: rgba(54, 111, 181, 1); font-size: 13.5px; font-weight: 700; font-family: "Noto Sans Arabic", sans-serif; white-space: nowrap; }
-.info-table tr.blue-row td { background-color: #2c3e77; color: #ffffff; border-bottom: 1px solid #cccccc; border-right: 1px solid #cccccc; }
-.info-table tr.blue-row td:last-child { border-right: none; }
-.info-table .blue-row .data-cell.ar-text, .info-table .blue-row .data-cell { color: #ffffff; font-family: "Times New Roman", serif; }
-.info-table tr.gray-row td { background-color: #f7f7f7; }
-.en-spaced { letter-spacing: 0.3px; }
-:root { --footer-offset: 40px; }
-
-/* Updates applied down here */
-.group1-thq-staticinfo-elm { top: 125px; left: 36.65px; width: 768.35px; height: 811.91px; display: flex; position: absolute; align-items: flex-start; pointer-events: none; }
-.top-right-placeholder { position: absolute; top: 36px; left: 543.36px; width: 262.43px; height: 107.22px; display: flex; align-items: center; justify-content: center; font-size: 14px; z-index: 5; }
-.top-left-placeholder { position: absolute; top: 36px; left: 36px; width: 149.96px; height: 65.98px; display: flex; align-items: center; justify-content: center; font-size: 14px; z-index: 5; }
-.bottom-right-placeholder { position: absolute; top: 1005px; left: 657.17px; width: 149.96px; height: 71.23px; display: flex; align-items: center; justify-content: center; font-size: 12px; z-index: 5; }
-.header-placeholder { top: -50px; left: 320px; width: 163px; height: 40px; position: absolute; display: flex; align-items: center; justify-content: center; font-size: 11px; }
-
-.group1-thq-text-elm41 { top: 40px; left: 289px; color: rgba(48, 109, 181, 1); width: 215px; position: absolute; font-size: 22.5px; font-weight: 700; text-align: center; line-height: 30px; }
-.group1-thq-text-elm44 { top: -10px; left: 310px; color: rgba(0, 0, 0, 1); position: absolute; font-size: 17.3px; font-family: "Times New Roman", serif; }
-.group1-thq-hospitallogoandthename-elm { top: 760px; left: 438.94px; width: 403px; height: 202.78px; display: flex; position: absolute; align-items: flex-start; }
-.placeholder-logo-hospital { top: -12px; left: 133px; width: 136px; height: 136px; position: absolute; display: flex; align-items: center; justify-content: center; font-size: 12px; }
-.group1-thq-text-elm18 { top: 113px; color: rgba(0, 0, 0, 1); width: 403px; position: absolute; font-size: 12.8px; text-align: center; line-height: 22px; }
-.group1-thq-thedateofissueandalsotimeofissue-elm { top: calc(989.85px + var(--footer-offset)); left: 37.37px; width: 250px; height: 56px; display: flex; position: absolute; align-items: flex-start; }
-.group1-thq-text-elm22 { color: rgba(0, 0, 0, 1); font-size: 12.5px; font-weight: 700; line-height: 28px; font-family: "Times New Roman", serif; position: absolute; white-space: nowrap; }
-.group1-thq-text-elm36 { top: calc(724.55px + var(--footer-offset)); left: 29.23px; color: rgba(0, 0, 0, 1); position: absolute; font-size: 12px; font-weight: 700; text-align: center; font-family: "Noto Sans Arabic", sans-serif; line-height: 23px; }
-.group1-thq-text-elm39 { top: calc(770px + var(--footer-offset)); left: 55px; color: rgba(0, 0, 0, 1); position: absolute; font-size: 12px; font-weight: 700; font-family: "Times New Roman", serif; }
-.group1-thq-text-elm40 { top: calc(791px + var(--footer-offset)); left: 108.35px; color: rgba(20, 0, 255, 1); position: absolute; font-size: 11px; font-weight: 700; text-decoration: underline; pointer-events: auto; font-family: "Times New Roman", serif; }
-.placeholder-136 { position: absolute; top: 620px; left: 122px; width: 136px; height: 136px; display: flex; align-items: center; justify-content: center; font-size: 12px; pointer-events: auto; }
-.vertical-divider { position: absolute; top: 735px; left: 431px; width: 1px; height: 6.8cm; background-color: #dddddd; }
-.thin-slash { font-weight: 300; font-family: "Inter", sans-serif; margin: 0 3px; display: inline-block; }
-.controls { position: fixed; bottom: 30px; right: 30px; display: flex; gap: 15px; z-index: 1000; }
-.download-btn { background-color: #306db5; color: white; padding: 14px 28px; border-radius: 10px; border: none; font-size: 16px; font-weight: 600; cursor: pointer; box-shadow: 0px 6px 15px rgba(0,0,0,0.3); font-family: "Inter", sans-serif; transition: all 0.3s; }
-.download-btn:hover { background-color: #2c3e77; transform: translateY(-3px); }
-@media screen and (max-width: 880px) {
-  .group1-container1 { padding-top: 10px; padding-bottom: 10px; }
-  .group1-thq-group1-elm { transform-origin: top center; transform: scale(calc(100vw / 860)); margin-bottom: calc(1190.25px * (100vw / 860) - 1190.25px); }
-  .controls { bottom: 15px; right: 15px; left: 15px; justify-content: center; }
-  .download-btn { width: 100%; text-align: center; font-size: 18px; padding: 16px; }
-}
-@media print {
-  @page { size: 842.25px 1190.25px; margin: 0; }
-  body { background: white !important; }
-  .controls { display: none !important; }
-  .group1-container1 { padding: 0 !important; background-color: transparent !important; }
-  .group1-thq-group1-elm { box-shadow: none !important; margin: 0 !important; transform: scale(1) !important; }
-}
+*{box-sizing:border-box;margin:0;padding:0}body{background:#1e293b;margin:0;padding:40px 20px;font-family:Inter,sans-serif}
+.group1-container1{max-width:842.25px;margin:0 auto;padding:20px 0}
+.group1-thq-group1-elm{width:842.25px;height:1190.25px;position:relative;background:white;box-shadow:0 25px 80px rgba(0,0,0,0.4);border-radius:4px;margin:0 auto}
+.info-table{position:absolute;top:242px;left:36px;width:770px;border-collapse:separate;border-spacing:0;border:1px solid #ccc;border-radius:8px;overflow:hidden;z-index:10}
+.info-table td{border-bottom:1px solid #ccc;border-right:1px solid #ccc;height:42px;text-align:center;vertical-align:middle;padding:4px 8px}
+.info-table td:last-child{border-right:none}.info-table tr:last-child td{border-bottom:none}
+.info-table .en-title{width:161px;color:rgba(54,111,181,1);font-size:13.5px;font-weight:700;font-family:"Times New Roman",serif}
+.info-table .data-cell{width:240px;color:rgba(44,62,119,1);font-size:13.5px;font-family:"Times New Roman",serif;font-weight:400}
+.info-table .data-cell.ar-text{font-family:"Noto Sans Arabic",sans-serif}
+.info-table .ar-title{width:140px;color:rgba(54,111,181,1);font-size:13.5px;font-weight:700;font-family:"Noto Sans Arabic",sans-serif;white-space:nowrap}
+.info-table tr.blue-row td{background:#2c3e77;color:#fff}.info-table .blue-row .data-cell{color:#fff}
+.info-table tr.gray-row td{background:#f7f7f7}
+:root{--footer-offset:40px}
+.group1-thq-staticinfo-elm{top:125px;left:36.65px;width:768.35px;height:811.91px;display:flex;position:absolute;align-items:flex-start;pointer-events:none}
+.top-right-placeholder{position:absolute;top:36px;left:543.36px;width:262.43px;height:107.22px;display:flex;align-items:center;justify-content:center;z-index:5}
+.top-left-placeholder{position:absolute;top:36px;left:36px;width:149.96px;height:65.98px;display:flex;align-items:center;justify-content:center;z-index:5}
+.bottom-right-placeholder{position:absolute;top:1005px;left:657.17px;width:149.96px;height:71.23px;display:flex;align-items:center;justify-content:center;z-index:5}
+.header-placeholder{top:-50px;left:320px;width:163px;height:40px;position:absolute;display:flex;align-items:center;justify-content:center}
+.group1-thq-text-elm41{top:40px;left:289px;color:rgba(48,109,181,1);width:215px;position:absolute;font-size:22.5px;font-weight:700;text-align:center;line-height:30px}
+.group1-thq-text-elm44{top:-10px;left:310px;color:#000;position:absolute;font-size:17.3px;font-weight:400;font-family:"Times New Roman",serif}
+.group1-thq-hospitallogoandthename-elm{top:760px;left:438.94px;width:403px;height:202.78px;display:flex;position:absolute;align-items:flex-start}
+.placeholder-logo-hospital{top:-12px;left:133px;width:136px;height:136px;position:absolute;display:flex;align-items:center;justify-content:center}
+.group1-thq-text-elm18{top:113px;color:#000;width:403px;height:auto;position:absolute;font-size:12.8px;text-align:center;line-height:22px}
+.group1-thq-thedateofissueandalsotimeofissue-elm{top:calc(989.85px + var(--footer-offset));left:37.37px;width:250px;height:56px;display:flex;position:absolute;align-items:flex-start}
+.group1-thq-text-elm22{color:#000;font-size:12.5px;font-weight:700;text-align:left;line-height:28px;font-family:"Times New Roman",serif;position:absolute;white-space:nowrap}
+.group1-thq-text-elm36{top:calc(724.55px + var(--footer-offset));left:29.23px;color:#000;position:absolute;font-size:12px;font-weight:700;text-align:center;font-family:"Noto Sans Arabic",sans-serif;line-height:23px}
+.group1-thq-text-elm39{top:calc(770px + var(--footer-offset));left:55px;color:#000;position:absolute;font-size:12px;font-weight:700;font-family:"Times New Roman",serif}
+.group1-thq-text-elm40{top:calc(791px + var(--footer-offset));left:108.35px;color:rgba(20,0,255,1);position:absolute;font-size:11px;font-weight:700;text-decoration:underline;pointer-events:auto;font-family:"Times New Roman",serif}
+.placeholder-136{position:absolute;top:620px;left:122px;width:136px;height:136px;display:flex;align-items:center;justify-content:center;pointer-events:auto}
+.vertical-divider{position:absolute;top:735px;left:431px;width:1px;height:6.8cm;background:#ddd}
+.controls{position:fixed;bottom:30px;right:30px;display:flex;gap:15px;z-index:1000}
+.download-btn{background:#0d9488;color:#fff;padding:14px 28px;border-radius:12px;border:none;font-size:16px;font-weight:600;cursor:pointer;box-shadow:0 6px 20px rgba(13,148,136,0.3);font-family:Inter,sans-serif;transition:all .3s}
+.download-btn:hover{background:#0f766e;transform:translateY(-3px)}
+@media screen and (max-width:880px){.group1-container1{padding:10px 0}.group1-thq-group1-elm{transform-origin:top center;transform:scale(calc(100vw / 860));margin-bottom:calc(1190.25px*(100vw/860)-1190.25px)}.controls{bottom:15px;right:15px;left:15px;justify-content:center}.download-btn{width:100%;text-align:center;padding:14px}}
+@media print{@page{size:842.25px 1190.25px;margin:0}body{background:white!important}.controls{display:none!important}.group1-container1{padding:0!important}.group1-thq-group1-elm{box-shadow:none!important;margin:0!important;transform:scale(1)!important}}
 </style>
 <script>
-function downloadPDF() {
-  var btn = document.getElementById('btnDownloadPDF');
-  btn.textContent = 'جاري التحميل...';
-  btn.disabled = true;
-  var url = window.location.href;
-  if (url.indexOf('pdf_mode=') > -1) { url = url.replace(/pdf_mode=[^&]*/, 'pdf_mode=download'); }
-  else { url += (url.indexOf('?') > -1 ? '&' : '?') + 'pdf_mode=download'; }
-  var a = document.createElement('a'); a.href = url; a.download = '';
-  document.body.appendChild(a); a.click(); document.body.removeChild(a);
-  setTimeout(function() { btn.textContent = 'تحميل ملف PDF'; btn.disabled = false; }, 3000);
-}
+function downloadPDF(){var b=document.getElementById('btnDownloadPDF');b.textContent='جاري التحميل...';b.disabled=true;var u=window.location.href;u=u.indexOf('pdf_mode=')>-1?u.replace(/pdf_mode=[^&]*/,'pdf_mode=download'):u+(u.indexOf('?')>-1?'&':'?')+'pdf_mode=download';var a=document.createElement('a');a.href=u;a.download='';document.body.appendChild(a);a.click();document.body.removeChild(a);setTimeout(function(){b.textContent='تحميل ملف PDF';b.disabled=false},3000)}
 </script>
-</head>
-<body>
+</head><body>
 <div class="controls">
   <button id="btnDownloadPDF" class="download-btn" onclick="downloadPDF()">تحميل ملف PDF</button>
-  <button class="download-btn" style="background-color:#2c3e77" onclick="window.print()">طباعة مباشرة</button>
-  <button class="download-btn" style="background-color:#475569" onclick="history.back()">← رجوع</button>
+  <button class="download-btn" style="background:#1e293b;box-shadow:0 6px 20px rgba(0,0,0,0.2)" onclick="window.print()">طباعة مباشرة</button>
+  <button class="download-btn" style="background:#64748b;box-shadow:none" onclick="history.back()">رجوع</button>
 </div>
-<div class="group1-container1">
-  <div class="group1-thq-group1-elm" id="report-content">
-    <div class="top-right-placeholder"><img src="<?= $baseUrl ?>sehalogoright.png" alt="" style="width:100%;height:100%;" onerror="this.style.display='none'" /></div>
-    <div class="top-left-placeholder"><img src="<?= $baseUrl ?>sehalogoleft.png" alt="" style="width:100%;height:100%;" onerror="this.style.display='none'" /></div>
-    <div class="bottom-right-placeholder"><img src="<?= $baseUrl ?>bottomright.png" alt="" style="width:100%;height:100%;" onerror="this.style.display='none'" /></div>
-    <div class="group1-thq-staticinfo-elm">
-      <div class="header-placeholder"><img src="<?= $baseUrl ?>header.png" alt="" style="width:100%;height:100%;" onerror="this.style.display='none'" /></div>
-      <span class="group1-thq-text-elm41">
-        <span style="font-size:22.5px;font-family:'Noto Sans Arabic',sans-serif;font-weight:700;color:#306db5;">تقرير إجازة مرضية</span><br/>
-        <span style="font-size:18.7px;font-family:'Times New Roman',serif;font-weight:700;color:#2c3e77;">Sick Leave Report</span>
-      </span>
-      <span class="group1-thq-text-elm44">Kingdom of Saudi Arabia</span>
-      <div class="placeholder-136"><img src="<?= $baseUrl ?>qr.svg" alt="QR" style="width:130px;height:130px;" onerror="this.style.display='none'" /></div>
-      <span class="group1-thq-text-elm36" dir="rtl">للتحقق من بيانات التقرير يرجى التأكد من زيارة موقع منصة صحة<br/>الرسمي</span>
-      <span class="group1-thq-text-elm39">To check the report please visit Seha's official website</span>
-      <span class="group1-thq-text-elm40"><a href="https://seha-sa-iniquiries-slenquiry.up.railway.app/" target="_blank">www.seha.sa/#/inquiries/slenquiry</a></span>
-    </div>
-    <table class="info-table" cellpadding="0" cellspacing="0"><tbody>
-      <tr><td class="en-title">Leave ID</td><td class="data-cell" colspan="2"><?= $sc ?></td><td class="ar-title">رمز الإجازة</td></tr>
-      <tr class="blue-row"><td class="en-title" style="color:white;">Leave Duration</td><td class="data-cell"><?= $durationEn ?></td><td class="data-cell ar-text" dir="rtl"><?= $durationAr ?></td><td class="ar-title" style="color:white;">مدة الإجازة</td></tr>
-      <tr><td class="en-title">Admission Date</td><td class="data-cell date-cell"><?= $startEn ?></td><td class="data-cell date-cell" dir="ltr"><?= $startHj ?></td><td class="ar-title">تاريخ الدخول</td></tr>
-      <tr class="gray-row"><td class="en-title">Discharge Date</td><td class="data-cell date-cell"><?= $endEn ?></td><td class="data-cell date-cell" dir="ltr"><?= $endHj ?></td><td class="ar-title">تاريخ الخروج</td></tr>
-      <tr><td class="en-title">Issue Date</td><td class="data-cell" colspan="2"><?= $issueEn ?></td><td class="ar-title">تاريخ الإصدار</td></tr>
-      <tr class="gray-row"><td class="en-title">Patient Name</td><td class="data-cell en-spaced"><?= $patNameEn ?></td><td class="data-cell ar-text"><?= $patNameAr ?></td><td class="ar-title">الاسم</td></tr>
-      <tr><td class="en-title">National ID / Iqama</td><td class="data-cell" colspan="2"><?= $patId ?></td><td class="ar-title">رقم الهوية<span class="thin-slash">/</span>الإقامة</td></tr>
-      <tr class="gray-row"><td class="en-title">Nationality</td><td class="data-cell en-spaced"><?= $natEn ?></td><td class="data-cell ar-text"><?= $natAr ?></td><td class="ar-title">الجنسية</td></tr>
-      <tr><td class="en-title">Employer</td><td class="data-cell en-spaced"><?= $empEn ?></td><td class="data-cell ar-text"><?= $empAr ?></td><td class="ar-title">جهة العمل</td></tr>
-      <tr class="gray-row"><td class="en-title">Physician Name</td><td class="data-cell en-spaced"><?= $docNameEn ?></td><td class="data-cell ar-text"><?= $docNameAr ?></td><td class="ar-title">اسم الطبيب المعالج</td></tr>
-      <tr><td class="en-title">Position</td><td class="data-cell en-spaced"><?= $docTitleEn ?></td><td class="data-cell ar-text"><?= $docTitleAr ?></td><td class="ar-title">المسمى الوظيفي</td></tr>
-    </tbody></table>
-    <div class="vertical-divider"></div>
-    <div class="group1-thq-hospitallogoandthename-elm">
-      <div class="placeholder-logo-hospital"><?= $hospLogoHtml ?></div>
-      <span class="group1-thq-text-elm18">
-        <span style="font-family:'Noto Sans Arabic',sans-serif;font-weight:700;"><?= $hospNameAr ?></span><br/>
-        <span class="en-spaced" style="font-family:'Times New Roman',serif;font-weight:700;"><?= $hospNameEn ?></span><br/>
-        <?php if (!empty($licenseHtml)) echo $licenseHtml; ?>
-      </span>
-    </div>
-    <div class="group1-thq-thedateofissueandalsotimeofissue-elm">
-      <span class="group1-thq-text-elm22">
-        <span><?= $timestampLine ?></span><br/>
-        <span><?= $dateLine ?></span>
-      </span>
-    </div>
+<div class="group1-container1"><div class="group1-thq-group1-elm" id="report-content">
+  <div class="top-right-placeholder"><img src="<?= $baseUrl ?>sehalogoright.png" style="width:100%;height:100%" onerror="this.style.display='none'"/></div>
+  <div class="top-left-placeholder"><img src="<?= $baseUrl ?>sehalogoleft.png" style="width:100%;height:100%" onerror="this.style.display='none'"/></div>
+  <div class="bottom-right-placeholder"><img src="<?= $baseUrl ?>bottomright.png" style="width:100%;height:100%" onerror="this.style.display='none'"/></div>
+  <div class="group1-thq-staticinfo-elm">
+    <div class="header-placeholder"><img src="<?= $baseUrl ?>header.png" style="width:100%;height:100%" onerror="this.style.display='none'"/></div>
+    <span class="group1-thq-text-elm41"><span style="font-size:22.5px;font-family:'Noto Sans Arabic',sans-serif;font-weight:700;color:#0d9488">تقرير إجازة مرضية</span><br/><span style="font-size:18.7px;font-family:'Times New Roman',serif;font-weight:700;color:#1e293b">Sick Leave Report</span></span>
+    <span class="group1-thq-text-elm44">Kingdom of Saudi Arabia</span>
+    <div class="placeholder-136"><img src="<?= $baseUrl ?>qr.svg" style="width:130px;height:130px" onerror="this.style.display='none'"/></div>
+    <span class="group1-thq-text-elm36" dir="rtl">للتحقق من بيانات التقرير يرجى التأكد من زيارة موقع منصة صحة<br/>الرسمي</span>
+    <span class="group1-thq-text-elm39">To check the report please visit Seha's official website</span>
+    <span class="group1-thq-text-elm40"><a href="https://seha-sa-iniquiries-slenquiry.up.railway.app/" target="_blank">www.seha.sa/#/inquiries/slenquiry</a></span>
   </div>
-</div>
-</body>
-</html>
+  <table class="info-table" cellpadding="0" cellspacing="0"><tbody>
+    <tr><td class="en-title">Leave ID</td><td class="data-cell" colspan="2"><?= $sc ?></td><td class="ar-title">رمز الإجازة</td></tr>
+    <tr class="blue-row"><td class="en-title" style="color:white">Leave Duration</td><td class="data-cell"><?= $durationEn ?></td><td class="data-cell ar-text" dir="rtl"><?= $durationAr ?></td><td class="ar-title" style="color:white">مدة الإجازة</td></tr>
+    <tr><td class="en-title">Admission Date</td><td class="data-cell date-cell"><?= $startEn ?></td><td class="data-cell date-cell" dir="ltr"><?= $startHj ?></td><td class="ar-title">تاريخ الدخول</td></tr>
+    <tr class="gray-row"><td class="en-title">Discharge Date</td><td class="data-cell date-cell"><?= $endEn ?></td><td class="data-cell date-cell" dir="ltr"><?= $endHj ?></td><td class="ar-title">تاريخ الخروج</td></tr>
+    <tr><td class="en-title">Issue Date</td><td class="data-cell" colspan="2"><?= $issueEn ?></td><td class="ar-title">تاريخ الإصدار</td></tr>
+    <tr class="gray-row"><td class="en-title">Patient Name</td><td class="data-cell en-spaced"><?= $patNameEn ?></td><td class="data-cell ar-text"><?= $patNameAr ?></td><td class="ar-title">الاسم</td></tr>
+    <tr><td class="en-title">National ID / Iqama</td><td class="data-cell" colspan="2"><?= $patId ?></td><td class="ar-title">رقم الهوية / الإقامة</td></tr>
+    <tr class="gray-row"><td class="en-title">Nationality</td><td class="data-cell en-spaced"><?= $natEn ?></td><td class="data-cell ar-text"><?= $natAr ?></td><td class="ar-title">الجنسية</td></tr>
+    <tr><td class="en-title">Employer</td><td class="data-cell en-spaced"><?= $empEn ?></td><td class="data-cell ar-text"><?= $empAr ?></td><td class="ar-title">جهة العمل</td></tr>
+    <tr class="gray-row"><td class="en-title">Physician Name</td><td class="data-cell en-spaced"><?= $docNameEn ?></td><td class="data-cell ar-text"><?= $docNameAr ?></td><td class="ar-title">اسم الطبيب المعالج</td></tr>
+    <tr><td class="en-title">Position</td><td class="data-cell en-spaced"><?= $docTitleEn ?></td><td class="data-cell ar-text"><?= $docTitleAr ?></td><td class="ar-title">المسمى الوظيفي</td></tr>
+  </tbody></table>
+  <div class="vertical-divider"></div>
+  <div class="group1-thq-hospitallogoandthename-elm">
+    <div class="placeholder-logo-hospital"><?= $hospLogoHtml ?></div>
+    <span class="group1-thq-text-elm18"><span style="font-family:'Noto Sans Arabic',sans-serif;font-weight:700"><?= $hospNameAr ?></span><br/><span style="font-family:'Times New Roman',serif;font-weight:700"><?= $hospNameEn ?></span><br/><?php if (!empty($licenseHtml)) echo $licenseHtml; ?></span>
+  </div>
+  <div class="group1-thq-thedateofissueandalsotimeofissue-elm"><span class="group1-thq-text-elm22"><span><?= $timestampLine ?></span><br/><span><?= $dateLine ?></span></span></div>
+</div></div>
+</body></html>
 <?php
     exit;
 }
@@ -899,777 +753,944 @@ if (isPatientLoggedIn()) {
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>بوابة المرضى - Patient Portal</title>
+<meta name="robots" content="noindex, nofollow">
+<title>بوابة المرضى - Seha Patient Portal</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
-<link href="https://fonts.googleapis.com/css2?family=Cairo:wght@300;400;500;600;700;800;900&display=swap" rel="stylesheet">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Cairo:wght@300;400;500;600;700;800;900&family=Inter:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
 <script>
-// تفعيل الوضع الليلي مباشرة قبل تحميل الصفحة لتجنب الوميض الأبيض (FOUC)
-(function() {
-  const currentTheme = localStorage.getItem('theme') || 'light';
-  document.documentElement.setAttribute('data-theme', currentTheme);
-})();
+(function(){var t=localStorage.getItem('seha-theme')||'light';document.documentElement.setAttribute('data-theme',t)})();
 </script>
 <style>
-/* ================= المتغيرات والألوان (نظام احترافي) ================= */
+/* ═══════════════════════════════════════════════════════════════
+   SEHA PATIENT PORTAL - Ultra Modern Design System
+   ═══════════════════════════════════════════════════════════════ */
+
 :root {
-  --primary: #1e40af;
-  --primary-light: #3b82f6;
-  --primary-glow: rgba(59,130,246,0.25);
-  --secondary: #0f172a;
-  --accent: #06b6d4;
+  --primary: #0d9488;
+  --primary-50: #f0fdfa;
+  --primary-100: #ccfbf1;
+  --primary-200: #99f6e4;
+  --primary-300: #5eead4;
+  --primary-400: #2dd4bf;
+  --primary-500: #14b8a6;
+  --primary-600: #0d9488;
+  --primary-700: #0f766e;
+  --primary-800: #115e59;
+  --primary-900: #134e4a;
+  --secondary: #6366f1;
+  --accent: #8b5cf6;
   --success: #10b981;
-  --success-bg: #d1fae5;
-  --success-text: #059669;
   --warning: #f59e0b;
   --danger: #ef4444;
-  --bg: #f8fafc;
-  --card: #ffffff;
-  --text: #0f172a;
-  --text-muted: #64748b;
-  --border: #e2e8f0;
+  --bg-base: #f8fafc;
+  --bg-surface: #ffffff;
+  --bg-elevated: #ffffff;
+  --bg-overlay: rgba(15, 23, 42, 0.6);
+  --text-primary: #0f172a;
+  --text-secondary: #475569;
+  --text-muted: #94a3b8;
+  --text-inverse: #ffffff;
+  --border-light: #e2e8f0;
+  --border-default: #cbd5e1;
   --input-bg: #f1f5f9;
-  --table-hdr: #f1f5f9;
-  --table-hover: #f8faff;
-  --radius: 16px;
-  --radius-lg: 24px;
-  --shadow: 0 4px 20px rgba(0, 0, 0, 0.04);
-  --shadow-lg: 0 12px 40px rgba(30, 64, 175, 0.08);
-  --transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
-  --nav-bg: linear-gradient(135deg, #0f172a, #1e3a8a);
+  --shadow-xs: 0 1px 2px rgba(0,0,0,0.05);
+  --shadow-sm: 0 1px 3px rgba(0,0,0,0.1), 0 1px 2px rgba(0,0,0,0.06);
+  --shadow-md: 0 4px 6px -1px rgba(0,0,0,0.1), 0 2px 4px -1px rgba(0,0,0,0.06);
+  --shadow-lg: 0 10px 15px -3px rgba(0,0,0,0.1), 0 4px 6px -2px rgba(0,0,0,0.05);
+  --shadow-xl: 0 20px 25px -5px rgba(0,0,0,0.1), 0 10px 10px -5px rgba(0,0,0,0.04);
+  --shadow-2xl: 0 25px 50px -12px rgba(0,0,0,0.25);
+  --shadow-glow: 0 0 40px rgba(13,148,136,0.15);
+  --radius-sm: 8px;
+  --radius-md: 12px;
+  --radius-lg: 16px;
+  --radius-xl: 20px;
+  --radius-2xl: 24px;
+  --radius-full: 9999px;
+  --transition-fast: 150ms cubic-bezier(0.4, 0, 0.2, 1);
+  --transition-base: 250ms cubic-bezier(0.4, 0, 0.2, 1);
+  --transition-slow: 350ms cubic-bezier(0.4, 0, 0.2, 1);
+  --transition-spring: 500ms cubic-bezier(0.34, 1.56, 0.64, 1);
+  --font-ar: 'Cairo', sans-serif;
+  --font-en: 'Inter', sans-serif;
+  --nav-height: 72px;
 }
 
 [data-theme="dark"] {
-  --primary: #3b82f6;
-  --primary-light: #60a5fa;
-  --primary-glow: rgba(96,165,250,0.15);
-  --secondary: #f8fafc;
-  --bg: #0b0f19;
-  --card: #111827;
-  --text: #f1f5f9;
-  --text-muted: #94a3b8;
-  --border: #1f2937;
-  --input-bg: #1f2937;
-  --table-hdr: #1f2937;
-  --table-hover: #161f33;
-  --shadow: 0 4px 20px rgba(0, 0, 0, 0.4);
-  --shadow-lg: 0 12px 40px rgba(0, 0, 0, 0.6);
-  --success-bg: rgba(16, 185, 129, 0.15);
-  --success-text: #34d399;
-  --nav-bg: linear-gradient(135deg, #05070c, #0f172a);
+  --primary: #14b8a6;
+  --primary-50: #042f2e;
+  --primary-100: #134e4a;
+  --bg-base: #030712;
+  --bg-surface: #0f172a;
+  --bg-elevated: #1e293b;
+  --bg-overlay: rgba(0, 0, 0, 0.75);
+  --text-primary: #f1f5f9;
+  --text-secondary: #cbd5e1;
+  --text-muted: #64748b;
+  --border-light: #1e293b;
+  --border-default: #334155;
+  --input-bg: #1e293b;
+  --shadow-xs: 0 1px 2px rgba(0,0,0,0.3);
+  --shadow-sm: 0 1px 3px rgba(0,0,0,0.4);
+  --shadow-md: 0 4px 6px rgba(0,0,0,0.5);
+  --shadow-lg: 0 10px 15px rgba(0,0,0,0.6);
+  --shadow-xl: 0 20px 25px rgba(0,0,0,0.7);
+  --shadow-2xl: 0 25px 50px rgba(0,0,0,0.8);
+  --shadow-glow: 0 0 40px rgba(20,184,166,0.2);
 }
 
-* { margin:0; padding:0; box-sizing:border-box; }
-body { font-family:'Cairo',sans-serif; background:var(--bg); color:var(--text); min-height:100vh; direction:rtl; transition: background-color 0.4s ease, color 0.4s ease; }
+/* ═══ Reset & Base ═══ */
+*, *::before, *::after { margin:0; padding:0; box-sizing:border-box; }
+html { scroll-behavior: smooth; -webkit-text-size-adjust: 100%; }
+body {
+  font-family: var(--font-ar);
+  background: var(--bg-base);
+  color: var(--text-primary);
+  min-height: 100vh;
+  direction: rtl;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  transition: background-color var(--transition-slow), color var(--transition-slow);
+  overflow-x: hidden;
+}
 
-/* ═══ صفحة تسجيل الدخول ═══ */
+/* ═══ Animated Background Orbs ═══ */
+.bg-orbs {
+  position: fixed; top: 0; left: 0; width: 100%; height: 100%;
+  pointer-events: none; z-index: 0; overflow: hidden;
+}
+.bg-orbs .orb {
+  position: absolute; border-radius: 50%; filter: blur(80px); opacity: 0.4;
+  animation: orbFloat 20s ease-in-out infinite;
+}
+.bg-orbs .orb:nth-child(1) { width: 400px; height: 400px; background: var(--primary-200); top: -100px; right: -100px; animation-delay: 0s; }
+.bg-orbs .orb:nth-child(2) { width: 300px; height: 300px; background: rgba(99,102,241,0.3); bottom: -50px; left: -50px; animation-delay: -7s; }
+.bg-orbs .orb:nth-child(3) { width: 250px; height: 250px; background: rgba(139,92,246,0.2); top: 50%; left: 50%; animation-delay: -14s; }
+[data-theme="dark"] .bg-orbs .orb { opacity: 0.15; }
+
+@keyframes orbFloat {
+  0%, 100% { transform: translate(0, 0) scale(1); }
+  25% { transform: translate(30px, -30px) scale(1.05); }
+  50% { transform: translate(-20px, 20px) scale(0.95); }
+  75% { transform: translate(10px, -10px) scale(1.02); }
+}
+
+/* ═══ Login Page ═══ */
 .login-page {
-  min-height:100vh; display:flex; align-items:center; justify-content:center;
-  background:linear-gradient(-45deg,#0f172a,#1e3a8a,#1e40af,#0c4a6e,#0f172a);
-  background-size:400% 400%; animation:gradientShift 15s ease infinite;
-  padding:20px; position:relative; overflow:hidden;
+  min-height: 100vh; display: flex; align-items: center; justify-content: center;
+  padding: 20px; position: relative; overflow: hidden;
+  background: linear-gradient(135deg, #0f172a 0%, #134e4a 50%, #0f172a 100%);
 }
+.login-page::before {
+  content: ''; position: absolute; inset: 0;
+  background: radial-gradient(ellipse at 30% 20%, rgba(13,148,136,0.3) 0%, transparent 50%),
+              radial-gradient(ellipse at 70% 80%, rgba(99,102,241,0.2) 0%, transparent 50%);
+  animation: loginGlow 8s ease-in-out infinite alternate;
+}
+@keyframes loginGlow {
+  0% { opacity: 0.6; } 100% { opacity: 1; }
+}
+.login-particles {
+  position: absolute; inset: 0; overflow: hidden;
+}
+.login-particles span {
+  position: absolute; width: 4px; height: 4px; background: rgba(255,255,255,0.3);
+  border-radius: 50%; animation: particleRise 6s linear infinite;
+}
+@keyframes particleRise {
+  0% { transform: translateY(100vh) scale(0); opacity: 0; }
+  10% { opacity: 1; }
+  90% { opacity: 1; }
+  100% { transform: translateY(-100px) scale(1); opacity: 0; }
+}
+
 .login-card {
-  background:var(--card); backdrop-filter:blur(30px);
-  border-radius:var(--radius-lg); padding:48px 40px; width:100%; max-width:440px;
-  box-shadow:0 40px 100px rgba(0,0,0,0.5); animation:slideUp 0.7s cubic-bezier(0.34,1.56,0.64,1);
-  border:1px solid var(--border); position:relative; z-index:2;
+  background: rgba(255,255,255,0.05);
+  backdrop-filter: blur(20px); -webkit-backdrop-filter: blur(20px);
+  border: 1px solid rgba(255,255,255,0.1);
+  border-radius: var(--radius-2xl); padding: 48px 40px;
+  width: 100%; max-width: 440px;
+  box-shadow: 0 30px 80px rgba(0,0,0,0.5), inset 0 1px 0 rgba(255,255,255,0.1);
+  animation: cardAppear 0.8s var(--transition-spring) forwards;
+  opacity: 0; transform: translateY(30px) scale(0.95);
+  position: relative; z-index: 2;
 }
-.login-icon { text-align:center; font-size:64px; margin-bottom:16px; animation:float 4s ease-in-out infinite; }
-.login-card h2 { text-align:center; font-size:26px; font-weight:800; color:var(--primary); margin-bottom:6px; }
-.login-card .subtitle { text-align:center; color:var(--text-muted); font-size:14px; margin-bottom:32px; }
-.form-group { margin-bottom:18px; }
-.form-group label { display:block; font-size:13px; font-weight:600; color:var(--text); margin-bottom:8px; }
-.form-control {
-  width:100%; padding:12px 16px; border:2px solid var(--border); border-radius:12px;
-  font-family:'Cairo',sans-serif; font-size:15px; color:var(--text); background:var(--input-bg);
-  transition:var(--transition); outline:none;
+@keyframes cardAppear {
+  to { opacity: 1; transform: translateY(0) scale(1); }
 }
-.form-control:focus { border-color:var(--primary-light); background:var(--card); box-shadow:0 0 0 4px var(--primary-glow); }
 
-.btn {
-  display:inline-flex; align-items:center; justify-content:center; gap:8px;
-  padding:12px 24px; border:none; border-radius:12px; font-family:'Cairo',sans-serif;
-  font-size:15px; font-weight:700; cursor:pointer; transition:var(--transition); text-decoration:none;
+.login-logo {
+  width: 80px; height: 80px; margin: 0 auto 24px;
+  background: linear-gradient(135deg, var(--primary-600), var(--primary-400));
+  border-radius: var(--radius-xl); display: flex; align-items: center; justify-content: center;
+  font-size: 36px; color: white;
+  box-shadow: 0 10px 30px rgba(13,148,136,0.4);
+  animation: logoFloat 4s ease-in-out infinite;
 }
-.btn-primary { background:linear-gradient(135deg, #1e40af, var(--primary-light)); color:#fff; box-shadow:0 4px 16px var(--primary-glow); }
-.btn-primary:hover { transform:translateY(-2px); box-shadow:0 8px 24px var(--primary-glow); filter: brightness(1.1); }
-.btn-full { width:100%; }
+@keyframes logoFloat { 0%,100%{transform:translateY(0)} 50%{transform:translateY(-8px)} }
 
-.alert { padding:12px 16px; border-radius:12px; font-size:14px; font-weight:600; margin-bottom:16px; }
-.alert-danger { background:rgba(239, 68, 68, 0.1); color:var(--danger); border:1px solid rgba(239, 68, 68, 0.2); }
-.alert-success { background:var(--success-bg); color:var(--success-text); border:1px solid rgba(16, 185, 129, 0.2); }
-.alert-warning { background:rgba(245, 158, 11, 0.1); color:var(--warning); border:1px solid rgba(245, 158, 11, 0.2); }
+.login-card h2 { text-align: center; font-size: 28px; font-weight: 800; color: #fff; margin-bottom: 8px; }
+.login-card .subtitle { text-align: center; color: rgba(255,255,255,0.6); font-size: 14px; margin-bottom: 36px; font-weight: 500; }
 
-/* ═══ الشريط العلوي ═══ */
+.login-card .form-group { margin-bottom: 22px; }
+.login-card .form-group label { display: block; font-size: 13px; font-weight: 700; color: rgba(255,255,255,0.8); margin-bottom: 8px; }
+.login-card .form-control {
+  width: 100%; padding: 16px 20px; border: 1px solid rgba(255,255,255,0.15);
+  border-radius: var(--radius-md); font-family: var(--font-ar); font-size: 15px;
+  color: #fff; background: rgba(255,255,255,0.08); font-weight: 600;
+  transition: var(--transition-base); outline: none;
+}
+.login-card .form-control::placeholder { color: rgba(255,255,255,0.4); }
+.login-card .form-control:focus {
+  border-color: var(--primary-400); background: rgba(255,255,255,0.12);
+  box-shadow: 0 0 0 4px rgba(13,148,136,0.2);
+}
+
+.btn-login {
+  width: 100%; padding: 16px; border: none; border-radius: var(--radius-md);
+  font-family: var(--font-ar); font-size: 16px; font-weight: 800; cursor: pointer;
+  background: linear-gradient(135deg, var(--primary-600), var(--primary-400));
+  color: #fff; transition: var(--transition-base);
+  box-shadow: 0 8px 25px rgba(13,148,136,0.4);
+  position: relative; overflow: hidden;
+}
+.btn-login::after {
+  content: ''; position: absolute; inset: 0;
+  background: linear-gradient(135deg, transparent, rgba(255,255,255,0.2), transparent);
+  transform: translateX(-100%); transition: transform 0.6s;
+}
+.btn-login:hover::after { transform: translateX(100%); }
+.btn-login:hover { transform: translateY(-2px); box-shadow: 0 12px 35px rgba(13,148,136,0.5); }
+.btn-login:active { transform: translateY(0); }
+
+.login-alert {
+  padding: 14px 18px; border-radius: var(--radius-md); font-size: 14px; font-weight: 700;
+  margin-bottom: 20px; background: rgba(239,68,68,0.15); color: #fca5a5;
+  border: 1px solid rgba(239,68,68,0.3); animation: shake 0.5s ease-in-out;
+}
+@keyframes shake { 0%,100%{transform:translateX(0)} 25%{transform:translateX(-5px)} 75%{transform:translateX(5px)} }
+
+/* ═══ Navbar ═══ */
 .navbar {
-  background:var(--nav-bg); padding:14px 28px;
-  display:flex; align-items:center; justify-content:space-between;
-  box-shadow:0 4px 24px rgba(0,0,0,0.3); position:sticky; top:0; z-index:100;
-  transition: var(--transition);
+  position: sticky; top: 0; z-index: 100; height: var(--nav-height);
+  background: rgba(255,255,255,0.8); backdrop-filter: blur(20px); -webkit-backdrop-filter: blur(20px);
+  border-bottom: 1px solid var(--border-light);
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 0 32px; transition: var(--transition-base);
+  box-shadow: var(--shadow-sm);
 }
-.navbar .brand { display:flex; align-items:center; gap:12px; color:#fff; font-size:18px; font-weight:800; }
-.navbar .brand-icon { width:40px; height:40px; background:linear-gradient(135deg,var(--primary-light),var(--accent)); border-radius:12px; display:flex; align-items:center; justify-content:center; font-size:20px; }
-.navbar .user-actions { display:flex; align-items:center; gap:12px; }
-.navbar .user-badge { background:rgba(255,255,255,0.08); border:1px solid rgba(255,255,255,0.15); padding:6px 14px; border-radius:50px; display:flex; align-items:center; gap:8px; color:#fff; font-size:14px; font-weight:600; }
-.btn-icon-nav { background:rgba(255,255,255,0.08); border:1px solid rgba(255,255,255,0.15); color:#fff; width:40px; height:40px; border-radius:12px; cursor:pointer; font-size:18px; display:flex; align-items:center; justify-content:center; transition:var(--transition); }
-.btn-icon-nav:hover { background:rgba(255,255,255,0.2); transform: scale(1.05); }
+[data-theme="dark"] .navbar { background: rgba(15,23,42,0.85); }
 
-.btn-logout { background:rgba(239,68,68,0.15); color:#fca5a5; border:1px solid rgba(239,68,68,0.3); padding:8px 16px; border-radius:12px; font-family:'Cairo',sans-serif; font-size:13px; font-weight:700; cursor:pointer; transition:var(--transition); }
-.btn-logout:hover { background:rgba(239,68,68,0.4); color:#fff; }
+.nav-brand { display: flex; align-items: center; gap: 14px; }
+.nav-brand-icon {
+  width: 44px; height: 44px; border-radius: var(--radius-md);
+  background: linear-gradient(135deg, var(--primary-600), var(--primary-400));
+  display: flex; align-items: center; justify-content: center;
+  font-size: 20px; color: white; box-shadow: 0 4px 12px rgba(13,148,136,0.3);
+}
+.nav-brand-text { font-size: 18px; font-weight: 800; color: var(--text-primary); }
+.nav-brand-text small { display: block; font-size: 11px; font-weight: 600; color: var(--text-muted); margin-top: 2px; }
 
-/* ═══ المحتوى ═══ */
-.main-content { max-width:1150px; margin:0 auto; padding:32px 20px; }
-.stats-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(220px,1fr)); gap:20px; margin-bottom:32px; }
-.stat-card { background:var(--card); border-radius:var(--radius); padding:20px 24px; box-shadow:var(--shadow); border:1px solid var(--border); display:flex; align-items:center; gap:16px; transition:var(--transition); }
-.stat-card:hover { transform:translateY(-4px); box-shadow:var(--shadow-lg); border-color: var(--primary-light); }
-.stat-icon { width:56px; height:56px; border-radius:14px; display:flex; align-items:center; justify-content:center; font-size:26px; flex-shrink:0; }
-.stat-icon.blue { background:rgba(59, 130, 246, 0.15); color:#3b82f6; }
-.stat-icon.green { background:rgba(16, 185, 129, 0.15); color:#10b981; }
-.stat-icon.orange { background:rgba(245, 158, 11, 0.15); color:#f59e0b; }
-.stat-icon.red { background:rgba(239, 68, 68, 0.15); color:#ef4444; }
-.stat-info .num { font-size:30px; font-weight:800; color:var(--text); line-height:1; }
-.stat-info .label { font-size:13px; color:var(--text-muted); margin-top:6px; font-weight:600; }
+.nav-actions { display: flex; align-items: center; gap: 10px; }
+.nav-user-badge {
+  display: flex; align-items: center; gap: 10px; padding: 8px 16px;
+  background: var(--input-bg); border: 1px solid var(--border-light);
+  border-radius: var(--radius-full); font-size: 14px; font-weight: 700; color: var(--text-primary);
+}
+.nav-user-badge .avatar {
+  width: 32px; height: 32px; border-radius: 50%;
+  background: linear-gradient(135deg, var(--primary-400), var(--secondary));
+  display: flex; align-items: center; justify-content: center;
+  font-size: 14px; color: white; font-weight: 800;
+}
 
-.card { background:var(--card); border-radius:var(--radius-lg); box-shadow:var(--shadow); border:1px solid var(--border); overflow:hidden; margin-bottom:28px; transition:var(--transition); }
-.card-header { padding:20px 28px; border-bottom:1px solid var(--border); display:flex; align-items:center; justify-content:space-between; background:var(--table-hdr); }
-.card-header h3 { font-size:18px; font-weight:700; color:var(--primary); display:flex; align-items:center; gap:10px; }
-.card-body { padding:28px; }
+.nav-btn {
+  width: 42px; height: 42px; border-radius: var(--radius-md); border: 1px solid var(--border-light);
+  background: var(--input-bg); color: var(--text-secondary); cursor: pointer;
+  display: flex; align-items: center; justify-content: center; font-size: 18px;
+  transition: var(--transition-fast); position: relative;
+}
+.nav-btn:hover { background: var(--border-light); transform: scale(1.05); }
+.nav-btn .badge-dot {
+  position: absolute; top: 6px; right: 6px; width: 10px; height: 10px;
+  background: var(--danger); border-radius: 50%; border: 2px solid var(--bg-surface);
+  animation: pulse 2s infinite;
+}
+@keyframes pulse { 0%,100%{transform:scale(1)} 50%{transform:scale(1.3)} }
 
-.patient-info-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(220px,1fr)); gap:16px; }
-.info-field { background:var(--input-bg); border:1px solid var(--border); border-radius:12px; padding:14px 18px; transition:var(--transition); }
-.info-field:hover { border-color: var(--text-muted); }
-.info-field .field-label { font-size:11px; font-weight:700; color:var(--text-muted); text-transform:uppercase; letter-spacing:0.5px; margin-bottom:6px; }
-.info-field .field-value { font-size:16px; font-weight:700; color:var(--text); }
-.info-field .field-value-en { font-size:12px; color:var(--text-muted); direction:ltr; text-align:left; margin-top:2px; font-family: 'Inter', sans-serif; }
+.btn-logout-nav {
+  padding: 10px 18px; border-radius: var(--radius-md); border: 1px solid rgba(239,68,68,0.2);
+  background: rgba(239,68,68,0.08); color: var(--danger); font-family: var(--font-ar);
+  font-size: 13px; font-weight: 700; cursor: pointer; transition: var(--transition-fast);
+  display: flex; align-items: center; gap: 6px;
+}
+.btn-logout-nav:hover { background: var(--danger); color: white; border-color: var(--danger); }
 
-.quota-bar-wrap { background:var(--input-bg); border-radius:50px; height:14px; overflow:hidden; margin:12px 0; border:1px solid var(--border); }
-.quota-bar { height:100%; border-radius:50px; background:linear-gradient(90deg,var(--success),#34d399); transition:width 1s cubic-bezier(0.4, 0, 0.2, 1); }
-.quota-bar.warning { background:linear-gradient(90deg,var(--warning),#fbbf24); }
-.quota-bar.danger { background:linear-gradient(90deg,var(--danger),#f87171); }
+/* ═══ Main Content ═══ */
+.main-content { max-width: 1200px; margin: 0 auto; padding: 36px 24px; position: relative; z-index: 1; }
 
-.leave-form-grid { display:grid; grid-template-columns:1fr 1fr; gap:20px; }
-@media (max-width:768px) { .leave-form-grid { grid-template-columns:1fr; } }
-.form-label { display:block; font-size:13px; font-weight:700; color:var(--text); margin-bottom:8px; }
-.form-select { width:100%; padding:12px 16px; border:2px solid var(--border); border-radius:12px; font-family:'Cairo',sans-serif; font-size:14px; color:var(--text); background:var(--input-bg); transition:var(--transition); outline:none; cursor:pointer; font-weight:600; }
-.form-select:focus { border-color:var(--primary-light); background:var(--card); box-shadow:0 0 0 4px var(--primary-glow); }
-.form-select option { background: var(--card); color: var(--text); }
+/* ═══ Stats Cards ═══ */
+.stats-toggle-wrap { text-align: center; margin-bottom: 28px; }
+.btn-stats-toggle {
+  display: inline-flex; align-items: center; gap: 10px;
+  padding: 14px 32px; border-radius: var(--radius-full);
+  background: var(--bg-surface); border: 2px solid var(--border-light);
+  color: var(--text-primary); font-family: var(--font-ar); font-size: 15px; font-weight: 800;
+  cursor: pointer; transition: var(--transition-base);
+  box-shadow: var(--shadow-md);
+}
+.btn-stats-toggle:hover { border-color: var(--primary); transform: translateY(-2px); box-shadow: var(--shadow-lg); }
+.btn-stats-toggle.active { background: var(--primary-50); border-color: var(--primary); color: var(--primary); }
+.btn-stats-toggle i { transition: transform var(--transition-base); }
+.btn-stats-toggle.active i { transform: rotate(180deg); }
 
-.time-mode-tabs { display:flex; gap:8px; margin-bottom:12px; }
-.time-tab { flex:1; padding:10px; border:2px solid var(--border); border-radius:10px; background:var(--input-bg); font-family:'Cairo',sans-serif; font-size:13px; font-weight:700; cursor:pointer; transition:var(--transition); text-align:center; color:var(--text-muted); }
-.time-tab.active { border-color:var(--primary-light); background:var(--primary-glow); color:var(--primary); }
-.time-tab:hover:not(.active) { border-color:var(--text-muted); }
+.stats-container { margin-bottom: 32px; overflow: hidden; transition: max-height 0.5s ease, opacity 0.3s ease; }
+.stats-container.collapsed { max-height: 0; opacity: 0; margin-bottom: 0; }
 
-.leaves-table { width:100%; border-collapse:collapse; font-size:14px; }
-.leaves-table th { background:var(--table-hdr); padding:14px 16px; text-align:right; font-weight:700; color:var(--text-muted); font-size:12px; text-transform:uppercase; letter-spacing:0.5px; border-bottom:2px solid var(--border); }
-.leaves-table td { padding:16px; border-bottom:1px solid var(--border); vertical-align:middle; color:var(--text); font-weight:600; }
-.leaves-table tr:hover td { background:var(--table-hover); }
+.stats-grid {
+  display: grid; grid-template-columns: repeat(auto-fit, minmax(250px, 1fr)); gap: 20px;
+}
+.stat-card {
+  background: var(--bg-surface); border-radius: var(--radius-xl); padding: 24px;
+  border: 1px solid var(--border-light); display: flex; align-items: center; gap: 18px;
+  transition: var(--transition-base); box-shadow: var(--shadow-sm);
+  position: relative; overflow: hidden;
+}
+.stat-card::before {
+  content: ''; position: absolute; top: 0; right: 0; width: 100px; height: 100px;
+  border-radius: 50%; filter: blur(40px); opacity: 0.5; transition: var(--transition-slow);
+}
+.stat-card:hover { transform: translateY(-4px); box-shadow: var(--shadow-xl); border-color: transparent; }
+.stat-card:hover::before { opacity: 0.8; }
+.stat-card.teal::before { background: var(--primary-200); }
+.stat-card.blue::before { background: rgba(99,102,241,0.3); }
+.stat-card.amber::before { background: rgba(245,158,11,0.3); }
+.stat-card.rose::before { background: rgba(239,68,68,0.3); }
 
-.btn-sm { padding:8px 16px; font-size:13px; border-radius:10px; }
-.btn-outline { background:transparent; border:2px solid var(--primary-light); color:var(--primary); font-weight:700; }
-.btn-outline:hover { background:var(--primary-light); color:#fff; border-color:var(--primary-light); }
+.stat-icon {
+  width: 56px; height: 56px; border-radius: var(--radius-lg);
+  display: flex; align-items: center; justify-content: center;
+  font-size: 24px; flex-shrink: 0; position: relative; z-index: 1;
+}
+.stat-icon.teal { background: rgba(13,148,136,0.12); color: var(--primary-600); }
+.stat-icon.blue { background: rgba(99,102,241,0.12); color: #6366f1; }
+.stat-icon.amber { background: rgba(245,158,11,0.12); color: #f59e0b; }
+.stat-icon.rose { background: rgba(239,68,68,0.12); color: #ef4444; }
 
-.toast-container { position:fixed; top:90px; left:50%; transform:translateX(-50%); z-index:9999; display:flex; flex-direction:column; gap:12px; pointer-events:none; }
-.toast { background:var(--card); border:1px solid var(--border); border-radius:14px; padding:16px 24px; box-shadow:0 20px 50px rgba(0,0,0,0.3); font-size:15px; font-weight:700; display:flex; align-items:center; gap:12px; min-width:320px; max-width:450px; animation:slideDown 0.4s cubic-bezier(0.34,1.56,0.64,1); border-right:5px solid var(--primary); color:var(--text); }
-.toast.success { border-color:var(--success); }
-.toast.error { border-color:var(--danger); }
-.toast.warning { border-color:var(--warning); }
+.stat-info { position: relative; z-index: 1; }
+.stat-info .stat-num { font-size: 30px; font-weight: 900; color: var(--text-primary); line-height: 1; font-family: var(--font-en); }
+.stat-info .stat-label { font-size: 13px; color: var(--text-muted); margin-top: 6px; font-weight: 700; }
 
-.spinner { width:20px; height:20px; border:3px solid rgba(255,255,255,0.3); border-top-color:#fff; border-radius:50%; animation:spin 0.8s linear infinite; display:inline-block; vertical-align: middle; }
-.empty-state { text-align:center; padding:60px 20px; color:var(--text-muted); }
-.empty-state .empty-icon { font-size:64px; margin-bottom:16px; opacity:0.6; }
-.empty-state h4 { font-size:18px; font-weight:800; margin-bottom:8px; color:var(--text); }
-.empty-state p { font-size:14px; font-weight:600; }
+/* ═══ Cards ═══ */
+.card {
+  background: var(--bg-surface); border-radius: var(--radius-2xl);
+  border: 1px solid var(--border-light); overflow: hidden;
+  margin-bottom: 28px; transition: var(--transition-base);
+  box-shadow: var(--shadow-sm);
+}
+.card:hover { box-shadow: var(--shadow-lg); }
+.card-header {
+  padding: 22px 28px; border-bottom: 1px solid var(--border-light);
+  display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 12px;
+  background: var(--bg-base);
+}
+.card-header h3 {
+  font-size: 18px; font-weight: 800; color: var(--text-primary);
+  display: flex; align-items: center; gap: 10px;
+}
+.card-header h3 i { color: var(--primary); }
+.card-body { padding: 28px; }
 
-.days-counter { display:flex; align-items:center; gap:8px; font-size:13px; font-weight:700; color:var(--text-muted); margin-top:8px; }
-.days-counter .used { color:var(--danger); }
-.days-counter .remaining { color:var(--success); }
-.days-counter .total { color:var(--primary); }
+/* ═══ Patient Info Grid ═══ */
+.patient-info-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 16px; }
+.info-field {
+  background: var(--input-bg); border: 1px solid var(--border-light);
+  border-radius: var(--radius-lg); padding: 18px 20px;
+  transition: var(--transition-fast); position: relative; overflow: hidden;
+}
+.info-field::after {
+  content: ''; position: absolute; top: 0; right: 0; width: 4px; height: 100%;
+  background: var(--primary); opacity: 0; transition: var(--transition-fast);
+}
+.info-field:hover { border-color: var(--primary-300); }
+.info-field:hover::after { opacity: 1; }
+.info-field .field-label {
+  font-size: 11px; font-weight: 800; color: var(--text-muted);
+  text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 8px;
+}
+.info-field .field-value { font-size: 16px; font-weight: 700; color: var(--text-primary); }
+.info-field .field-value-en { font-size: 12px; color: var(--text-muted); direction: ltr; text-align: left; margin-top: 4px; font-family: var(--font-en); font-weight: 500; }
 
-@keyframes gradientShift { 0%{background-position:0% 50%} 50%{background-position:100% 50%} 100%{background-position:0% 50%} }
-@keyframes float { 0%,100%{transform:translateY(0)} 50%{transform:translateY(-10px)} }
-@keyframes slideUp { from{opacity:0;transform:translateY(40px)} to{opacity:1;transform:translateY(0)} }
-@keyframes slideDown { from{opacity:0;transform:translateY(-20px)} to{opacity:1;transform:translateY(0)} }
+/* ═══ Quota Bar ═══ */
+.quota-section { margin-top: 20px; }
+.quota-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; }
+.quota-header .label { font-size: 14px; font-weight: 700; color: var(--text-secondary); }
+.quota-header .value { font-size: 14px; font-weight: 800; color: var(--primary); font-family: var(--font-en); }
+.quota-bar-track {
+  height: 12px; background: var(--input-bg); border-radius: var(--radius-full);
+  overflow: hidden; border: 1px solid var(--border-light);
+  box-shadow: inset 0 2px 4px rgba(0,0,0,0.05);
+}
+.quota-bar-fill {
+  height: 100%; border-radius: var(--radius-full);
+  background: linear-gradient(90deg, var(--primary-600), var(--primary-400));
+  transition: width 1.5s cubic-bezier(0.4, 0, 0.2, 1);
+  position: relative; overflow: hidden;
+}
+.quota-bar-fill::after {
+  content: ''; position: absolute; inset: 0;
+  background: linear-gradient(90deg, transparent, rgba(255,255,255,0.3), transparent);
+  animation: shimmer 2s infinite;
+}
+@keyframes shimmer { 0%{transform:translateX(-100%)} 100%{transform:translateX(100%)} }
+.quota-bar-fill.warning { background: linear-gradient(90deg, #f59e0b, #fbbf24); }
+.quota-bar-fill.danger { background: linear-gradient(90deg, #ef4444, #f87171); }
+
+.days-summary {
+  display: flex; gap: 20px; margin-top: 14px; flex-wrap: wrap;
+}
+.days-summary .day-item {
+  display: flex; align-items: center; gap: 8px; font-size: 14px; font-weight: 700;
+}
+.days-summary .day-item .dot { width: 10px; height: 10px; border-radius: 50%; }
+.days-summary .day-item.used .dot { background: var(--danger); }
+.days-summary .day-item.remaining .dot { background: var(--success); }
+.days-summary .day-item.total .dot { background: var(--primary); }
+
+/* ═══ Leave Form ═══ */
+.leave-form-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 22px; }
+.form-group { margin-bottom: 0; }
+.form-label { display: block; font-size: 14px; font-weight: 800; color: var(--text-primary); margin-bottom: 10px; }
+.form-select, .form-input {
+  width: 100%; padding: 14px 18px; border: 2px solid var(--border-light);
+  border-radius: var(--radius-md); font-family: var(--font-ar); font-size: 15px;
+  color: var(--text-primary); background: var(--input-bg); font-weight: 600;
+  transition: var(--transition-base); outline: none; cursor: pointer;
+}
+.form-select:focus, .form-input:focus {
+  border-color: var(--primary); background: var(--bg-surface);
+  box-shadow: 0 0 0 4px rgba(13,148,136,0.1);
+}
+
+.time-tabs { display: flex; gap: 10px; margin-bottom: 14px; }
+.time-tab {
+  flex: 1; padding: 12px; border: 2px solid var(--border-light); border-radius: var(--radius-md);
+  background: var(--input-bg); font-family: var(--font-ar); font-size: 14px; font-weight: 800;
+  cursor: pointer; transition: var(--transition-fast); text-align: center; color: var(--text-muted);
+}
+.time-tab.active { border-color: var(--primary); background: var(--primary-50); color: var(--primary); }
+.time-tab:hover:not(.active) { border-color: var(--text-muted); }
+
+.btn-submit {
+  display: inline-flex; align-items: center; justify-content: center; gap: 10px;
+  padding: 16px 36px; border: none; border-radius: var(--radius-md);
+  font-family: var(--font-ar); font-size: 16px; font-weight: 800; cursor: pointer;
+  background: linear-gradient(135deg, var(--primary-700), var(--primary-500));
+  color: white; transition: var(--transition-base);
+  box-shadow: 0 8px 25px rgba(13,148,136,0.3);
+  position: relative; overflow: hidden;
+}
+.btn-submit::after {
+  content: ''; position: absolute; inset: 0;
+  background: linear-gradient(135deg, transparent, rgba(255,255,255,0.15), transparent);
+  transform: translateX(-100%); transition: transform 0.6s;
+}
+.btn-submit:hover::after { transform: translateX(100%); }
+.btn-submit:hover { transform: translateY(-2px); box-shadow: 0 12px 35px rgba(13,148,136,0.4); }
+.btn-submit:disabled { opacity: 0.6; cursor: not-allowed; transform: none; }
+
+/* ═══ Leaves Table ═══ */
+.table-responsive { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+.leaves-table { width: 100%; border-collapse: collapse; font-size: 14px; }
+.leaves-table th {
+  padding: 14px 18px; text-align: right; font-weight: 800; color: var(--text-muted);
+  font-size: 12px; text-transform: uppercase; letter-spacing: 0.5px;
+  border-bottom: 2px solid var(--border-light); white-space: nowrap; background: var(--bg-base);
+}
+.leaves-table td {
+  padding: 16px 18px; border-bottom: 1px solid var(--border-light);
+  vertical-align: middle; color: var(--text-primary); font-weight: 600;
+}
+.leaves-table tr { transition: var(--transition-fast); }
+.leaves-table tr:hover td { background: var(--primary-50); }
+
+.btn-view-leave {
+  padding: 8px 16px; border-radius: var(--radius-sm); border: 2px solid var(--primary);
+  background: transparent; color: var(--primary); font-family: var(--font-ar);
+  font-size: 13px; font-weight: 800; cursor: pointer; transition: var(--transition-fast);
+  display: inline-flex; align-items: center; gap: 6px;
+}
+.btn-view-leave:hover { background: var(--primary); color: white; }
+
+/* ═══ Empty State ═══ */
+.empty-state { text-align: center; padding: 60px 20px; }
+.empty-state .empty-icon { font-size: 64px; margin-bottom: 20px; opacity: 0.6; color: var(--text-muted); }
+.empty-state h4 { font-size: 20px; font-weight: 800; color: var(--text-primary); margin-bottom: 10px; }
+.empty-state p { font-size: 15px; color: var(--text-muted); font-weight: 600; max-width: 400px; margin: 0 auto; line-height: 1.7; }
+
+/* ═══ Toast Notifications ═══ */
+.toast-container {
+  position: fixed; top: 90px; left: 50%; transform: translateX(-50%);
+  z-index: 9999; display: flex; flex-direction: column; gap: 12px;
+  pointer-events: none; width: 90%; max-width: 450px;
+}
+.toast {
+  background: var(--bg-surface); border: 1px solid var(--border-light);
+  border-radius: var(--radius-lg); padding: 18px 24px;
+  box-shadow: var(--shadow-2xl); font-size: 15px; font-weight: 700;
+  display: flex; align-items: center; gap: 14px; width: 100%;
+  animation: toastSlide 0.4s var(--transition-spring);
+  border-right: 5px solid var(--primary); color: var(--text-primary);
+  backdrop-filter: blur(10px); pointer-events: auto;
+}
+.toast.success { border-color: var(--success); }
+.toast.error { border-color: var(--danger); }
+.toast.warning { border-color: var(--warning); }
+@keyframes toastSlide { from{opacity:0;transform:translateY(-20px)} to{opacity:1;transform:translateY(0)} }
+
+/* ═══ Notification Panel ═══ */
+.notif-overlay { position: fixed; inset: 0; background: var(--bg-overlay); z-index: 200; opacity: 0; pointer-events: none; transition: opacity var(--transition-base); }
+.notif-overlay.show { opacity: 1; pointer-events: auto; }
+.notif-panel {
+  position: fixed; top: 0; left: 0; width: 380px; max-width: 90vw; height: 100vh;
+  background: var(--bg-surface); z-index: 201; transform: translateX(-100%);
+  transition: transform var(--transition-slow); box-shadow: var(--shadow-2xl);
+  display: flex; flex-direction: column;
+}
+.notif-panel.show { transform: translateX(0); }
+.notif-panel-header {
+  padding: 24px; border-bottom: 1px solid var(--border-light);
+  display: flex; align-items: center; justify-content: space-between;
+}
+.notif-panel-header h3 { font-size: 18px; font-weight: 800; }
+.notif-panel-body { flex: 1; overflow-y: auto; padding: 16px; }
+.notif-item {
+  padding: 16px; border-radius: var(--radius-md); margin-bottom: 8px;
+  border: 1px solid var(--border-light); transition: var(--transition-fast);
+}
+.notif-item:hover { background: var(--primary-50); }
+.notif-item.unread { background: var(--primary-50); border-color: var(--primary-200); }
+.notif-item .notif-msg { font-size: 14px; font-weight: 600; color: var(--text-primary); line-height: 1.6; }
+.notif-item .notif-time { font-size: 12px; color: var(--text-muted); margin-top: 6px; font-family: var(--font-en); }
+
+/* ═══ Spinner ═══ */
+.spinner { width: 20px; height: 20px; border: 3px solid rgba(255,255,255,0.3); border-top-color: #fff; border-radius: 50%; animation: spin 0.8s linear infinite; display: inline-block; }
 @keyframes spin { to{transform:rotate(360deg)} }
 
-/* لوحة الإشعارات */
-.notif-panel-box { background:var(--card); border:1px solid var(--border); border-radius:16px; box-shadow:0 20px 60px rgba(0,0,0,0.5); overflow:hidden; }
-.notif-item { padding:14px 18px; border-bottom:1px solid var(--border); transition:var(--transition); }
-.notif-item:hover { background:var(--table-hover); }
-.notif-item.unread { background:var(--primary-glow); }
+/* ═══ Notice Bar ═══ */
+.notice-bar {
+  background: linear-gradient(135deg, rgba(245,158,11,0.08), rgba(239,68,68,0.04));
+  border: 1px solid rgba(245,158,11,0.2); border-radius: var(--radius-xl);
+  padding: 18px 24px; display: flex; align-items: center; justify-content: space-between;
+  flex-wrap: wrap; gap: 16px; margin-bottom: 24px;
+}
+.notice-bar .notice-content { display: flex; align-items: center; gap: 12px; }
+.notice-bar .notice-icon { font-size: 22px; color: var(--warning); }
+.notice-bar .notice-text .title { font-size: 14px; font-weight: 800; color: var(--text-primary); }
+.notice-bar .notice-text .desc { font-size: 13px; font-weight: 600; color: var(--text-muted); margin-top: 2px; }
+.btn-whatsapp {
+  display: inline-flex; align-items: center; gap: 8px; padding: 10px 20px;
+  background: #25d366; color: white; border-radius: var(--radius-md);
+  font-size: 13px; font-weight: 800; text-decoration: none;
+  box-shadow: 0 4px 15px rgba(37,211,102,0.3); transition: var(--transition-fast);
+}
+.btn-whatsapp:hover { background: #128c7e; transform: translateY(-2px); }
+
+/* ═══ Responsive ═══ */
+@media (max-width: 768px) {
+  .leave-form-grid { grid-template-columns: 1fr; }
+  .navbar { padding: 0 16px; }
+  .nav-user-badge span { display: none; }
+  .main-content { padding: 24px 16px; }
+  .card-body { padding: 20px; }
+  .stats-grid { grid-template-columns: 1fr; }
+  .notice-bar { flex-direction: column; align-items: flex-start; }
+}
+@media (max-width: 480px) {
+  .nav-brand-text { font-size: 15px; }
+  .nav-brand-text small { display: none; }
+  .btn-stats-toggle { width: 100%; justify-content: center; font-size: 14px; padding: 12px 20px; }
+}
 </style>
 </head>
 <body>
 
+<div class="bg-orbs"><div class="orb"></div><div class="orb"></div><div class="orb"></div></div>
+
 <?php if (!isPatientLoggedIn()): ?>
+<!-- ═══════════ صفحة تسجيل الدخول ═══════════ -->
 <div class="login-page">
+  <div class="login-particles">
+    <?php for($i=0;$i<20;$i++): ?><span style="left:<?=rand(0,100)?>%;animation-delay:<?=rand(0,60)/10?>s;animation-duration:<?=rand(40,80)/10?>s"></span><?php endfor; ?>
+  </div>
   <div class="login-card">
-    <div class="login-icon">🏥</div>
+    <div class="login-logo"><i class="fas fa-hospital-user"></i></div>
     <h2>بوابة المرضى</h2>
-    <p class="subtitle">Patient Portal — سجّل دخولك للوصول إلى ملفك الطبي</p>
-
-    <?php if (!empty($_GET['disabled'])): ?>
-    <div class="alert alert-danger">⚠️ تم تعطيل حسابك. يرجى التواصل مع الإدارة.</div>
-    <?php endif; ?>
-
+    <p class="subtitle">Patient Portal - Seha Platform</p>
     <?php if (!empty($loginError)): ?>
-    <div class="alert alert-danger">⚠️ <?= htmlspecialchars($loginError) ?></div>
+      <div class="login-alert"><i class="fas fa-exclamation-circle"></i> <?= htmlspecialchars($loginError) ?></div>
     <?php endif; ?>
-
-    <form method="POST" action="user.php">
+    <?php if (isset($_GET['disabled'])): ?>
+      <div class="login-alert"><i class="fas fa-ban"></i> تم تعطيل حسابك. يرجى التواصل مع الإدارة.</div>
+    <?php endif; ?>
+    <form method="POST" autocomplete="off">
       <input type="hidden" name="action" value="patient_login">
       <?= patient_csrf_input() ?>
       <div class="form-group">
-        <label for="username">اسم المستخدم</label>
-        <input type="text" id="username" name="username" class="form-control"
-               placeholder="أدخل اسم المستخدم" autocomplete="username" required
-               value="<?= htmlspecialchars($_POST['username'] ?? '') ?>">
+        <label><i class="fas fa-user"></i> اسم المستخدم</label>
+        <input type="text" name="username" class="form-control" placeholder="أدخل اسم المستخدم" required autocomplete="username">
       </div>
       <div class="form-group">
-        <label for="password">كلمة المرور</label>
-        <input type="password" id="password" name="password" class="form-control"
-               placeholder="أدخل كلمة المرور" autocomplete="current-password" required>
+        <label><i class="fas fa-lock"></i> كلمة المرور</label>
+        <input type="password" name="password" class="form-control" placeholder="أدخل كلمة المرور" required autocomplete="current-password">
       </div>
-      <button type="submit" class="btn btn-primary btn-full" style="margin-top:10px;">
-        🔐 تسجيل الدخول
-      </button>
+      <button type="submit" class="btn-login"><i class="fas fa-sign-in-alt"></i> تسجيل الدخول</button>
     </form>
-    <p style="text-align:center;margin-top:24px;font-size:13px;color:var(--text-muted);font-weight:600;">
-      للحصول على حساب، يرجى التواصل مع الإدارة
-    </p>
   </div>
 </div>
 
 <?php else: ?>
-<nav class="navbar">
-  <div class="brand">
-    <div class="brand-icon">🏥</div>
-    <span>بوابة المرضى</span>
+<!-- ═══════════ لوحة التحكم الرئيسية ═══════════ -->
+<div class="toast-container" id="toastContainer"></div>
+
+<!-- Notification Panel -->
+<div class="notif-overlay" id="notifOverlay" onclick="toggleNotifPanel(false)"></div>
+<div class="notif-panel" id="notifPanel">
+  <div class="notif-panel-header">
+    <h3><i class="fas fa-bell"></i> الإشعارات</h3>
+    <button class="nav-btn" onclick="toggleNotifPanel(false)" style="border:none;background:none;font-size:20px;cursor:pointer"><i class="fas fa-times"></i></button>
   </div>
-  
-  <div class="user-actions">
-    <button id="themeToggleBtn" class="btn-icon-nav" onclick="toggleTheme()" title="تبديل المظهر">
-      <span id="themeIcon">☀️</span>
-    </button>
+  <div class="notif-panel-body" id="notifList">
+    <div class="empty-state" style="padding:40px 10px"><i class="fas fa-bell-slash empty-icon" style="font-size:40px"></i><p>لا توجد إشعارات</p></div>
+  </div>
+</div>
 
-    <div style="position:relative;">
-      <button id="notifBell" class="btn-icon-nav" onclick="toggleNotifPanel()" title="الإشعارات" style="position:relative;">
-        🔔
-        <span id="notifBadge" style="display:none;position:absolute;top:-4px;right:-4px;background:#ef4444;color:#fff;border-radius:50%;width:18px;height:18px;font-size:11px;font-weight:700;align-items:center;justify-content:center;"></span>
-      </button>
-      
-      <div id="notifPanel" class="notif-panel-box" style="display:none;position:absolute;top:54px;left:0;width:340px;z-index:999;">
-        <div style="padding:14px 18px;background:linear-gradient(135deg,#1e40af,#3b82f6);color:#fff;display:flex;align-items:center;justify-content:space-between;">
-          <span style="font-weight:700;font-size:14px;">🔔 الإشعارات</span>
-          <button onclick="markAllRead()" style="background:rgba(255,255,255,0.2);border:none;color:#fff;padding:4px 10px;border-radius:8px;font-size:12px;cursor:pointer;font-family:'Cairo',sans-serif;font-weight:700;">تحديد كمقروء</button>
-        </div>
-        <div id="notifList" style="max-height:320px;overflow-y:auto;">
-          <div style="text-align:center;padding:24px;color:var(--text-muted);font-size:13px;font-weight:600;">جاري التحميل...</div>
-        </div>
-      </div>
+<!-- Navbar -->
+<nav class="navbar">
+  <div class="nav-brand">
+    <div class="nav-brand-icon"><i class="fas fa-heartbeat"></i></div>
+    <div class="nav-brand-text">بوابة المرضى<small>Seha Patient Portal</small></div>
+  </div>
+  <div class="nav-actions">
+    <div class="nav-user-badge">
+      <div class="avatar"><?= mb_substr($_SESSION['patient_display_name'] ?? 'م', 0, 1) ?></div>
+      <span><?= htmlspecialchars($_SESSION['patient_display_name'] ?? '') ?></span>
     </div>
-
-    <div class="user-badge">
-      <span>👤</span>
-      <span><?= htmlspecialchars($_SESSION['patient_display_name']) ?></span>
-    </div>
-
-    <form method="POST" action="user.php" style="margin:0;">
-      <input type="hidden" name="action" value="logout">
-      <button type="submit" class="btn-logout">تسجيل الخروج</button>
-    </form>
+    <button class="nav-btn" id="btnThemeToggle" onclick="toggleTheme()" title="تبديل المظهر"><i class="fas fa-moon"></i></button>
+    <button class="nav-btn" onclick="toggleNotifPanel(true)" title="الإشعارات"><i class="fas fa-bell"></i><span class="badge-dot" id="notifDot" style="display:none"></span></button>
+    <form method="POST" style="display:inline"><input type="hidden" name="action" value="logout"><button type="submit" class="btn-logout-nav"><i class="fas fa-sign-out-alt"></i> خروج</button></form>
   </div>
 </nav>
 
-<div class="main-content">
+<main class="main-content">
+  <!-- Stats Toggle -->
+  <div class="stats-toggle-wrap">
+    <button class="btn-stats-toggle active" id="btnToggleStats" onclick="toggleStats()">
+      <i class="fas fa-chart-pie"></i> إحصائيات الحساب <i class="fas fa-chevron-up"></i>
+    </button>
+  </div>
 
-  <div class="stats-grid">
-    <div class="stat-card">
-      <div class="stat-icon blue">📋</div>
-      <div class="stat-info">
-        <div class="num"><?= $allowedDays ?></div>
-        <div class="label">إجمالي الأيام المسموحة</div>
+  <!-- Stats Grid -->
+  <div class="stats-container" id="statsContainer">
+    <div class="stats-grid">
+      <div class="stat-card teal">
+        <div class="stat-icon teal"><i class="fas fa-calendar-check"></i></div>
+        <div class="stat-info"><div class="stat-num"><?= $allowedDays ?></div><div class="stat-label">الأيام المسموحة</div></div>
       </div>
-    </div>
-    <div class="stat-card">
-      <div class="stat-icon green">✅</div>
-      <div class="stat-info">
-        <div class="num"><?= $remainingDays ?></div>
-        <div class="label">الأيام المتبقية الحالية</div>
+      <div class="stat-card blue">
+        <div class="stat-icon blue"><i class="fas fa-file-medical"></i></div>
+        <div class="stat-info"><div class="stat-num"><?= count($myLeaves) ?></div><div class="stat-label">عدد الإجازات</div></div>
       </div>
-    </div>
-    <div class="stat-card">
-      <div class="stat-icon orange">📅</div>
-      <div class="stat-info">
-        <div class="num"><?= $usedDays ?></div>
-        <div class="label">الأيام المستخدمة</div>
+      <div class="stat-card amber">
+        <div class="stat-icon amber"><i class="fas fa-hourglass-half"></i></div>
+        <div class="stat-info"><div class="stat-num"><?= $usedDays ?></div><div class="stat-label">الأيام المستخدمة</div></div>
       </div>
-    </div>
-    <div class="stat-card">
-      <div class="stat-icon red">📄</div>
-      <div class="stat-info">
-        <div class="num"><?= count($myLeaves) ?></div>
-        <div class="label">إجمالي الإجازات المُصدرة</div>
+      <div class="stat-card rose">
+        <div class="stat-icon rose"><i class="fas fa-battery-quarter"></i></div>
+        <div class="stat-info"><div class="stat-num"><?= $remainingDays ?></div><div class="stat-label">الأيام المتبقية</div></div>
       </div>
     </div>
   </div>
 
-  <?php if ($patientData): ?>
+  <!-- Patient Info Card -->
   <div class="card">
     <div class="card-header">
-      <h3>👤 بياناتي الشخصية والوظيفية</h3>
-      <span style="font-size:12px;color:var(--text-muted);font-weight:700;background:var(--input-bg);padding:4px 12px;border-radius:8px;">للعرض فقط</span>
+      <h3><i class="fas fa-id-card"></i> بيانات المريض</h3>
     </div>
     <div class="card-body">
-      <div class="patient-info-grid">
-        <div class="info-field">
-          <div class="field-label">الاسم بالعربية</div>
-          <div class="field-value"><?= htmlspecialchars($patientData['name_ar'] ?? $patientData['name'] ?? '') ?></div>
-          <?php if (!empty($patientData['name_en'])): ?>
-          <div class="field-value-en"><?= htmlspecialchars($patientData['name_en']) ?></div>
-          <?php endif; ?>
+      <div class="notice-bar">
+        <div class="notice-content">
+          <i class="fas fa-info-circle notice-icon"></i>
+          <div class="notice-text">
+            <span class="title">البيانات ثابتة ولا يمكن تعديلها</span>
+            <span class="desc">لتعديل البيانات يرجى التواصل مع الإدارة</span>
+          </div>
         </div>
-        <div class="info-field">
-          <div class="field-label">رقم الهوية / الإقامة</div>
-          <div class="field-value" style="direction:ltr;text-align:right;"><?= htmlspecialchars($patientData['identity_number'] ?? '') ?></div>
-        </div>
-        <?php if (!empty($patientData['nationality_ar'])): ?>
-        <div class="info-field">
-          <div class="field-label">الجنسية</div>
-          <div class="field-value"><?= htmlspecialchars($patientData['nationality_ar']) ?></div>
-          <?php if (!empty($patientData['nationality_en'])): ?><div class="field-value-en"><?= htmlspecialchars($patientData['nationality_en']) ?></div><?php endif; ?>
-        </div>
-        <?php endif; ?>
-        <?php if (!empty($patientData['employer_ar'])): ?>
-        <div class="info-field">
-          <div class="field-label">جهة العمل</div>
-          <div class="field-value"><?= htmlspecialchars($patientData['employer_ar']) ?></div>
-          <?php if (!empty($patientData['employer_en'])): ?><div class="field-value-en"><?= htmlspecialchars($patientData['employer_en']) ?></div><?php endif; ?>
-        </div>
-        <?php endif; ?>
-        <?php if (!empty($patientData['phone'])): ?>
-        <div class="info-field">
-          <div class="field-label">رقم الجوال</div>
-          <div class="field-value" style="direction:ltr;text-align:right;"><?= htmlspecialchars($patientData['phone']) ?></div>
-        </div>
-        <?php endif; ?>
+        <a href="https://wa.me/966500000000" target="_blank" class="btn-whatsapp"><i class="fab fa-whatsapp"></i> تواصل معنا</a>
       </div>
-
-      <div style="margin-top:24px;">
-        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;">
-          <span style="font-size:14px;font-weight:700;color:var(--text);">حصة الإجازات المرضية المستهلكة</span>
-          <span style="font-size:14px;font-weight:800;color:var(--primary);"><?= $usedDays ?> / <?= $allowedDays ?> يوم</span>
+      <?php if ($patientData): ?>
+      <div class="patient-info-grid">
+        <div class="info-field"><span class="field-label">الاسم بالعربي</span><span class="field-value"><?= htmlspecialchars($patientData['name_ar'] ?? '') ?></span></div>
+        <div class="info-field"><span class="field-label">الاسم بالإنجليزي</span><span class="field-value" style="direction:ltr;text-align:left;font-family:var(--font-en)"><?= htmlspecialchars($patientData['name_en'] ?? '') ?></span></div>
+        <div class="info-field"><span class="field-label">رقم الهوية / الإقامة</span><span class="field-value" style="font-family:var(--font-en)"><?= htmlspecialchars($patientData['identity_number'] ?? '') ?></span></div>
+        <div class="info-field"><span class="field-label">الجنسية</span><span class="field-value"><?= htmlspecialchars($patientData['nationality_ar'] ?? '') ?></span><span class="field-value-en"><?= htmlspecialchars($patientData['nationality_en'] ?? '') ?></span></div>
+        <div class="info-field"><span class="field-label">جهة العمل</span><span class="field-value"><?= htmlspecialchars($patientData['employer_ar'] ?? '') ?></span><span class="field-value-en"><?= htmlspecialchars($patientData['employer_en'] ?? '') ?></span></div>
+      </div>
+      <!-- Quota Bar -->
+      <div class="quota-section">
+        <div class="quota-header">
+          <span class="label">حصة الأيام</span>
+          <span class="value"><?= $usedDays ?> / <?= $allowedDays ?></span>
         </div>
         <?php
-          $pct = $allowedDays > 0 ? min(100, round($usedDays / $allowedDays * 100)) : 0;
-          $barClass = $pct >= 90 ? 'danger' : ($pct >= 60 ? 'warning' : '');
+          $pct = $allowedDays > 0 ? round(($usedDays / $allowedDays) * 100) : 0;
+          $barClass = $pct > 80 ? 'danger' : ($pct > 60 ? 'warning' : '');
         ?>
-        <div class="quota-bar-wrap">
-          <div class="quota-bar <?= $barClass ?>" style="width:<?= $pct ?>%"></div>
+        <div class="quota-bar-track"><div class="quota-bar-fill <?= $barClass ?>" style="width:<?= $pct ?>%"></div></div>
+        <div class="days-summary">
+          <div class="day-item used"><span class="dot"></span> مستخدمة: <?= $usedDays ?></div>
+          <div class="day-item remaining"><span class="dot"></span> متبقية: <?= $remainingDays ?></div>
+          <div class="day-item total"><span class="dot"></span> الإجمالي: <?= $allowedDays ?></div>
         </div>
-        <div class="days-counter">
-          <span>مستخدم: <span class="used"><?= $usedDays ?></span></span>
-          <span>•</span>
-          <span>متبقي: <span class="remaining"><?= $remainingDays ?></span></span>
-          <span>•</span>
-          <span>المسموح الكلي: <span class="total"><?= $allowedDays ?></span></span>
-        </div>
-      </div>
-    </div>
-  </div>
-  <?php endif; ?>
-
-  <?php if ($remainingDays > 0): ?>
-  <div class="card">
-    <div class="card-header">
-      <h3>📝 إصدار إجازة مرضية جديدة (فورية)</h3>
-      <span style="font-size:13px;background:var(--success-bg);color:var(--success-text);padding:6px 14px;border-radius:50px;font-weight:800;">
-        الرصيد المتاح: <?= $remainingDays ?> يوم
-      </span>
-    </div>
-    <div class="card-body">
-      <form id="leaveForm">
-        <div class="leave-form-grid">
-
-          <div>
-            <label class="form-label">🏥 المستشفى / المنشأة الطبية <span style="color:var(--danger)">*</span></label>
-            <select class="form-select" id="hospitalSelect" name="hospital_id" required onchange="loadDoctors(this.value)">
-              <option value="">-- يرجى اختيار المنشأة --</option>
-              <?php foreach ($hospitals as $h): ?>
-              <option value="<?= $h['id'] ?>"><?= htmlspecialchars($h['name_ar']) ?></option>
-              <?php endforeach; ?>
-            </select>
-          </div>
-
-          <div>
-            <label class="form-label">👨‍⚕️ الطبيب المعالج <span style="color:var(--danger)">*</span></label>
-            <select class="form-select" id="doctorSelect" name="doctor_id" required>
-              <option value="">-- اختر المستشفى أولاً --</option>
-            </select>
-          </div>
-
-          <div>
-            <label class="form-label">📅 تاريخ بداية الإجازة <span style="color:var(--danger)">*</span></label>
-            <input type="date" class="form-control" id="startDate" name="start_date" required
-                   min="<?= date('Y-m-d') ?>" onchange="calcDays()">
-          </div>
-
-          <div>
-            <label class="form-label">📅 تاريخ نهاية الإجازة <span style="color:var(--danger)">*</span></label>
-            <input type="date" class="form-control" id="endDate" name="end_date" required
-                   min="<?= date('Y-m-d') ?>" onchange="calcDays()">
-          </div>
-
-          <div>
-            <label class="form-label">🔢 المدة المحسوبة</label>
-            <input type="number" class="form-control" id="daysDisplay" readonly
-                   placeholder="تُحسب برمجياً وبشكل تلقائي" style="background:var(--input-bg);cursor:not-allowed;font-weight:700;">
-            <input type="hidden" id="daysCount" name="days_count">
-            <div id="daysWarning" style="display:none;margin-top:10px;" class="alert alert-warning"></div>
-          </div>
-
-          <div>
-            <label class="form-label">🕐 توقيت التوثيق والإصدار</label>
-            <div class="time-mode-tabs">
-              <button type="button" class="time-tab active" onclick="setTimeMode('auto',this)">تلقائي</button>
-              <button type="button" class="time-tab" onclick="setTimeMode('random',this)">عشوائي</button>
-              <button type="button" class="time-tab" onclick="setTimeMode('manual',this)">تحديد يدوي</button>
-            </div>
-            <input type="hidden" id="timeModeInput" name="time_mode" value="auto">
-            <div id="manualTimeFields" style="display:none;">
-              <div style="display:flex;gap:10px;align-items:center;">
-                <input type="time" class="form-control" id="manualTimeInput" name="manual_time" style="flex:1;">
-                <select class="form-select" name="manual_period" style="width:110px;">
-                  <option value="AM">صباحاً</option>
-                  <option value="PM">مساءً</option>
-                </select>
-              </div>
-            </div>
-            <div id="autoTimeInfo" style="font-size:12px;color:var(--text-muted);margin-top:6px;font-weight:600;">
-              ⏰ سيُعتمد التوقيت الفعلي للحظة الضغط على الزر
-            </div>
-          </div>
-
-        </div>
-
-        <div style="margin-top:28px;display:flex;justify-content:flex-end;">
-          <button type="button" class="btn btn-primary" onclick="createLeave()" id="submitBtn" style="padding:14px 32px;font-size:16px;">
-            📄 اعتماد وإصدار الإجازة الفورية
-          </button>
-        </div>
-      </form>
-    </div>
-  </div>
-  <?php else: ?>
-  <div class="card">
-    <div class="card-body">
-      <div class="empty-state">
-        <div class="empty-icon">🚫</div>
-        <h4>تعذر إصدار إجازات إضافية</h4>
-        <p style="margin-bottom:24px;max-width:600px;margin-left:auto;margin-right:auto;">
-          <?php if ($allowedDays === 0): ?>
-            لم يتم تخصيص رصيد أيام لحسابك حتى الآن. يرجى التواصل مع الإدارة الطبية لتفعيل رصيدك.
-          <?php else: ?>
-            لقد استنفدت كامل رصيدك المسموح به (<?= $allowedDays ?> يوم). لطلب تمديد أو استثناء يرجى التواصل معنا.
-          <?php endif; ?>
-        </p>
-        <a href="https://wa.me/966573436223" target="_blank"
-           style="display:inline-flex;align-items:center;gap:10px;background:linear-gradient(135deg,#25d366,#128c7e);color:#fff;padding:14px 32px;border-radius:14px;font-size:16px;font-weight:800;text-decoration:none;box-shadow:0 8px 24px rgba(37,211,102,0.3);transition:var(--transition);"
-           onmouseover="this.style.transform='translateY(-3px)'"
-           onmouseout="this.style.transform='translateY(0)'">
-          <svg xmlns="http://www.w3.org/2000/svg" width="22" height="22" viewBox="0 0 24 24" fill="white">
-            <path d="M17.472 14.382c-.297-.149-1.758-.867-2.03-.967-.273-.099-.471-.148-.67.15-.197.297-.767.966-.94 1.164-.173.199-.347.223-.644.075-.297-.15-1.255-.463-2.39-1.475-.883-.788-1.48-1.761-1.653-2.059-.173-.297-.018-.458.13-.606.134-.133.298-.347.446-.52.149-.174.198-.298.298-.497.099-.198.05-.371-.025-.52-.075-.149-.669-1.612-.916-2.207-.242-.579-.487-.5-.669-.51-.173-.008-.371-.01-.57-.01-.198 0-.52.074-.792.372-.272.297-1.04 1.016-1.04 2.479 0 1.462 1.065 2.875 1.213 3.074.149.198 2.096 3.2 5.077 4.487.709.306 1.262.489 1.694.625.712.227 1.36.195 1.871.118.571-.085 1.758-.719 2.006-1.413.248-.694.248-1.289.173-1.413-.074-.124-.272-.198-.57-.347m-5.421 7.403h-.004a9.87 9.87 0 01-5.031-1.378l-.361-.214-3.741.982.998-3.648-.235-.374a9.86 9.86 0 01-1.51-5.26c.001-5.45 4.436-9.884 9.888-9.884 2.64 0 5.122 1.03 6.988 2.898a9.825 9.825 0 012.893 6.994c-.003 5.45-4.437 9.884-9.885 9.884m8.413-18.297A11.815 11.815 0 0012.05 0C5.495 0 .16 5.335.157 11.892c0 2.096.547 4.142 1.588 5.945L.057 24l6.305-1.654a11.882 11.882 0 005.683 1.448h.005c6.554 0 11.89-5.335 11.893-11.893a11.821 11.821 0 00-3.48-8.413z"/>
-          </svg>
-          تواصل مع الدعم الفني (واتساب)
-        </a>
-      </div>
-    </div>
-  </div>
-  <?php endif; ?>
-
-  <div class="card">
-    <div class="card-header">
-      <h3>📋 السجل التاريخي لإجازاتي المرضية</h3>
-      <span style="font-size:13px;color:var(--text-muted);font-weight:700;"><?= count($myLeaves) ?> وثيقة معتمدة</span>
-    </div>
-    <div class="card-body" style="padding:0;">
-      <?php if (empty($myLeaves)): ?>
-      <div class="empty-state">
-        <div class="empty-icon">📭</div>
-        <h4>لا توجد وثائق في السجل</h4>
-        <p>لم تقم بإصدار أي إجازة مرضية حتى الآن.</p>
-      </div>
-      <?php else: ?>
-      <div style="overflow-x:auto;">
-        <table class="leaves-table">
-          <thead>
-            <tr>
-              <th>#</th>
-              <th>الرمز الموحد</th>
-              <th>المنشأة الطبية</th>
-              <th>الطبيب المعالج</th>
-              <th>من تاريخ</th>
-              <th>إلى تاريخ</th>
-              <th>المدة</th>
-              <th>توقيت الإصدار</th>
-              <th>الوثيقة (PDF)</th>
-            </tr>
-          </thead>
-          <tbody>
-            <?php foreach ($myLeaves as $i => $lv): ?>
-            <tr>
-              <td style="color:var(--text-muted);font-size:13px;"><?= $i + 1 ?></td>
-              <td style="font-weight:800;color:var(--primary);font-size:13px;direction:ltr;text-align:right;"><?= htmlspecialchars($lv['service_code'] ?? '') ?></td>
-              <td style="font-weight:700;"><?= htmlspecialchars($lv['h_name_ar'] ?? '') ?></td>
-              <td>
-                <div style="font-weight:700;color:var(--text);"><?= htmlspecialchars($lv['d_name_ar'] ?? '') ?></div>
-                <div style="font-size:11px;color:var(--text-muted);font-weight:600;"><?= htmlspecialchars($lv['d_title_ar'] ?? '') ?></div>
-              </td>
-              <td style="direction:ltr;text-align:right;font-family:'Inter',sans-serif;"><?= fmtDateUser($lv['start_date']) ?></td>
-              <td style="direction:ltr;text-align:right;font-family:'Inter',sans-serif;"><?= fmtDateUser($lv['end_date']) ?></td>
-              <td>
-                <span style="background:var(--primary-glow);color:var(--primary);padding:4px 12px;border-radius:50px;font-weight:800;font-size:13px;">
-                  <?= $lv['days_count'] ?> يوم
-                </span>
-              </td>
-              <td style="font-size:13px;direction:ltr;text-align:right;font-family:'Inter',sans-serif;">
-                <?= htmlspecialchars($lv['issue_time'] ?? '') ?>
-                <?= $lv['issue_period'] === 'AM' ? 'ص' : ($lv['issue_period'] === 'PM' ? 'م' : '') ?>
-              </td>
-              <td>
-                <a href="user.php?action=generate_pdf&leave_id=<?= $lv['id'] ?>&pdf_mode=download"
-                   class="btn btn-outline btn-sm">
-                  📄 تحميل PDF
-                </a>
-              </td>
-            </tr>
-            <?php endforeach; ?>
-          </tbody>
-        </table>
       </div>
       <?php endif; ?>
     </div>
   </div>
 
-</div><div class="toast-container" id="toastContainer"></div>
+  <!-- Create Leave Card -->
+  <div class="card">
+    <div class="card-header">
+      <h3><i class="fas fa-plus-circle"></i> إنشاء إجازة مرضية جديدة</h3>
+    </div>
+    <div class="card-body">
+      <form id="leaveForm" onsubmit="return submitLeave(event)">
+        <div class="leave-form-grid">
+          <div class="form-group">
+            <label class="form-label">المستشفى</label>
+            <select class="form-select" id="hospitalSelect" name="hospital_id" required onchange="loadDoctors(this.value)">
+              <option value="">-- اختر المستشفى --</option>
+              <?php foreach ($hospitals as $h): ?>
+                <option value="<?= $h['id'] ?>"><?= htmlspecialchars($h['name_ar']) ?></option>
+              <?php endforeach; ?>
+            </select>
+          </div>
+          <div class="form-group">
+            <label class="form-label">الطبيب</label>
+            <select class="form-select" id="doctorSelect" name="doctor_id" required disabled>
+              <option value="">-- اختر المستشفى أولاً --</option>
+            </select>
+          </div>
+          <div class="form-group">
+            <label class="form-label">تاريخ البداية</label>
+            <input type="date" class="form-input" id="startDate" name="start_date" required onchange="calcDays()">
+          </div>
+          <div class="form-group">
+            <label class="form-label">تاريخ النهاية</label>
+            <input type="date" class="form-input" id="endDate" name="end_date" required onchange="calcDays()">
+          </div>
+          <div class="form-group">
+            <label class="form-label">عدد الأيام</label>
+            <input type="number" class="form-input" id="daysCount" name="days_count" min="1" readonly style="background:var(--primary-50);font-weight:900;color:var(--primary)">
+          </div>
+          <div class="form-group">
+            <label class="form-label">وقت الإصدار</label>
+            <div class="time-tabs">
+              <button type="button" class="time-tab active" data-mode="auto" onclick="setTimeMode('auto',this)">تلقائي</button>
+              <button type="button" class="time-tab" data-mode="random" onclick="setTimeMode('random',this)">عشوائي</button>
+              <button type="button" class="time-tab" data-mode="manual" onclick="setTimeMode('manual',this)">يدوي</button>
+            </div>
+            <input type="hidden" name="time_mode" id="timeMode" value="auto">
+            <div id="manualTimeWrap" style="display:none;margin-top:10px;display:flex;gap:10px">
+              <input type="time" class="form-input" name="manual_time" id="manualTime" style="flex:1">
+              <select class="form-select" name="manual_period" id="manualPeriod" style="width:auto;min-width:80px">
+                <option value="AM">AM</option>
+                <option value="PM">PM</option>
+              </select>
+            </div>
+          </div>
+        </div>
+        <div style="margin-top:28px;text-align:center">
+          <button type="submit" class="btn-submit" id="btnSubmitLeave">
+            <i class="fas fa-paper-plane"></i> إنشاء الإجازة
+          </button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <!-- Leaves Table Card -->
+  <div class="card">
+    <div class="card-header">
+      <h3><i class="fas fa-list-alt"></i> سجل الإجازات المرضية</h3>
+      <span style="font-size:13px;font-weight:700;color:var(--text-muted)"><?= count($myLeaves) ?> إجازة</span>
+    </div>
+    <div class="card-body" style="padding:0">
+      <?php if (empty($myLeaves)): ?>
+        <div class="empty-state">
+          <i class="fas fa-folder-open empty-icon"></i>
+          <h4>لا توجد إجازات بعد</h4>
+          <p>قم بإنشاء أول إجازة مرضية من النموذج أعلاه</p>
+        </div>
+      <?php else: ?>
+        <div class="table-responsive">
+          <table class="leaves-table">
+            <thead><tr>
+              <th>رمز الإجازة</th><th>المستشفى</th><th>الطبيب</th><th>المدة</th><th>تاريخ البداية</th><th>الإجراء</th>
+            </tr></thead>
+            <tbody>
+            <?php foreach ($myLeaves as $lv): ?>
+              <tr>
+                <td style="font-family:var(--font-en);font-weight:800;color:var(--primary)"><?= htmlspecialchars($lv['service_code'] ?? '') ?></td>
+                <td><?= htmlspecialchars($lv['h_name_ar'] ?? '') ?></td>
+                <td><?= htmlspecialchars($lv['d_name_ar'] ?? '') ?></td>
+                <td style="font-family:var(--font-en);font-weight:800"><?= (int)$lv['days_count'] ?> يوم</td>
+                <td style="font-family:var(--font-en)"><?= fmtDateUser($lv['start_date'] ?? '') ?></td>
+                <td><button class="btn-view-leave" onclick="viewLeave(<?= (int)$lv['id'] ?>)"><i class="fas fa-eye"></i> عرض</button></td>
+              </tr>
+            <?php endforeach; ?>
+            </tbody>
+          </table>
+        </div>
+      <?php endif; ?>
+    </div>
+  </div>
+</main>
+<?php endif; ?>
 
 <script>
-const MAX_DAYS = <?= $remainingDays ?>;
-
-// ================= إدارة الوضع الليلي (Dark Mode) =================
+// ═══ Theme Toggle ═══
 function toggleTheme() {
-  const root = document.documentElement;
-  const current = root.getAttribute('data-theme');
-  const newTheme = current === 'dark' ? 'light' : 'dark';
-  
-  root.setAttribute('data-theme', newTheme);
-  localStorage.setItem('theme', newTheme);
-  updateThemeIcon(newTheme);
+  const html = document.documentElement;
+  const current = html.getAttribute('data-theme');
+  const next = current === 'dark' ? 'light' : 'dark';
+  html.setAttribute('data-theme', next);
+  localStorage.setItem('seha-theme', next);
+  const icon = document.querySelector('#btnThemeToggle i');
+  if (icon) icon.className = next === 'dark' ? 'fas fa-sun' : 'fas fa-moon';
+}
+(function(){
+  const t = localStorage.getItem('seha-theme') || 'light';
+  const icon = document.querySelector('#btnThemeToggle i');
+  if (icon) icon.className = t === 'dark' ? 'fas fa-sun' : 'fas fa-moon';
+})();
+
+// ═══ Stats Toggle ═══
+function toggleStats() {
+  const container = document.getElementById('statsContainer');
+  const btn = document.getElementById('btnToggleStats');
+  if (!container || !btn) return;
+  container.classList.toggle('collapsed');
+  btn.classList.toggle('active');
 }
 
-function updateThemeIcon(theme) {
-  const icon = document.getElementById('themeIcon');
-  if (icon) { icon.textContent = theme === 'dark' ? '🌙' : '☀️'; }
+// ═══ Notifications ═══
+function toggleNotifPanel(show) {
+  document.getElementById('notifOverlay').classList.toggle('show', show);
+  document.getElementById('notifPanel').classList.toggle('show', show);
+  if (show) loadNotifications();
+}
+function loadNotifications() {
+  fetch('user.php?action=get_user_notifications')
+    .then(r => r.json()).then(data => {
+      if (!data.success) return;
+      const list = document.getElementById('notifList');
+      const dot = document.getElementById('notifDot');
+      if (data.unread_count > 0) { dot.style.display = 'block'; } else { dot.style.display = 'none'; }
+      if (data.notifications.length === 0) {
+        list.innerHTML = '<div class="empty-state" style="padding:40px 10px"><i class="fas fa-bell-slash" style="font-size:40px;color:var(--text-muted)"></i><p style="margin-top:10px">لا توجد إشعارات</p></div>';
+        return;
+      }
+      list.innerHTML = data.notifications.map(n => `<div class="notif-item ${n.is_read?'':'unread'}"><div class="notif-msg">${n.message}</div><div class="notif-time">${n.created_at}</div></div>`).join('');
+      if (data.unread_count > 0) {
+        fetch('user.php?action=mark_user_notifications_read');
+        setTimeout(() => { dot.style.display = 'none'; }, 2000);
+      }
+    }).catch(() => {});
 }
 
-// ضبط الأيقونة عند التحميل
-document.addEventListener('DOMContentLoaded', () => {
-  const current = document.documentElement.getAttribute('data-theme') || 'light';
-  updateThemeIcon(current);
-});
-
-// ================= دوال التحكم بالنموذج والإرسال =================
+// ═══ Load Doctors ═══
 function loadDoctors(hospitalId) {
   const sel = document.getElementById('doctorSelect');
-  sel.innerHTML = '<option value="">جاري جلب الأطباء...</option>';
+  sel.innerHTML = '<option value="">جاري التحميل...</option>';
+  sel.disabled = true;
   if (!hospitalId) { sel.innerHTML = '<option value="">-- اختر المستشفى أولاً --</option>'; return; }
   fetch('user.php?action=get_doctors_by_hospital&hospital_id=' + hospitalId)
-    .then(r => r.json())
-    .then(data => {
-      if (data.success && data.doctors.length > 0) {
-        sel.innerHTML = '<option value="">-- يرجى اختيار الطبيب --</option>';
-        data.doctors.forEach(d => {
-          sel.innerHTML += `<option value="${d.id}">${d.name_ar} — (${d.title_ar})</option>`;
-        });
-      } else {
-        sel.innerHTML = '<option value="">لا يوجد أطباء متاحين حالياً</option>';
-      }
-    })
-    .catch(() => { sel.innerHTML = '<option value="">فشل التحميل</option>'; });
+    .then(r => r.json()).then(data => {
+      sel.disabled = false;
+      if (!data.success || !data.doctors.length) { sel.innerHTML = '<option value="">لا يوجد أطباء</option>'; return; }
+      sel.innerHTML = '<option value="">-- اختر الطبيب --</option>' + data.doctors.map(d => `<option value="${d.id}">${d.name_ar} - ${d.title_ar||''}</option>`).join('');
+    }).catch(() => { sel.innerHTML = '<option value="">خطأ في التحميل</option>'; sel.disabled = false; });
 }
 
+// ═══ Calculate Days ═══
 function calcDays() {
-  const start = document.getElementById('startDate').value;
-  const end   = document.getElementById('endDate').value;
-  const display = document.getElementById('daysDisplay');
-  const hidden  = document.getElementById('daysCount');
-  const warning = document.getElementById('daysWarning');
-  if (!start || !end) { display.value = ''; hidden.value = ''; return; }
-  const s = new Date(start), e = new Date(end);
-  if (e < s) {
-    display.value = ''; hidden.value = '';
-    warning.style.display = 'block';
-    warning.innerHTML = '⚠️ <b>خطأ:</b> تاريخ النهاية يجب أن يكون بعد تاريخ البداية.';
-    return;
+  const s = document.getElementById('startDate').value;
+  const e = document.getElementById('endDate').value;
+  if (s && e) {
+    const diff = Math.ceil((new Date(e) - new Date(s)) / 86400000) + 1;
+    document.getElementById('daysCount').value = diff > 0 ? diff : 1;
   }
-  const diff = Math.round((e - s) / (1000 * 60 * 60 * 24)) + 1;
-  display.value = diff + ' أيام';
-  hidden.value  = diff;
-  if (diff > MAX_DAYS) {
-    warning.style.display = 'block';
-    warning.innerHTML = `⚠️ <b>تنبيه:</b> المدة المطلوبة (${diff} أيام) تتجاوز الرصيد المتاح (${MAX_DAYS} يوم).`;
-  } else {
-    warning.style.display = 'none';
-  }
-  document.getElementById('endDate').min = start;
 }
 
+// ═══ Time Mode ═══
 function setTimeMode(mode, btn) {
   document.querySelectorAll('.time-tab').forEach(t => t.classList.remove('active'));
   btn.classList.add('active');
-  document.getElementById('timeModeInput').value = mode;
-  const mf = document.getElementById('manualTimeFields');
-  const ai = document.getElementById('autoTimeInfo');
-  if (mode === 'manual') { mf.style.display = 'block'; ai.style.display = 'none'; }
-  else if (mode === 'random') { mf.style.display = 'none'; ai.style.display = 'block'; ai.textContent = '🎲 سيتم توليد توقيت عشوائي ذكي خلال ساعات الدوام الرسمي'; }
-  else { mf.style.display = 'none'; ai.style.display = 'block'; ai.textContent = '⏰ سيُعتمد التوقيت الفعلي للحظة الضغط على الزر'; }
+  document.getElementById('timeMode').value = mode;
+  document.getElementById('manualTimeWrap').style.display = mode === 'manual' ? 'flex' : 'none';
 }
 
-function createLeave() {
-  const hospitalId = document.getElementById('hospitalSelect').value;
-  const doctorId   = document.getElementById('doctorSelect').value;
-  const startDate  = document.getElementById('startDate').value;
-  const endDate    = document.getElementById('endDate').value;
-  const daysCount  = document.getElementById('daysCount').value;
-
-  if (!hospitalId) { showToast('يرجى اختيار المنشأة الطبية أولاً.', 'error'); return; }
-  if (!doctorId)   { showToast('يرجى تحديد الطبيب المعالج.', 'error'); return; }
-  if (!startDate)  { showToast('تاريخ بداية الإجازة مطلوب.', 'error'); return; }
-  if (!endDate)    { showToast('تاريخ نهاية الإجازة مطلوب.', 'error'); return; }
-  if (!daysCount || parseInt(daysCount) <= 0) { showToast('يرجى ضبط التواريخ بشكل صحيح.', 'error'); return; }
-  if (parseInt(daysCount) > MAX_DAYS) { showToast(`المدة المطلوبة تتجاوز رصيدك الحالي المتبقي (${MAX_DAYS} يوم).`, 'error'); return; }
-
-  const btn = document.getElementById('submitBtn');
+// ═══ Submit Leave ═══
+function submitLeave(e) {
+  e.preventDefault();
+  const btn = document.getElementById('btnSubmitLeave');
   btn.disabled = true;
-  btn.innerHTML = '<span class="spinner"></span> جاري التوثيق والإصدار...';
-
-  const formData = new FormData(document.getElementById('leaveForm'));
-  formData.append('action', 'create_sick_leave');
-
-  fetch('user.php', { method: 'POST', body: formData })
-    .then(r => r.json())
-    .then(data => {
-      if (data.success) {
-        showToast('✅ ' + data.message + ' (الرمز: ' + data.service_code + ')', 'success');
-        
-        setTimeout(() => {
-          location.reload();
-        }, 1500);
-
-      } else {
-        showToast(data.message || 'حدث خطأ غير متوقع.', 'error');
-        btn.disabled = false;
-        btn.innerHTML = '📄 اعتماد وإصدار الإجازة الفورية';
-      }
-    })
-    .catch(() => {
-      showToast('مشكلة في الاتصال بالخادم. يرجى المحاولة لاحقاً.', 'error');
+  btn.innerHTML = '<span class="spinner"></span> جاري الإنشاء...';
+  const fd = new FormData(document.getElementById('leaveForm'));
+  fd.append('action', 'create_sick_leave');
+  fetch('user.php', { method: 'POST', body: fd })
+    .then(r => r.json()).then(data => {
       btn.disabled = false;
-      btn.innerHTML = '📄 اعتماد وإصدار الإجازة الفورية';
+      btn.innerHTML = '<i class="fas fa-paper-plane"></i> إنشاء الإجازة';
+      if (data.success) {
+        showToast(data.message, 'success');
+        setTimeout(() => location.reload(), 1500);
+      } else {
+        showToast(data.message || 'حدث خطأ', 'error');
+      }
+    }).catch(() => {
+      btn.disabled = false;
+      btn.innerHTML = '<i class="fas fa-paper-plane"></i> إنشاء الإجازة';
+      showToast('خطأ في الاتصال بالخادم', 'error');
     });
+  return false;
 }
 
-function showToast(msg, type = 'success') {
+// ═══ View Leave ═══
+function viewLeave(id) {
+  window.open('user.php?action=generate_pdf&leave_id=' + id + '&pdf_mode=preview', '_blank');
+}
+
+// ═══ Toast ═══
+function showToast(msg, type) {
   const container = document.getElementById('toastContainer');
-  const icons = { success: '✨', error: '❌', warning: '⚠️' };
+  if (!container) return;
+  const icons = { success: 'fa-check-circle', error: 'fa-times-circle', warning: 'fa-exclamation-triangle' };
   const toast = document.createElement('div');
-  toast.className = `toast ${type}`;
-  toast.innerHTML = `<span style="font-size:18px;">${icons[type] || '💬'}</span><span style="flex:1;">${msg}</span>`;
+  toast.className = 'toast ' + (type || '');
+  toast.innerHTML = `<i class="fas ${icons[type]||'fa-info-circle'}" style="font-size:20px"></i><span>${msg}</span>`;
   container.appendChild(toast);
-  setTimeout(() => {
-    toast.style.opacity = '0';
-    toast.style.transform = 'translateY(-10px)';
-    toast.style.transition = 'all 0.4s ease';
-    setTimeout(() => toast.remove(), 400);
-  }, 5000);
+  setTimeout(() => { toast.style.opacity = '0'; toast.style.transform = 'translateY(-10px)'; setTimeout(() => toast.remove(), 300); }, 4000);
 }
 
-// ================= نظام الإشعارات =================
-let notifPanelOpen = false;
-
-function toggleNotifPanel() {
-  const panel = document.getElementById('notifPanel');
-  notifPanelOpen = !notifPanelOpen;
-  panel.style.display = notifPanelOpen ? 'block' : 'none';
-  if (notifPanelOpen) loadNotifications();
-}
-
-document.addEventListener('click', function(e) {
-  const bell = document.getElementById('notifBell');
-  const panel = document.getElementById('notifPanel');
-  if (panel && bell && !bell.contains(e.target) && !panel.contains(e.target)) {
-    panel.style.display = 'none';
-    notifPanelOpen = false;
+// ═══ Security: Disable right-click & dev tools ═══
+document.addEventListener('contextmenu', e => e.preventDefault());
+document.addEventListener('keydown', e => {
+  if (e.key === 'F12' || (e.ctrlKey && e.shiftKey && ['I','J','C'].includes(e.key.toUpperCase())) || (e.ctrlKey && e.key.toUpperCase() === 'U')) {
+    e.preventDefault();
   }
 });
-
-async function loadNotifications() {
-  try {
-    const res = await fetch('user.php?action=get_user_notifications');
-    const data = await res.json();
-    if (data.success) {
-      const list = document.getElementById('notifList');
-      const badge = document.getElementById('notifBadge');
-      if (data.unread_count > 0) {
-        badge.style.display = 'flex';
-        badge.textContent = data.unread_count > 9 ? '9+' : data.unread_count;
-      } else {
-        badge.style.display = 'none';
-      }
-      if (!data.notifications || data.notifications.length === 0) {
-        list.innerHTML = '<div style="text-align:center;padding:24px;color:var(--text-muted);font-size:13px;font-weight:600;">لا توجد إشعارات حالياً</div>';
-        return;
-      }
-      list.innerHTML = data.notifications.map(n => `
-        <div class="notif-item ${n.is_read == 0 ? 'unread' : ''}">
-          <div style="font-size:13px;font-weight:${n.is_read == 0 ? '800' : '600'};color:var(--text);line-height:1.5;">${escapeHtml(n.message)}</div>
-          <div style="font-size:11px;color:var(--text-muted);margin-top:6px;font-family:'Inter',sans-serif;">${n.created_at}</div>
-        </div>
-      `).join('');
-    }
-  } catch(e) {}
-}
-
-async function markAllRead() {
-  try {
-    const fd = new FormData();
-    fd.append('action', 'mark_user_notifications_read');
-    await fetch('user.php', { method: 'POST', body: fd });
-    document.getElementById('notifBadge').style.display = 'none';
-    loadNotifications();
-  } catch(e) {}
-}
-
-function escapeHtml(str) {
-  const d = document.createElement('div');
-  d.textContent = str;
-  return d.innerHTML;
-}
-
-(async function() {
-  try {
-    const res = await fetch('user.php?action=get_user_notifications');
-    const data = await res.json();
-    if (data.success && data.unread_count > 0) {
-      const badge = document.getElementById('notifBadge');
-      if (badge) {
-        badge.style.display = 'flex';
-        badge.textContent = data.unread_count > 9 ? '9+' : data.unread_count;
-      }
-    }
-  } catch(e) {}
-})();
 </script>
-
-<?php endif; ?>
 </body>
 </html>
