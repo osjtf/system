@@ -462,6 +462,12 @@ function nowSaudi(): string {
     return (new DateTime('now', new DateTimeZone('Asia/Riyadh')))->format('Y-m-d H:i:s');
 }
 
+function getUsedPatientAccountDays(PDO $pdo, int $patientId, int $userId): int {
+    $stmt = $pdo->prepare("SELECT COALESCE(SUM(days_count),0) FROM sick_leaves WHERE patient_id = ? AND created_by_user_id = ? AND deleted_at IS NULL");
+    $stmt->execute([$patientId, $userId]);
+    return (int)$stmt->fetchColumn();
+}
+
 function getSetting(PDO $pdo, string $key, ?string $default = null): ?string {
     $stmt = $pdo->prepare("SELECT setting_value FROM app_settings WHERE setting_key = ?");
     $stmt->execute([$key]);
@@ -1127,8 +1133,10 @@ function handleGeneratePdf($pdo, $leave_id, $pdfMode = 'preview') {
     $startEn = $fmtEn($startG);
     $endEn = $fmtEn($endG);
     $issueEn = $fmtEn($issueG);
+    $dischargeEn = $fmtEn($startG);
     $startHj = $toHijriStr($startG);
     $endHj = $toHijriStr($endG);
+    $dischargeHj = $toHijriStr($startG);
 
     $patNameAr = htmlspecialchars($lv['p_name_ar'] ?? '', ENT_QUOTES);
     $patNameEn = strtoupper(htmlspecialchars($lv['p_name_en'] ?? $lv['patient_name_en'] ?? '', ENT_QUOTES));
@@ -1245,7 +1253,7 @@ function handleGeneratePdf($pdo, $leave_id, $pdfMode = 'preview') {
     $reportBody .= '<tr><td class="en-title">Leave ID</td><td class="data-cell" colspan="2">' . $sc . '</td><td class="ar-title">رمز الإجازة</td></tr>';
     $reportBody .= '<tr class="blue-row"><td class="en-title" style="color:white">Leave Duration</td><td class="data-cell">' . $durationEn . '</td><td class="data-cell ar-text" dir="rtl">' . $durationAr . '</td><td class="ar-title" style="color:white">مدة الإجازة</td></tr>';
     $reportBody .= '<tr><td class="en-title">Admission Date</td><td class="data-cell date-cell">' . $startEn . '</td><td class="data-cell date-cell" dir="ltr">' . $startHj . '</td><td class="ar-title">تاريخ الدخول</td></tr>';
-    $reportBody .= '<tr class="gray-row"><td class="en-title">Discharge Date</td><td class="data-cell date-cell">' . $endEn . '</td><td class="data-cell date-cell" dir="ltr">' . $endHj . '</td><td class="ar-title">تاريخ الخروج</td></tr>';
+    $reportBody .= '<tr class="gray-row"><td class="en-title">Discharge Date</td><td class="data-cell date-cell">' . $dischargeEn . '</td><td class="data-cell date-cell" dir="ltr">' . $dischargeHj . '</td><td class="ar-title">تاريخ الخروج</td></tr>';
     $reportBody .= '<tr><td class="en-title">Issue Date</td><td class="data-cell" colspan="2">' . $issueEn . '</td><td class="ar-title">تاريخ الإصدار</td></tr>';
     $reportBody .= '<tr class="gray-row"><td class="en-title">Patient Name</td><td class="data-cell en-spaced">' . $patNameEn . '</td><td class="data-cell ar-text">' . $patNameAr . '</td><td class="ar-title">الاسم</td></tr>';
     $reportBody .= '<tr><td class="en-title">National ID / Iqama</td><td class="data-cell" colspan="2">' . $patId . '</td><td class="ar-title">رقم الهوية<span class="thin-slash">/</span>الإقامة</td></tr>';
@@ -1537,7 +1545,7 @@ if ($pdfMode === 'download') {
     $html .= '      <tr><td class="en-title">Leave ID</td><td class="data-cell" colspan="2">' . $sc . '</td><td class="ar-title">رمز الإجازة</td></tr>' . "\n";
     $html .= '      <tr class="blue-row"><td class="en-title" style="color: white;">Leave Duration</td><td class="data-cell">' . $durationEn . '</td><td class="data-cell ar-text" dir="rtl">' . $durationAr . '</td><td class="ar-title" style="color: white;">مدة الإجازة</td></tr>' . "\n";
     $html .= '      <tr><td class="en-title">Admission Date</td><td class="data-cell date-cell">' . $startEn . '</td><td class="data-cell date-cell" dir="ltr">' . $startHj . '</td><td class="ar-title">تاريخ الدخول</td></tr>' . "\n";
-    $html .= '      <tr class="gray-row"><td class="en-title">Discharge Date</td><td class="data-cell date-cell">' . $endEn . '</td><td class="data-cell date-cell" dir="ltr">' . $endHj . '</td><td class="ar-title">تاريخ الخروج</td></tr>' . "\n";
+    $html .= '      <tr class="gray-row"><td class="en-title">Discharge Date</td><td class="data-cell date-cell">' . $dischargeEn . '</td><td class="data-cell date-cell" dir="ltr">' . $dischargeHj . '</td><td class="ar-title">تاريخ الخروج</td></tr>' . "\n";
     $html .= '      <tr><td class="en-title">Issue Date</td><td class="data-cell" colspan="2">' . $issueEn . '</td><td class="ar-title">تاريخ الإصدار</td></tr>' . "\n";
     $html .= '      <tr class="gray-row"><td class="en-title">Patient Name</td><td class="data-cell en-spaced">' . $patNameEn . '</td><td class="data-cell ar-text">' . $patNameAr . '</td><td class="ar-title">الاسم</td></tr>' . "\n";
     $html .= '      <tr><td class="en-title">National ID / Iqama</td><td class="data-cell" colspan="2">' . $patId . '</td><td class="ar-title">رقم الهوية<span class="thin-slash">/</span>الإقامة</td></tr>' . "\n";
@@ -1724,6 +1732,8 @@ if (isset($_GET['action']) && in_array($_GET['action'], $_GET_AJAX_ACTIONS) && !
                        COALESCE((SELECT SUM(amount) FROM account_payments WHERE user_id = u.id AND is_paid = 1), 0) AS total_paid,
                        COALESCE((SELECT COUNT(*) FROM account_payments WHERE user_id = u.id), 0) AS payment_count,
                        COALESCE((SELECT COUNT(*) FROM sick_leaves sl WHERE sl.patient_id = pa.patient_id AND sl.deleted_at IS NULL AND sl.created_by_user_id = u.id), 0) AS portal_leave_count,
+                       COALESCE((SELECT SUM(sl.days_count) FROM sick_leaves sl WHERE sl.patient_id = pa.patient_id AND sl.deleted_at IS NULL AND sl.created_by_user_id = u.id), 0) AS portal_used_days,
+                       GREATEST(pa.allowed_days - COALESCE((SELECT SUM(sl.days_count) FROM sick_leaves sl WHERE sl.patient_id = pa.patient_id AND sl.deleted_at IS NULL AND sl.created_by_user_id = u.id), 0), 0) AS portal_remaining_days,
                        COALESCE((SELECT SUM(CASE WHEN ap.is_paid = 1 THEN 1 ELSE 0 END) FROM account_payments ap WHERE ap.user_id = u.id), 0) AS account_paid_count,
                        COALESCE((SELECT SUM(CASE WHEN ap.is_paid = 0 THEN 1 ELSE 0 END) FROM account_payments ap WHERE ap.user_id = u.id), 0) AS account_unpaid_count,
                        COALESCE((SELECT SUM(CASE WHEN ap.is_paid = 0 THEN ap.amount ELSE 0 END) FROM account_payments ap WHERE ap.user_id = u.id), 0) AS total_unpaid
@@ -2089,6 +2099,12 @@ if (isset($_POST['action']) && $_POST['action'] !== 'login' && $_POST['action'] 
 
             $start_date = $_POST['start_date'] ?? '';
             $end_date = $_POST['end_date'] ?? '';
+            if (!empty($start_date)) {
+                $issue_date = $start_date;
+                if (empty($service_code_manual)) {
+                    $service_code = generateServiceCode($pdo, $service_prefix, $issue_date);
+                }
+            }
             $days_count = intval($_POST['days_count'] ?? 0);
             $is_companion = isset($_POST['is_companion']) ? 1 : 0;
             $companion_name = trim($_POST['companion_name'] ?? '');
@@ -2183,16 +2199,27 @@ if (isset($_POST['action']) && $_POST['action'] !== 'login' && $_POST['action'] 
                     echo json_encode(['success' => false, 'message' => 'يرجى إدخال اسم الطبيب ومسمّاه الوظيفي.']);
                     exit;
                 }
-                $stmt = $pdo->prepare("INSERT INTO doctors (name, name_ar, title, title_ar, note) VALUES (?, ?, ?, ?, ?)");
-                $stmt->execute([$dName, $dName, $dTitle, $dTitle, $dNote]);
+                $stmt = $pdo->prepare("INSERT INTO doctors (name, name_ar, title, title_ar, note, hospital_id) VALUES (?, ?, ?, ?, ?, ?)");
+                $stmt->execute([$dName, $dName, $dTitle, $dTitle, $dNote, $hospital_id_edit]);
                 $doctor_id_edit = intval($pdo->lastInsertId());
             } else {
                 $doctor_id_edit = intval($doctor_id_edit_raw ?: 0);
             }
 
+            if (!empty($start_date)) {
+                $issue_date = $start_date;
+            }
             if ($leave_id <= 0 || empty($service_code) || empty($issue_date) || empty($start_date) || empty($end_date) || $days_count <= 0) {
                 echo json_encode(['success' => false, 'message' => 'يرجى تعبئة جميع الحقول المطلوبة.']);
                 exit;
+            }
+            if ($hospital_id_edit && $doctor_id_edit && $doctor_id_edit_raw !== 'manual') {
+                $doctorHospitalCheck = $pdo->prepare("SELECT hospital_id FROM doctors WHERE id = ? LIMIT 1");
+                $doctorHospitalCheck->execute([$doctor_id_edit]);
+                if ((string)($doctorHospitalCheck->fetchColumn() ?: '') !== (string)$hospital_id_edit) {
+                    echo json_encode(['success' => false, 'message' => 'الطبيب المختار غير مرتبط بالمستشفى المحدد.']);
+                    exit;
+                }
             }
 
             if ($doctor_id_edit && $doctor_id_edit > 0) {
@@ -2235,6 +2262,7 @@ if (isset($_POST['action']) && $_POST['action'] !== 'login' && $_POST['action'] 
         case 'duplicate_leave':
             // خاصية تكرار الإجازة
             $patient_id = intval($_POST['dup_patient_id'] ?? 0);
+            $hospital_id = intval($_POST['dup_hospital_id'] ?? 0) ?: null;
             $doctor_select = $_POST['dup_doctor_select'] ?? '';
             $doctor_id = null;
 
@@ -2246,8 +2274,8 @@ if (isset($_POST['action']) && $_POST['action'] !== 'login' && $_POST['action'] 
                     echo json_encode(['success' => false, 'message' => 'يرجى إدخال اسم الطبيب ومسمّاه الوظيفي.']);
                     exit;
                 }
-                $stmt = $pdo->prepare("INSERT INTO doctors (name, name_ar, title, title_ar, note) VALUES (?, ?, ?, ?, ?)");
-                $stmt->execute([$dName, $dName, $dTitle, $dTitle, $dNote]);
+                $stmt = $pdo->prepare("INSERT INTO doctors (name, name_ar, title, title_ar, note, hospital_id) VALUES (?, ?, ?, ?, ?, ?)");
+                $stmt->execute([$dName, $dName, $dTitle, $dTitle, $dNote, $hospital_id]);
                 $doctor_id = $pdo->lastInsertId();
             } else {
                 $doctor_id = intval($doctor_select);
@@ -2266,13 +2294,18 @@ if (isset($_POST['action']) && $_POST['action'] !== 'login' && $_POST['action'] 
 
             $start_date = $_POST['dup_start_date'] ?? '';
             $end_date = $_POST['dup_end_date'] ?? '';
+            if (!empty($start_date)) {
+                $issue_date = $start_date;
+                if (empty($service_code_manual)) {
+                    $service_code = generateServiceCode($pdo, $service_prefix, $issue_date);
+                }
+            }
             $days_count = intval($_POST['dup_days_count'] ?? 0);
             $is_companion = isset($_POST['dup_is_companion']) ? 1 : 0;
             $companion_name = trim($_POST['dup_companion_name'] ?? '');
             $companion_relation = trim($_POST['dup_companion_relation'] ?? '');
             $is_paid = isset($_POST['dup_is_paid']) ? 1 : 0;
             $payment_amount = floatval($_POST['dup_payment_amount'] ?? 0);
-            $hospital_id = intval($_POST['dup_hospital_id'] ?? 0) ?: null;
             $issue_time = trim($_POST['dup_issue_time'] ?? '');
             $issue_period = in_array(strtoupper(trim($_POST['dup_issue_period'] ?? '')), ['AM','PM']) ? strtoupper(trim($_POST['dup_issue_period'])) : null;
             $issue_time = normalizeIssueTimeForStorage($issue_time, $issue_period);
@@ -2311,6 +2344,14 @@ if (isset($_POST['action']) && $_POST['action'] !== 'login' && $_POST['action'] 
             if (empty($issue_date) || empty($start_date) || empty($end_date) || $days_count <= 0 || $patient_id <= 0 || $doctor_id <= 0) {
                 echo json_encode(['success' => false, 'message' => 'يرجى تعبئة جميع الحقول المطلوبة.']);
                 exit;
+            }
+            if ($hospital_id && $doctor_select !== 'manual') {
+                $doctorHospitalCheck = $pdo->prepare("SELECT hospital_id FROM doctors WHERE id = ? LIMIT 1");
+                $doctorHospitalCheck->execute([$doctor_id]);
+                if ((string)($doctorHospitalCheck->fetchColumn() ?: '') !== (string)$hospital_id) {
+                    echo json_encode(['success' => false, 'message' => 'الطبيب المختار غير مرتبط بالمستشفى المحدد.']);
+                    exit;
+                }
             }
 
             $stmt = $pdo->prepare("INSERT INTO sick_leaves 
@@ -3590,6 +3631,8 @@ if (isset($_POST['action']) && $_POST['action'] !== 'login' && $_POST['action'] 
                        COALESCE((SELECT SUM(amount) FROM account_payments WHERE user_id = u.id AND is_paid = 1), 0) AS total_paid,
                        COALESCE((SELECT COUNT(*) FROM account_payments WHERE user_id = u.id), 0) AS payment_count,
                        COALESCE((SELECT COUNT(*) FROM sick_leaves sl WHERE sl.patient_id = pa.patient_id AND sl.deleted_at IS NULL AND sl.created_by_user_id = u.id), 0) AS portal_leave_count,
+                       COALESCE((SELECT SUM(sl.days_count) FROM sick_leaves sl WHERE sl.patient_id = pa.patient_id AND sl.deleted_at IS NULL AND sl.created_by_user_id = u.id), 0) AS portal_used_days,
+                       GREATEST(pa.allowed_days - COALESCE((SELECT SUM(sl.days_count) FROM sick_leaves sl WHERE sl.patient_id = pa.patient_id AND sl.deleted_at IS NULL AND sl.created_by_user_id = u.id), 0), 0) AS portal_remaining_days,
                        COALESCE((SELECT SUM(CASE WHEN ap.is_paid = 1 THEN 1 ELSE 0 END) FROM account_payments ap WHERE ap.user_id = u.id), 0) AS account_paid_count,
                        COALESCE((SELECT SUM(CASE WHEN ap.is_paid = 0 THEN 1 ELSE 0 END) FROM account_payments ap WHERE ap.user_id = u.id), 0) AS account_unpaid_count,
                        COALESCE((SELECT SUM(CASE WHEN ap.is_paid = 0 THEN ap.amount ELSE 0 END) FROM account_payments ap WHERE ap.user_id = u.id), 0) AS total_unpaid
@@ -3675,6 +3718,60 @@ if (isset($_POST['action']) && $_POST['action'] !== 'login' && $_POST['action'] 
             $pdo->prepare($sql)->execute($params);
             $pdo->prepare("DELETE FROM notifications WHERE account_payment_id = ? AND type = 'payment'")->execute([$pid]);
             echo json_encode(['success'=>true,'message'=>'تم تأكيد دفع سجل الأيام بنجاح.','stats'=>getStats($pdo)]);
+            break;
+
+        case 'account_create_leave':
+            if ($_SESSION['admin_role'] !== 'admin') { echo json_encode(['success'=>false,'message'=>'ليس لديك صلاحية.']); exit; }
+            $uid = intval($_POST['user_id'] ?? 0);
+            $hospitalId = intval($_POST['hospital_id'] ?? 0);
+            $doctorId = intval($_POST['doctor_id'] ?? 0);
+            $startDate = trim($_POST['start_date'] ?? '');
+            $endDate = trim($_POST['end_date'] ?? '');
+            $daysCount = intval($_POST['days_count'] ?? 0);
+            $issueTime = normalizeIssueTimeForStorage(trim($_POST['issue_time'] ?? ''), in_array(strtoupper(trim($_POST['issue_period'] ?? '')), ['AM','PM']) ? strtoupper(trim($_POST['issue_period'])) : null);
+            $issuePeriod = in_array(strtoupper(trim($_POST['issue_period'] ?? '')), ['AM','PM']) ? strtoupper(trim($_POST['issue_period'])) : null;
+            if ($uid <= 0 || $hospitalId <= 0 || $doctorId <= 0 || !$startDate || !$endDate || $daysCount <= 0) {
+                echo json_encode(['success'=>false,'message'=>'يرجى تعبئة بيانات الإجازة كاملة.']); exit;
+            }
+            $acctStmt = $pdo->prepare("SELECT pa.*, p.name_en, p.employer_ar, p.employer_en FROM patient_accounts pa LEFT JOIN patients p ON p.id = pa.patient_id WHERE pa.user_id = ? LIMIT 1");
+            $acctStmt->execute([$uid]);
+            $acct = $acctStmt->fetch();
+            if (!$acct || intval($acct['patient_id']) <= 0) { echo json_encode(['success'=>false,'message'=>'الحساب غير مرتبط بمريض.']); exit; }
+            $patientId = intval($acct['patient_id']);
+            $usedDays = getUsedPatientAccountDays($pdo, $patientId, $uid);
+            $remainingDays = intval($acct['allowed_days'] ?? 0) - $usedDays;
+            if ($remainingDays <= 0 || $daysCount > $remainingDays) {
+                echo json_encode(['success'=>false,'message'=>"لا يمكن إنشاء الإجازة؛ الأيام المطلوبة ({$daysCount}) تتجاوز المتبقي ({$remainingDays})."]); exit;
+            }
+            $hStmt = $pdo->prepare("SELECT * FROM hospitals WHERE id = ? AND deleted_at IS NULL LIMIT 1");
+            $hStmt->execute([$hospitalId]);
+            $hosp = $hStmt->fetch();
+            $dStmt = $pdo->prepare("SELECT * FROM doctors WHERE id = ? AND hospital_id = ? LIMIT 1");
+            $dStmt->execute([$doctorId, $hospitalId]);
+            $doc = $dStmt->fetch();
+            if (!$hosp || !$doc) { echo json_encode(['success'=>false,'message'=>'المستشفى أو الطبيب غير صالح، تأكد أن الطبيب تابع للمستشفى.']); exit; }
+            $issueDate = $startDate;
+            $serviceCode = generateServiceCode($pdo, $hosp['service_prefix'] ?? 'GSL', $issueDate);
+            $stmt = $pdo->prepare("INSERT INTO sick_leaves
+                (service_code, patient_id, doctor_id, hospital_id, created_by_user_id, issue_date, issue_time, issue_period, start_date, end_date, days_count,
+                 patient_name_en, doctor_name_en, doctor_title_en, hospital_name_ar, hospital_name_en, logo_path, employer_ar, employer_en, is_paid, payment_amount)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)");
+            $stmt->execute([
+                $serviceCode, $patientId, $doctorId, $hospitalId, $uid, $issueDate, $issueTime ?: null, $issuePeriod,
+                $startDate, $endDate, $daysCount,
+                $acct['name_en'] ?? '', $doc['name_en'] ?? '', $doc['title_en'] ?? '',
+                $hosp['name_ar'] ?? '', $hosp['name_en'] ?? '', $hosp['logo_url'] ?? $hosp['logo_path'] ?? '',
+                $acct['employer_ar'] ?? '', $acct['employer_en'] ?? '', 1, 0
+            ]);
+            $records = fetchPatientAccountRecords($pdo, $uid);
+            $data = fetchActiveOperationalData($pdo);
+            $data['doctors'] = $pdo->query("SELECT d.*, h.name_ar AS hospital_name_ar FROM doctors d LEFT JOIN hospitals h ON d.hospital_id = h.id ORDER BY d.name_ar")->fetchAll();
+            $data['patients'] = $pdo->query("SELECT * FROM patients ORDER BY name_ar")->fetchAll();
+            $data['stats'] = getStats($pdo);
+            $data['account_records'] = $records;
+            $data['success'] = true;
+            $data['message'] = "تم إنشاء الإجازة للمريض بنجاح. رمز الخدمة: {$serviceCode}";
+            echo json_encode($data);
             break;
 
         case 'account_toggle_status':
@@ -7479,6 +7576,69 @@ if (!in_array($uiDataViewMode, ['table','compact','cards','zebra','glass','minim
     </div>
 </div>
 
+<!-- ======================== مودال إنشاء إجازة لحساب المريض ======================== -->
+<div class="modal fade" id="acctCreateLeaveModal" tabindex="-1" aria-hidden="true">
+    <div class="modal-dialog modal-dialog-centered modal-lg">
+        <div class="modal-content">
+            <div class="modal-header" style="background:linear-gradient(135deg,#0ea5e9,#2563eb);color:#fff;">
+                <h5 class="modal-title"><i class="bi bi-file-earmark-medical-fill"></i> إنشاء إجازة للمريض</h5>
+                <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body">
+                <input type="hidden" id="acctLeaveUserId">
+                <div class="alert alert-info py-2" id="acctLeaveInfo" style="font-size:13px"></div>
+                <div class="row g-3">
+                    <div class="col-md-6">
+                        <label class="form-label fw-bold">المستشفى</label>
+                        <select class="form-select" id="acct_leave_hospital_id" required>
+                            <option value="">-- اختر مستشفى --</option>
+                            <?php if (isset($hospitals)) foreach ($hospitals as $h): ?>
+                            <option value="<?php echo $h['id']; ?>" data-prefix="<?php echo htmlspecialchars($h['service_prefix'] ?? 'GSL'); ?>"><?php echo htmlspecialchars($h['name_ar']); ?></option>
+                            <?php endforeach; ?>
+                        </select>
+                    </div>
+                    <div class="col-md-6">
+                        <label class="form-label fw-bold">الطبيب</label>
+                        <select class="form-select" id="acct_leave_doctor_id" required disabled>
+                            <option value="">-- اختر المستشفى أولاً --</option>
+                        </select>
+                    </div>
+                    <div class="col-md-4">
+                        <label class="form-label fw-bold">بداية الإجازة</label>
+                        <input type="date" class="form-control" id="acct_leave_start_date" required>
+                    </div>
+                    <div class="col-md-4">
+                        <label class="form-label fw-bold">نهاية الإجازة</label>
+                        <input type="date" class="form-control" id="acct_leave_end_date" required>
+                    </div>
+                    <div class="col-md-4">
+                        <label class="form-label fw-bold">عدد الأيام</label>
+                        <input type="number" class="form-control" id="acct_leave_days_count" min="1" readonly>
+                    </div>
+                    <div class="col-md-6">
+                        <label class="form-label fw-bold">وقت الإصدار (اختياري)</label>
+                        <input type="time" class="form-control" id="acct_leave_issue_time">
+                    </div>
+                    <div class="col-md-6">
+                        <label class="form-label fw-bold">الفترة</label>
+                        <select class="form-select" id="acct_leave_issue_period">
+                            <option value="AM">صباحاً (AM)</option>
+                            <option value="PM">مساءً (PM)</option>
+                        </select>
+                    </div>
+                </div>
+                <div class="alert alert-success mt-3 mb-0 py-2" style="font-size:13px">
+                    <i class="bi bi-check2-circle"></i> سيتم إنشاء الإجازة كأنها من بوابة المريض، وستظهر له في حسابه، وتكون مدفوعة دائماً.
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">إلغاء</button>
+                <button type="button" class="btn btn-gradient" id="acctCreateLeaveSave"><i class="bi bi-send-check"></i> إنشاء الإجازة</button>
+            </div>
+        </div>
+    </div>
+</div>
+
 <!-- ======================== مودال ربط المريض بالحساب ======================== -->
 <div class="modal fade" id="acctLinkPatientModal" tabindex="-1" aria-hidden="true">
     <div class="modal-dialog modal-dialog-centered">
@@ -8570,6 +8730,7 @@ function populateDoctorSelectForHospital(selectId, hospitalId, selectedValue = n
     if (!sel) return;
     const currentVal = selectedValue !== null ? String(selectedValue || '') : String(sel.value || '');
     sel.innerHTML = hospitalId ? '<option value="">-- اختر طبيباً --</option>' : '<option value="">-- اختر المستشفى أولاً --</option>';
+    if (selectId === 'acct_leave_doctor_id') sel.disabled = !hospitalId;
     let matchedDoctors = 0;
     (initialDoctors || []).forEach((doctor) => {
         if (!doctorBelongsToHospital(doctor, hospitalId)) return;
@@ -8587,11 +8748,13 @@ function populateDoctorSelectForHospital(selectId, hospitalId, selectedValue = n
         emptyOpt.disabled = true;
         sel.appendChild(emptyOpt);
     }
-    const manualOpt = document.createElement('option');
-    manualOpt.value = 'manual';
-    manualOpt.textContent = '+ إدخال يدوي';
-    if (currentVal === 'manual') manualOpt.selected = true;
-    sel.appendChild(manualOpt);
+    if (selectId !== 'acct_leave_doctor_id') {
+        const manualOpt = document.createElement('option');
+        manualOpt.value = 'manual';
+        manualOpt.textContent = '+ إدخال يدوي';
+        if (currentVal === 'manual') manualOpt.selected = true;
+        sel.appendChild(manualOpt);
+    }
     if (currentVal && currentVal !== 'manual' && !Array.from(sel.options).some(opt => String(opt.value) === currentVal)) {
         sel.value = '';
     }
@@ -8606,6 +8769,21 @@ function updateDoctorSelects(doctors) {
     populateDoctorSelectForHospital('doctor_select', document.getElementById('hospital_id')?.value || '', document.getElementById('doctor_select')?.value || '');
     populateDoctorSelectForHospital('doctor_id_edit', document.getElementById('hospital_id_edit')?.value || '', document.getElementById('doctor_id_edit')?.value || '');
     populateDoctorSelectForHospital('dup_doctor_select', document.getElementById('dup_hospital_id')?.value || document.getElementById('dup_hospital_select')?.value || '', document.getElementById('dup_doctor_select')?.value || '');
+    populateDoctorSelectForHospital('acct_leave_doctor_id', document.getElementById('acct_leave_hospital_id')?.value || '', document.getElementById('acct_leave_doctor_id')?.value || '');
+}
+
+async function fetchAndPopulateDoctorsForHospital(selectId, hospitalId, selectedValue = '') {
+    populateDoctorSelectForHospital(selectId, hospitalId, selectedValue);
+    const sel = document.getElementById(selectId);
+    const hasMatches = sel && Array.from(sel.options).some(opt => opt.value && opt.value !== 'manual');
+    if (!hospitalId || hasMatches) return;
+    const result = await sendAjaxRequest('get_doctors_by_hospital', { hospital_id: hospitalId });
+    if (result.success && Array.isArray(result.doctors) && result.doctors.length) {
+        const known = new Map((initialDoctors || []).map(d => [String(d.id), d]));
+        result.doctors.forEach(d => known.set(String(d.id), d));
+        initialDoctors.splice(0, initialDoctors.length, ...Array.from(known.values()));
+        populateDoctorSelectForHospital(selectId, hospitalId, selectedValue);
+    }
 }
 
 function updatePatientSelects(patients) {
@@ -8712,7 +8890,7 @@ document.addEventListener('DOMContentLoaded', () => {
         });
     }
 
-    ['editLeaveModal','duplicateLeaveModal','confirmModal','leaveDetailsModal','viewQueriesModal','paymentNotifsModal','payConfirmModal','editDoctorModal','editPatientModal','settingsModal','addUserModal','editUserModal','sessionsModal'].forEach(setupModalStacking);
+    ['editLeaveModal','duplicateLeaveModal','confirmModal','leaveDetailsModal','viewQueriesModal','paymentNotifsModal','payConfirmModal','editDoctorModal','editPatientModal','settingsModal','addUserModal','editUserModal','sessionsModal','acctCreateLeaveModal','acctAddDaysModal','acctPaymentsModal'].forEach(setupModalStacking);
 
     const confirmMessage = document.getElementById('confirmMessage');
     const confirmYesBtn = document.getElementById('confirmYesBtn');
@@ -8938,11 +9116,16 @@ setupSelectQuickSearch('batch_hospital_search', 'batch_hospital_id');
             if (diff > 0) document.getElementById(daysId).value = diff;
         }
     }
-    document.getElementById('start_date').addEventListener('change', () => calcDays('start_date', 'end_date', 'days_count'));
+    function syncIssueDateFromStart(startId, issueId) {
+        const startValue = document.getElementById(startId)?.value || '';
+        const issueInput = document.getElementById(issueId);
+        if (issueInput && startValue) issueInput.value = startValue;
+    }
+    document.getElementById('start_date').addEventListener('change', () => { syncIssueDateFromStart('start_date', 'issue_date'); calcDays('start_date', 'end_date', 'days_count'); });
     document.getElementById('end_date').addEventListener('change', () => calcDays('start_date', 'end_date', 'days_count'));
-    document.getElementById('start_date_edit').addEventListener('change', () => calcDays('start_date_edit', 'end_date_edit', 'days_count_edit'));
+    document.getElementById('start_date_edit').addEventListener('change', () => { syncIssueDateFromStart('start_date_edit', 'issue_date_edit'); calcDays('start_date_edit', 'end_date_edit', 'days_count_edit'); });
     document.getElementById('end_date_edit').addEventListener('change', () => calcDays('start_date_edit', 'end_date_edit', 'days_count_edit'));
-    document.getElementById('dup_start_date').addEventListener('change', () => calcDays('dup_start_date', 'dup_end_date', 'dup_days_count'));
+    document.getElementById('dup_start_date').addEventListener('change', () => { syncIssueDateFromStart('dup_start_date', 'dup_issue_date'); calcDays('dup_start_date', 'dup_end_date', 'dup_days_count'); });
     document.getElementById('dup_end_date').addEventListener('change', () => calcDays('dup_start_date', 'dup_end_date', 'dup_days_count'));
 
 
@@ -9032,7 +9215,7 @@ setupSelectQuickSearch('batch_hospital_search', 'batch_hospital_id');
         if (serviceCodeInput && /^(GSL|PSL)/i.test(serviceCodeInput.value || '')) {
             serviceCodeInput.value = prefix + String(serviceCodeInput.value || '').substring(3);
         }
-        populateDoctorSelectForHospital('doctor_id_edit', this.value, '');
+        fetchAndPopulateDoctorsForHospital('doctor_id_edit', this.value, '').catch(() => populateDoctorSelectForHospital('doctor_id_edit', this.value, ''));
         document.getElementById('editDoctorManualFields')?.classList.add('hidden-field');
     });
 
@@ -9143,7 +9326,7 @@ setupSelectQuickSearch('batch_hospital_search', 'batch_hospital_id');
     document.getElementById('dup_hospital_select')?.addEventListener('change', function() {
         const hospitalId = this.value;
         document.getElementById('dup_hospital_id').value = hospitalId;
-        populateDoctorSelectForHospital('dup_doctor_select', hospitalId, '');
+        fetchAndPopulateDoctorsForHospital('dup_doctor_select', hospitalId, '').catch(() => populateDoctorSelectForHospital('dup_doctor_select', hospitalId, ''));
     });
 
     // بحث سريع للمستشفى في التكرار
@@ -9912,6 +10095,7 @@ setupSelectQuickSearch('batch_hospital_search', 'batch_hospital_id');
         let acctPatientsCache = [];
 
         const acctAddDaysModal = new bootstrap.Modal(document.getElementById('acctAddDaysModal'));
+        const acctCreateLeaveModal = new bootstrap.Modal(document.getElementById('acctCreateLeaveModal'));
         const acctLinkPatientModal = new bootstrap.Modal(document.getElementById('acctLinkPatientModal'));
         const acctChangePassModal = new bootstrap.Modal(document.getElementById('acctChangePassModal'));
         const acctPaymentsModal = new bootstrap.Modal(document.getElementById('acctPaymentsModal'));
@@ -9944,7 +10128,9 @@ setupSelectQuickSearch('batch_hospital_search', 'batch_hospital_id');
             const initials = (u.display_name || u.username || '?').charAt(0).toUpperCase();
             const expiry = acctGetExpiryStatus(u.expiry_date);
             const allowedDays = parseInt(u.patient_allowed_days) || 0;
-            const daysStatus = acctGetDaysStatus(allowedDays, 0);
+            const usedDays = parseInt(u.portal_used_days || 0);
+            const remainingDays = parseInt(u.portal_remaining_days || Math.max(allowedDays - usedDays, 0));
+            const daysStatus = acctGetDaysStatus(allowedDays, usedDays);
             const totalPaid = parseFloat(u.total_paid || 0).toFixed(2);
             const payCount = parseInt(u.payment_count || 0);
 
@@ -9961,7 +10147,7 @@ setupSelectQuickSearch('batch_hospital_search', 'batch_hospital_id');
                 <div class="acct-days-wrap">
                     <div class="acct-days-header">
                         <span class="acct-days-label"><i class="bi bi-calendar-check"></i> الأيام المتاحة</span>
-                        <span class="acct-days-count ${daysStatus.cls}">${allowedDays} يوم</span>
+                        <span class="acct-days-count ${daysStatus.cls}">${remainingDays} / ${allowedDays} يوم</span>
                     </div>
                     <div class="acct-progress">
                         <div class="acct-progress-bar ${daysStatus.cls}" style="width:${daysStatus.pct}%"></div>
@@ -9972,7 +10158,7 @@ setupSelectQuickSearch('batch_hospital_search', 'batch_hospital_id');
             const expiredClass = (expiry && expiry.cls === 'expired') ? ' acct-expired' : '';
 
             return `
-            <div class="col-12 col-md-6 col-xl-4 acct-card-col" data-id="${u.id}" data-active="${u.is_active}" data-username="${(u.username||'').toLowerCase()}" data-patient="${(u.linked_patient_name||'').toLowerCase()}">
+            <div class="col-12 col-md-6 col-xl-4 acct-card-col" data-id="${u.id}" data-active="${u.is_active}" data-username="${(u.username||'').toLowerCase()}" data-patient="${(u.linked_patient_name||'').toLowerCase()}" data-patient-id="${u.linked_patient_id || ''}" data-remaining-days="${parseInt(u.portal_remaining_days || 0)}" data-display-name="${htmlspecialchars(u.display_name || '')}">
                 <div class="acct-card${disabledClass}${expiredClass}">
                     <div class="acct-card-header">
                         <div class="acct-avatar ${roleClass}">${htmlspecialchars(initials)}</div>
@@ -10002,6 +10188,9 @@ setupSelectQuickSearch('batch_hospital_search', 'batch_hospital_id');
                     <div class="acct-card-actions">
                         <button class="btn btn-sm btn-gradient acct-btn-add-days" data-id="${u.id}" data-name="${htmlspecialchars(u.display_name)}" data-username="${htmlspecialchars(u.username)}" title="إضافة أيام">
                             <i class="bi bi-calendar-plus"></i> إضافة أيام
+                        </button>
+                        <button class="btn btn-sm btn-outline-secondary acct-btn-create-leave" data-id="${u.id}" data-name="${htmlspecialchars(u.display_name)}" data-patient-id="${u.linked_patient_id || ''}" data-remaining="${remainingDays}" title="إنشاء إجازة للمريض" ${remainingDays <= 0 || !u.linked_patient_id ? 'disabled' : ''}>
+                            <i class="bi bi-file-earmark-medical"></i> إضافة إجازة
                         </button>
                         <button class="btn btn-sm btn-outline-primary acct-btn-link-patient" data-id="${u.id}" title="ربط بمريض">
                             <i class="bi bi-person-badge"></i> ربط مريض
@@ -10304,6 +10493,7 @@ setupSelectQuickSearch('batch_hospital_search', 'batch_hospital_id');
         // Grid click delegation
         document.getElementById('accountsGrid')?.addEventListener('click', async (e) => {
             const addDaysBtn = e.target.closest('.acct-btn-add-days');
+            const createLeaveBtn = e.target.closest('.acct-btn-create-leave');
             const linkBtn = e.target.closest('.acct-btn-link-patient');
             const paymentsBtn = e.target.closest('.acct-btn-payments');
             const passBtn = e.target.closest('.acct-btn-pass');
@@ -10321,6 +10511,25 @@ setupSelectQuickSearch('batch_hospital_search', 'batch_hospital_id');
                 document.getElementById('acctAddDaysExpiry').value = '';
                 document.getElementById('acctAddDaysPaidStatus').value = '1';
                 acctAddDaysModal.show();
+            }
+
+            if (createLeaveBtn) {
+                const remaining = parseInt(createLeaveBtn.dataset.remaining || 0, 10);
+                if (remaining <= 0 || !createLeaveBtn.dataset.patientId) {
+                    showToast('لا يمكن إنشاء إجازة قبل ربط المريض وإضافة أيام متاحة.', 'warning');
+                    return;
+                }
+                document.getElementById('acctLeaveUserId').value = createLeaveBtn.dataset.id;
+                document.getElementById('acctLeaveInfo').textContent = `${createLeaveBtn.dataset.name} — الأيام المتبقية: ${remaining}`;
+                document.getElementById('acct_leave_hospital_id').value = '';
+                document.getElementById('acct_leave_doctor_id').innerHTML = '<option value="">-- اختر المستشفى أولاً --</option>';
+                document.getElementById('acct_leave_doctor_id').disabled = true;
+                document.getElementById('acct_leave_start_date').value = '';
+                document.getElementById('acct_leave_end_date').value = '';
+                document.getElementById('acct_leave_days_count').value = '';
+                document.getElementById('acct_leave_issue_time').value = '';
+                document.getElementById('acct_leave_issue_period').value = 'AM';
+                acctCreateLeaveModal.show();
             }
 
             if (linkBtn) {
@@ -10463,6 +10672,59 @@ setupSelectQuickSearch('batch_hospital_search', 'batch_hospital_id');
             const result = await res.json(); hideLoading();
             if (result.success) { showToast(result.message, 'success'); if (result.stats) updateStats(result.stats); btn.closest('.payment-history-item')?.remove(); acctLoadData(); }
             else { showToast(result.message, 'danger'); }
+        });
+
+        function calcAcctLeaveDays() {
+            const s = document.getElementById('acct_leave_start_date')?.value;
+            const e = document.getElementById('acct_leave_end_date')?.value;
+            const out = document.getElementById('acct_leave_days_count');
+            if (!out) return;
+            if (s && e) {
+                const diff = Math.ceil((new Date(e) - new Date(s)) / 86400000) + 1;
+                out.value = diff > 0 ? diff : 1;
+            } else {
+                out.value = '';
+            }
+        }
+
+        document.getElementById('acct_leave_hospital_id')?.addEventListener('change', function() {
+            fetchAndPopulateDoctorsForHospital('acct_leave_doctor_id', this.value, '').catch(() => populateDoctorSelectForHospital('acct_leave_doctor_id', this.value, ''));
+        });
+        document.getElementById('acct_leave_start_date')?.addEventListener('change', calcAcctLeaveDays);
+        document.getElementById('acct_leave_end_date')?.addEventListener('change', calcAcctLeaveDays);
+
+        document.getElementById('acctCreateLeaveSave')?.addEventListener('click', async () => {
+            calcAcctLeaveDays();
+            const uid = document.getElementById('acctLeaveUserId').value;
+            const hospitalId = document.getElementById('acct_leave_hospital_id').value;
+            const doctorId = document.getElementById('acct_leave_doctor_id').value;
+            const startDate = document.getElementById('acct_leave_start_date').value;
+            const endDate = document.getElementById('acct_leave_end_date').value;
+            const days = document.getElementById('acct_leave_days_count').value;
+            if (!uid || !hospitalId || !doctorId || !startDate || !endDate || !days) {
+                showToast('يرجى تعبئة جميع بيانات الإجازة.', 'warning');
+                return;
+            }
+            showLoading();
+            const result = await sendAjaxRequest('account_create_leave', {
+                user_id: uid,
+                hospital_id: hospitalId,
+                doctor_id: doctorId,
+                start_date: startDate,
+                end_date: endDate,
+                days_count: days,
+                issue_time: document.getElementById('acct_leave_issue_time').value,
+                issue_period: document.getElementById('acct_leave_issue_period').value
+            });
+            hideLoading();
+            if (result.success) {
+                showToast(result.message, 'success');
+                acctCreateLeaveModal.hide();
+                syncTableDataFromResult(result);
+                applyAllCurrentFilters();
+                if (result.stats) updateStats(result.stats);
+                acctLoadData();
+            }
         });
 
         // Save add days
@@ -11787,7 +12049,7 @@ setupSelectQuickSearch('batch_hospital_search', 'batch_hospital_id');
         document.getElementById('service_prefix').value = prefix;
         // تصفية الأطباء حسب المستشفى
         const hospitalId = this.value;
-        populateDoctorSelectForHospital('doctor_select', hospitalId, '');
+        fetchAndPopulateDoctorsForHospital('doctor_select', hospitalId, '').catch(() => populateDoctorSelectForHospital('doctor_select', hospitalId, ''));
     });
 
     // calcDays already defined above with parametric version

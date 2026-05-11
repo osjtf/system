@@ -367,8 +367,8 @@ if ($action === 'create_sick_leave' && isPatientLoggedIn()) {
          issue_date, issue_time, issue_period, start_date, end_date, days_count,
          patient_name_en, doctor_name_en, doctor_title_en,
          hospital_name_ar, hospital_name_en, logo_path,
-         employer_ar, employer_en)
-        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)");
+         employer_ar, employer_en, is_paid, payment_amount)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)");
     $stmt->execute([
         $serviceCode,
         $patientId,
@@ -389,6 +389,8 @@ if ($action === 'create_sick_leave' && isPatientLoggedIn()) {
         $hosp['logo_url'] ?? $hosp['logo_path'] ?? '',
         $pat['employer_ar'] ?? '',
         $pat['employer_en'] ?? '',
+        1,
+        0,
     ]);
     $leaveId = (int)$pdo->lastInsertId();
 
