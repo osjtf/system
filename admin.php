@@ -3205,11 +3205,65 @@ if (isset($_POST['action']) && $_POST['action'] !== 'login' && $_POST['action'] 
             $password = $_POST['password'] ?? '';
             $display_name = trim($_POST['display_name'] ?? '');
             $role = in_array($_POST['role'] ?? '', ['admin','user']) ? $_POST['role'] : 'user';
+            $link_patient_id = intval($_POST['link_patient_id'] ?? 0);
+            $link_allowed_days = max(0, intval($_POST['link_allowed_days'] ?? 0));
             if (empty($username) || empty($password) || empty($display_name)) { echo json_encode(['success'=>false,'message'=>'يرجى تعبئة جميع الحقول.']); exit; }
             $check = $pdo->prepare("SELECT id FROM admin_users WHERE username = ?"); $check->execute([$username]);
             if ($check->fetch()) { echo json_encode(['success'=>false,'message'=>'اسم المستخدم موجود مسبقاً.']); exit; }
             $pdo->prepare("INSERT INTO admin_users (username, password_hash, display_name, role) VALUES (?,?,?,?)")->execute([$username, password_hash($password, PASSWORD_DEFAULT), $display_name, $role]);
+            $newUserId = intval($pdo->lastInsertId());
+            // Link to patient if provided
+            if ($link_patient_id > 0 && $newUserId > 0) {
+                $pdo->exec("CREATE TABLE IF NOT EXISTS patient_accounts (
+                    id INT AUTO_INCREMENT PRIMARY KEY,
+                    user_id INT NOT NULL UNIQUE,
+                    patient_id INT NOT NULL,
+                    allowed_days INT DEFAULT 0,
+                    expiry_date DATE NULL,
+                    notes TEXT NULL,
+                    FOREIGN KEY (user_id) REFERENCES admin_users(id) ON DELETE CASCADE,
+                    FOREIGN KEY (patient_id) REFERENCES patients(id) ON DELETE CASCADE
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci");
+                $pdo->prepare("INSERT INTO patient_accounts (user_id, patient_id, allowed_days) VALUES (?,?,?) ON DUPLICATE KEY UPDATE patient_id=VALUES(patient_id), allowed_days=VALUES(allowed_days)")->execute([$newUserId, $link_patient_id, $link_allowed_days]);
+            }
             echo json_encode(['success'=>true,'message'=>'تمت إضافة الحساب بنجاح.']);
+            break;
+
+        case 'account_edit_user':
+            if ($_SESSION['admin_role'] !== 'admin') { echo json_encode(['success'=>false,'message'=>'ليس لديك صلاحية.']); exit; }
+            $uid = intval($_POST['user_id'] ?? 0);
+            $display_name = trim($_POST['display_name'] ?? '');
+            $new_username = trim($_POST['new_username'] ?? '');
+            $new_password = $_POST['new_password'] ?? '';
+            if ($uid <= 0 || empty($display_name)) { echo json_encode(['success'=>false,'message'=>'بيانات غير صالحة.']); exit; }
+            // Check username uniqueness if changed
+            if (!empty($new_username)) {
+                $dupCheck = $pdo->prepare("SELECT id FROM admin_users WHERE username = ? AND id <> ?");
+                $dupCheck->execute([$new_username, $uid]);
+                if ($dupCheck->fetch()) { echo json_encode(['success'=>false,'message'=>'اسم المستخدم موجود مسبقاً.']); exit; }
+            }
+            if (!empty($new_password) && !empty($new_username)) {
+                $pdo->prepare("UPDATE admin_users SET display_name=?, username=?, password_hash=? WHERE id=?")->execute([$display_name, $new_username, password_hash($new_password, PASSWORD_DEFAULT), $uid]);
+            } elseif (!empty($new_password)) {
+                $pdo->prepare("UPDATE admin_users SET display_name=?, password_hash=? WHERE id=?")->execute([$display_name, password_hash($new_password, PASSWORD_DEFAULT), $uid]);
+            } elseif (!empty($new_username)) {
+                $pdo->prepare("UPDATE admin_users SET display_name=?, username=? WHERE id=?")->execute([$display_name, $new_username, $uid]);
+            } else {
+                $pdo->prepare("UPDATE admin_users SET display_name=? WHERE id=?")->execute([$display_name, $uid]);
+            }
+            echo json_encode(['success'=>true,'message'=>'تم تعديل بيانات الحساب بنجاح.']);
+            break;
+
+        case 'account_delete_user':
+            if ($_SESSION['admin_role'] !== 'admin') { echo json_encode(['success'=>false,'message'=>'ليس لديك صلاحية.']); exit; }
+            $uid = intval($_POST['user_id'] ?? 0);
+            if ($uid <= 0) { echo json_encode(['success'=>false,'message'=>'معرّف غير صالح.']); exit; }
+            if ($uid == intval($_SESSION['admin_user_id'])) { echo json_encode(['success'=>false,'message'=>'لا يمكنك حذف حسابك الخاص.']); exit; }
+            $pdo->prepare("DELETE FROM patient_accounts WHERE user_id = ?")->execute([$uid]);
+            $pdo->prepare("DELETE FROM account_payments WHERE user_id = ?")->execute([$uid]);
+            $pdo->prepare("DELETE FROM user_sessions WHERE user_id = ?")->execute([$uid]);
+            $pdo->prepare("DELETE FROM admin_users WHERE id = ?")->execute([$uid]);
+            echo json_encode(['success'=>true,'message'=>'تم حذف الحساب بنجاح.']);
             break;
 
         default:
@@ -5376,7 +5430,7 @@ if (!in_array($uiDataViewMode, ['table','compact','cards','zebra','glass','minim
         <?php if ($_SESSION['admin_role'] === 'admin'): ?>
         <li class="nav-item" role="presentation">
             <button class="nav-link" id="tab-accounts" data-bs-toggle="tab" data-bs-target="#pane-accounts" type="button" role="tab">
-                <i class="bi bi-shield-lock"></i> إدارة الحسابات
+                <i class="bi bi-person-vcard"></i> حسابات المرضى
             </button>
         </li>
         <?php endif; ?>
@@ -5804,10 +5858,15 @@ if (!in_array($uiDataViewMode, ['table','compact','cards','zebra','glass','minim
             </div>
         </div>
 
-        <!-- ======================== تبويب إدارة الحسابات ======================== -->
+        <!-- ======================== تبويب حسابات المرضى ======================== -->
         <?php if ($loggedIn && $_SESSION['admin_role'] === 'admin'): ?>
         <div class="tab-pane fade" id="pane-accounts" role="tabpanel">
             <div class="accounts-mgmt-wrap">
+                <div class="alert alert-info mb-3 py-2" style="font-size:13px;">
+                    <i class="bi bi-info-circle-fill"></i>
+                    <strong>حسابات المرضى:</strong> هذه الحسابات تُستخدم لتسجيل دخول المرضى في <strong>بوابة المرضى (user.php)</strong>. كل مريض يحتاج حساباً مرتبطاً بملفه لتقديم طلبات الإجازة.
+                    <br><i class="bi bi-shield-lock"></i> لإدارة حسابات لوحة التحكم (المشرفين)، اذهب إلى <strong>الإعدادات ← إدارة المستخدمين</strong>.
+                </div>
                 <!-- Header Stats Row -->
                 <div class="row g-3 mb-4" id="accountsStatsRow">
                     <div class="col-6 col-md-3">
@@ -5851,7 +5910,7 @@ if (!in_array($uiDataViewMode, ['table','compact','cards','zebra','glass','minim
                         <button class="btn btn-outline-danger" id="acctFilterDisabled">معطل</button>
                         <button class="btn btn-outline-secondary active" id="acctFilterAll">الكل</button>
                     </div>
-                    <button class="btn btn-gradient btn-sm" id="acctAddUserBtn"><i class="bi bi-person-plus-fill"></i> إضافة حساب جديد</button>
+                    <button class="btn btn-gradient btn-sm" id="acctAddUserBtn"><i class="bi bi-person-plus-fill"></i> إضافة حساب مريض جديد</button>
                     <button class="btn btn-outline-secondary btn-sm" id="acctRefreshBtn"><i class="bi bi-arrow-repeat"></i> تحديث</button>
                 </div>
 
@@ -6924,14 +6983,15 @@ if (!in_array($uiDataViewMode, ['table','compact','cards','zebra','glass','minim
     <div class="modal-dialog modal-dialog-centered">
         <div class="modal-content">
             <div class="modal-header" style="background:linear-gradient(135deg,#6366f1,#8b5cf6);color:#fff;">
-                <h5 class="modal-title"><i class="bi bi-person-plus-fill"></i> إضافة حساب جديد</h5>
+                <h5 class="modal-title"><i class="bi bi-person-plus-fill"></i> إضافة حساب مريض جديد</h5>
                 <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
             </div>
             <div class="modal-body">
+                <div class="alert alert-warning py-2" style="font-size:12px;"><i class="bi bi-exclamation-triangle"></i> هذا الحساب سيُستخدم لتسجيل دخول المريض في <strong>بوابة المرضى (user.php)</strong>.</div>
                 <div class="row g-2">
                     <div class="col-12">
                         <label class="form-label fw-bold">اسم المستخدم <span class="text-danger">*</span></label>
-                        <input type="text" class="form-control" id="acctNewUsername" placeholder="مثال: user01">
+                        <input type="text" class="form-control" id="acctNewUsername" placeholder="مثال: patient01">
                     </div>
                     <div class="col-12">
                         <label class="form-label fw-bold">كلمة المرور <span class="text-danger">*</span></label>
@@ -6944,15 +7004,66 @@ if (!in_array($uiDataViewMode, ['table','compact','cards','zebra','glass','minim
                     <div class="col-12">
                         <label class="form-label fw-bold">الدور</label>
                         <select class="form-select" id="acctNewRole">
-                            <option value="user">مستخدم</option>
+                            <option value="user" selected>مستخدم (مريض)</option>
                             <option value="admin">مشرف</option>
                         </select>
+                    </div>
+                    <div class="col-12"><hr class="my-1"><small class="text-muted fw-bold"><i class="bi bi-person-badge"></i> ربط بمريض (اختياري)</small></div>
+                    <div class="col-12">
+                        <label class="form-label">المريض المرتبط</label>
+                        <select class="form-select" id="acctNewLinkPatient">
+                            <option value="0">-- بدون ربط --</option>
+                            <?php foreach ($patients as $pt): ?>
+                            <option value="<?= $pt['id'] ?>"><?= htmlspecialchars($pt['name_ar'] ?: $pt['name']) ?> — <?= htmlspecialchars($pt['identity_number']) ?></option>
+                            <?php endforeach; ?>
+                        </select>
+                    </div>
+                    <div class="col-12">
+                        <label class="form-label">عدد أيام الإجازة المسموحة</label>
+                        <input type="number" class="form-control" id="acctNewAllowedDays" min="0" max="365" value="0" placeholder="0">
+                        <div class="form-text">الحد الأقصى لأيام الإجازة التي يمكن للمريض طلبها من بوابة المرضى.</div>
                     </div>
                 </div>
             </div>
             <div class="modal-footer">
                 <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">إلغاء</button>
                 <button type="button" class="btn btn-gradient" id="acctNewUserSave"><i class="bi bi-plus"></i> إنشاء الحساب</button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- ======================== مودال تعديل حساب المريض ======================== -->
+<div class="modal fade" id="acctEditUserModal" tabindex="-1" aria-hidden="true">
+    <div class="modal-dialog modal-dialog-centered">
+        <div class="modal-content">
+            <div class="modal-header" style="background:linear-gradient(135deg,#0ea5e9,#2563eb);color:#fff;">
+                <h5 class="modal-title"><i class="bi bi-pencil-square"></i> تعديل بيانات الحساب</h5>
+                <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body">
+                <input type="hidden" id="acctEditUserId">
+                <div class="row g-3">
+                    <div class="col-12">
+                        <label class="form-label fw-bold">اسم المستخدم (اتركه فارغاً لعدم التغيير)</label>
+                        <input type="text" class="form-control" id="acctEditUsername" placeholder="اسم المستخدم الجديد">
+                    </div>
+                    <div class="col-12">
+                        <label class="form-label fw-bold">الاسم المعروض <span class="text-danger">*</span></label>
+                        <input type="text" class="form-control" id="acctEditDisplayName" placeholder="الاسم المعروض" required>
+                    </div>
+                    <div class="col-12">
+                        <label class="form-label fw-bold">كلمة المرور الجديدة (اتركها فارغة لعدم التغيير)</label>
+                        <div class="input-group">
+                            <input type="password" class="form-control" id="acctEditPassword" placeholder="كلمة المرور الجديدة">
+                            <button class="btn btn-outline-secondary" type="button" id="acctEditTogglePass"><i class="bi bi-eye"></i></button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">إلغاء</button>
+                <button type="button" class="btn btn-gradient" id="acctEditUserSave"><i class="bi bi-save2"></i> حفظ التعديلات</button>
             </div>
         </div>
     </div>
@@ -9121,6 +9232,7 @@ document.addEventListener('DOMContentLoaded', () => {
         const acctChangePassModal = new bootstrap.Modal(document.getElementById('acctChangePassModal'));
         const acctPaymentsModal = new bootstrap.Modal(document.getElementById('acctPaymentsModal'));
         const acctNewUserModal = new bootstrap.Modal(document.getElementById('acctNewUserModal'));
+        const acctEditUserModal = new bootstrap.Modal(document.getElementById('acctEditUserModal'));
 
         function acctGetExpiryStatus(expiryDate) {
             if (!expiryDate) return null;
@@ -9210,11 +9322,17 @@ document.addEventListener('DOMContentLoaded', () => {
                         <button class="btn btn-sm btn-outline-success acct-btn-payments" data-id="${u.id}" data-name="${htmlspecialchars(u.display_name)}" title="سجل المدفوعات">
                             <i class="bi bi-receipt"></i> المدفوعات
                         </button>
+                        <button class="btn btn-sm btn-outline-info acct-btn-edit" data-id="${u.id}" data-username="${htmlspecialchars(u.username)}" data-display="${htmlspecialchars(u.display_name)}" title="تعديل بيانات الحساب">
+                            <i class="bi bi-pencil"></i> تعديل
+                        </button>
                         <button class="btn btn-sm btn-outline-warning acct-btn-pass" data-id="${u.id}" title="تغيير كلمة المرور">
                             <i class="bi bi-key"></i>
                         </button>
                         <button class="btn btn-sm ${isActive ? 'btn-outline-danger' : 'btn-outline-success'} acct-btn-toggle" data-id="${u.id}" data-active="${u.is_active}" title="${isActive ? 'تعطيل الحساب' : 'تفعيل الحساب'}">
                             <i class="bi bi-${isActive ? 'slash-circle' : 'check-circle'}"></i> ${isActive ? 'تعطيل' : 'تفعيل'}
+                        </button>
+                        <button class="btn btn-sm btn-danger acct-btn-delete" data-id="${u.id}" data-name="${htmlspecialchars(u.display_name)}" title="حذف الحساب نهائياً">
+                            <i class="bi bi-trash3"></i> حذف
                         </button>
                     </div>
                 </div>
@@ -9316,12 +9434,16 @@ document.addEventListener('DOMContentLoaded', () => {
             const password = document.getElementById('acctNewPassword').value;
             const displayName = document.getElementById('acctNewDisplayName').value.trim();
             const role = document.getElementById('acctNewRole').value;
+            const linkPatientId = document.getElementById('acctNewLinkPatient')?.value || '0';
+            const allowedDays = document.getElementById('acctNewAllowedDays')?.value || '0';
             if (!username || !password || !displayName) { showToast('يرجى تعبئة جميع الحقول المطلوبة.', 'warning'); return; }
             showLoading();
             const fd = new FormData();
             fd.append('action', 'account_add_user'); fd.append('csrf_token', CSRF_TOKEN);
             fd.append('username', username); fd.append('password', password);
             fd.append('display_name', displayName); fd.append('role', role);
+            fd.append('link_patient_id', linkPatientId);
+            fd.append('link_allowed_days', allowedDays);
             const res = await fetch(REQUEST_URL, { method: 'POST', body: fd, headers: { 'X-Requested-With': 'XMLHttpRequest' } });
             const result = await res.json(); hideLoading();
             if (result.success) {
@@ -9330,6 +9452,8 @@ document.addEventListener('DOMContentLoaded', () => {
                 document.getElementById('acctNewUsername').value = '';
                 document.getElementById('acctNewPassword').value = '';
                 document.getElementById('acctNewDisplayName').value = '';
+                if (document.getElementById('acctNewLinkPatient')) document.getElementById('acctNewLinkPatient').value = '0';
+                if (document.getElementById('acctNewAllowedDays')) document.getElementById('acctNewAllowedDays').value = '0';
                 acctLoadData();
             } else { showToast(result.message, 'danger'); }
         });
@@ -9341,6 +9465,8 @@ document.addEventListener('DOMContentLoaded', () => {
             const paymentsBtn = e.target.closest('.acct-btn-payments');
             const passBtn = e.target.closest('.acct-btn-pass');
             const toggleBtn = e.target.closest('.acct-btn-toggle');
+            const editBtn = e.target.closest('.acct-btn-edit');
+            const deleteBtn = e.target.closest('.acct-btn-delete');
 
             if (addDaysBtn) {
                 const uid = addDaysBtn.dataset.id;
@@ -9440,6 +9566,32 @@ document.addEventListener('DOMContentLoaded', () => {
                 if (result.success) { showToast(result.message, 'success'); acctLoadData(); }
                 else { showToast(result.message, 'danger'); }
             }
+
+            if (editBtn) {
+                document.getElementById('acctEditUserId').value = editBtn.dataset.id;
+                document.getElementById('acctEditUsername').value = '';
+                document.getElementById('acctEditDisplayName').value = editBtn.dataset.display || '';
+                document.getElementById('acctEditPassword').value = '';
+                acctEditUserModal.show();
+            }
+
+            if (deleteBtn) {
+                const uid = deleteBtn.dataset.id;
+                const name = deleteBtn.dataset.name;
+                confirmMessage.textContent = `هل أنت متأكد من حذف حساب "${name}" نهائياً؟ لا يمكن التراجع عن هذا الإجراء.`;
+                confirmYesBtn.textContent = 'نعم، احذف نهائياً';
+                currentConfirmAction = async () => {
+                    showLoading();
+                    const fd = new FormData();
+                    fd.append('action', 'account_delete_user'); fd.append('csrf_token', CSRF_TOKEN);
+                    fd.append('user_id', uid);
+                    const res = await fetch(REQUEST_URL, { method: 'POST', body: fd, headers: { 'X-Requested-With': 'XMLHttpRequest' } });
+                    const result = await res.json(); hideLoading();
+                    if (result.success) { showToast(result.message, 'success'); acctLoadData(); }
+                    else { showToast(result.message, 'danger'); }
+                };
+                confirmModal.show();
+            }
         });
 
         // Delete payment from history
@@ -9494,6 +9646,31 @@ document.addEventListener('DOMContentLoaded', () => {
             const result = await res.json(); hideLoading();
             if (result.success) { showToast(result.message, 'success'); acctLinkPatientModal.hide(); acctPatientsCache = []; acctLoadData(); }
             else { showToast(result.message, 'danger'); }
+        });
+
+        // Save edit user
+        document.getElementById('acctEditUserSave')?.addEventListener('click', async () => {
+            const uid = document.getElementById('acctEditUserId').value;
+            const displayName = document.getElementById('acctEditDisplayName').value.trim();
+            const newUsername = document.getElementById('acctEditUsername').value.trim();
+            const newPassword = document.getElementById('acctEditPassword').value;
+            if (!displayName) { showToast('يرجى إدخال الاسم المعروض.', 'warning'); return; }
+            showLoading();
+            const fd = new FormData();
+            fd.append('action', 'account_edit_user'); fd.append('csrf_token', CSRF_TOKEN);
+            fd.append('user_id', uid); fd.append('display_name', displayName);
+            fd.append('new_username', newUsername); fd.append('new_password', newPassword);
+            const res = await fetch(REQUEST_URL, { method: 'POST', body: fd, headers: { 'X-Requested-With': 'XMLHttpRequest' } });
+            const result = await res.json(); hideLoading();
+            if (result.success) { showToast(result.message, 'success'); acctEditUserModal.hide(); acctLoadData(); }
+            else { showToast(result.message, 'danger'); }
+        });
+
+        // Toggle password visibility in edit modal
+        document.getElementById('acctEditTogglePass')?.addEventListener('click', function() {
+            const inp = document.getElementById('acctEditPassword');
+            if (inp.type === 'password') { inp.type = 'text'; this.innerHTML = '<i class="bi bi-eye-slash"></i>'; }
+            else { inp.type = 'password'; this.innerHTML = '<i class="bi bi-eye"></i>'; }
         });
 
         // Save change password
