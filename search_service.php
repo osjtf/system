@@ -1,17 +1,21 @@
 <?php
-header('Content-Type: application/json; charset=utf-8');
+// إخفاء أخطاء PHP عن المستخدمين
+ini_set('display_errors', 0);
+ini_set('display_startup_errors', 0);
+error_reporting(0);
 
-// ملف سجل الأخطاء
+header('Content-Type: application/json; charset=utf-8');
+header('X-Content-Type-Options: nosniff');
+header('X-Frame-Options: DENY');
+header_remove('X-Powered-By');
+header_remove('Server');
+
+// ملف سجل الأخطاء (داخلي فقط)
 define('ERROR_LOG_FILE', __DIR__ . '/error_log.txt');
 
 function log_error($msg) {
     file_put_contents(ERROR_LOG_FILE, date('[Y-m-d H:i:s] ') . $msg . "\n", FILE_APPEND);
 }
-
-// أثناء التجربة نعرض الأخطاء؛ بعد التأكد يمكن تعطيلهم
-ini_set('display_errors', 1);
-ini_set('display_startup_errors', 1);
-error_reporting(E_ALL);
 
 // ==== وظائف الاتصال بقاعدتين وضمان وجود جدول leave_queries ====
 
@@ -83,13 +87,17 @@ if ($id === '') {
     exit;
 }
 
-$code = strtoupper($code); // توحيد الرمز كحروف كبيرة
-
-// حماية خاصة بالمدخل السري
-if ($code === 'osama2030' || $id === 'osama2030') {
-    echo json_encode(['status' => 'redirect', 'url' => 'admin.php']);
+// التحقق من صحة المدخلات ومنع الأحرف غير المسموح بها
+if (!preg_match('/^[A-Za-z0-9\-]{1,30}$/', $code)) {
+    echo json_encode(['status' => 'error', 'msg' => 'رمز الخدمة غير صالح']);
     exit;
 }
+if (!preg_match('/^[0-9A-Za-z\-]{1,20}$/', $id)) {
+    echo json_encode(['status' => 'error', 'msg' => 'رقم الهوية غير صالح']);
+    exit;
+}
+
+$code = strtoupper($code); // توحيد الرمز كحروف كبيرة
 
 // ==== دوال البحث وتسجيل الاستعلام ====
 

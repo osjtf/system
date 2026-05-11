@@ -24,11 +24,21 @@ ini_set('session.cookie_samesite', 'Strict');
 ini_set('session.use_strict_mode', '1');
 session_start();
 
+// إخفاء معلومات الخادم والمسارات
+header_remove('X-Powered-By');
+header_remove('Server');
+
+// منع عرض أخطاء PHP للمستخدمين
+ini_set('display_errors', '0');
+ini_set('display_startup_errors', '0');
+error_reporting(0);
+
 date_default_timezone_set('Asia/Riyadh');
-header('X-Frame-Options: SAMEORIGIN');
+header('X-Frame-Options: DENY');
 header('X-Content-Type-Options: nosniff');
 header('Referrer-Policy: strict-origin-when-cross-origin');
 header('Permissions-Policy: geolocation=(), microphone=(self), camera=()');
+header('Content-Security-Policy: default-src \'self\'; script-src \'self\' \'unsafe-inline\' https://cdn.jsdelivr.net https://cdnjs.cloudflare.com; style-src \'self\' \'unsafe-inline\' https://cdn.jsdelivr.net https://cdnjs.cloudflare.com https://fonts.googleapis.com; font-src \'self\' https://fonts.gstatic.com https://cdnjs.cloudflare.com; img-src \'self\' data: https: blob:; connect-src \'self\'; worker-src blob:;');
 
 // ======================== إعدادات قاعدة البيانات ========================
 $db_host = 'mysql.railway.internal';
@@ -1450,11 +1460,24 @@ if (isset($_POST['action']) && $_POST['action'] === 'login') {
         exit;
     }
     
-    $stmt = $pdo->prepare("SELECT * FROM admin_users WHERE username = ? AND is_active = 1");
+    $stmt = $pdo->prepare("SELECT u.* FROM admin_users u LEFT JOIN patient_accounts pa ON pa.user_id = u.id WHERE u.username = ? AND u.is_active = 1");
     $stmt->execute([$username]);
     $user = $stmt->fetch();
-    
+
+    // منع حسابات المرضى من الدخول إلى لوحة التحكم
     if ($user && password_verify($password, $user['password_hash'])) {
+        // التحقق من أن المستخدم ليس حساب مريض
+        $patientCheckStmt = $pdo->prepare("SELECT COUNT(*) FROM patient_accounts WHERE user_id = ?");
+        $patientCheckStmt->execute([$user['id']]);
+        $isPatientAccount = (int)$patientCheckStmt->fetchColumn() > 0;
+
+        if ($isPatientAccount) {
+            // حساب مريض - لا يُسمح له بالدخول إلى لوحة التحكم
+            $_SESSION['login_attempts'] = intval($_SESSION['login_attempts'] ?? 0) + 1;
+            echo json_encode(['success' => false, 'message' => 'اسم المستخدم أو كلمة المرور غير صحيحة.']);
+            exit;
+        }
+
         session_regenerate_id(true);
         $_SESSION['login_attempts'] = 0;
         $_SESSION['login_lock_until'] = null;
