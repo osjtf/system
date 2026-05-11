@@ -1314,6 +1314,7 @@ if ($pdfMode === 'download') {
         @unlink($tmpHtml);
         error_log('WeasyPrint Error: ' . $output);
     }
+    return;
 }
     // ==================== PREVIEW MODE ====================
   header('Content-Type: text/html; charset=utf-8');
@@ -2267,16 +2268,15 @@ if (isset($_POST['action']) && $_POST['action'] !== 'login' && $_POST['action'] 
             ]);
             break;
 
-        case 'add_doctors_batch':
+       case 'add_doctors_batch':
             $batchText = trim($_POST['doctors_batch_text'] ?? '');
             $batchHospitalId = intval($_POST['batch_hospital_id'] ?? 0) ?: null;
             
-            // Parse new format: name_ar | name_en | title_ar | title_en (per line)
             $lines = array_filter(array_map('trim', explode("\n", $batchText)));
             if (empty($lines)) {
                 echo json_encode([
                     'success' => false,
-                    'message' => 'لم يتم التعرّف على أي طبيب. استخدم صيغة: اسم عربي | اسم إنجليزي | مسمى عربي | مسمى إنجليزي'
+                    'message' => 'لم يتم التعرّف على أي طبيب. يرجى كتابة البيانات بشكل صحيح.'
                 ]);
                 exit;
             }
@@ -2291,19 +2291,32 @@ if (isset($_POST['action']) && $_POST['action'] !== 'login' && $_POST['action'] 
 
             foreach ($lines as $index => $line) {
                 $parts = array_map('trim', explode('|', $line));
-                $nameAr = $parts[0] ?? '';
-                $nameEn = $parts[1] ?? '';
-                $titleAr = $parts[2] ?? '';
-                $titleEn = $parts[3] ?? '';
+                $nameAr = ''; $nameEn = ''; $titleAr = ''; $titleEn = '';
+
+                // الفرز الذكي حسب عدد المعطيات المدخلة
+                if (count($parts) === 2) {
+                    $nameAr = $parts[0];
+                    $titleAr = $parts[1];
+                } elseif (count($parts) === 3) {
+                    $nameAr = $parts[0];
+                    $nameEn = $parts[1];
+                    $titleAr = $parts[2];
+                } elseif (count($parts) >= 4) {
+                    $nameAr = $parts[0];
+                    $nameEn = $parts[1];
+                    $titleAr = $parts[2];
+                    $titleEn = $parts[3];
+                } else {
+                    $nameAr = $parts[0] ?? '';
+                }
                 
                 if ($nameAr === '' || $titleAr === '') {
-                    $errors[] = "السطر " . ($index + 1) . " ناقص البيانات الأساسية.";
+                    $errors[] = "السطر " . ($index + 1) . " ناقص البيانات الأساسية (الاسم والمسمى).";
                     continue;
                 }
 
                 $checkStmt->execute([$nameAr, $nameAr, $titleAr, $titleAr]);
-                $existing = $checkStmt->fetch();
-                if ($existing) {
+                if ($checkStmt->fetch()) {
                     $duplicates++;
                     continue;
                 }
@@ -2316,9 +2329,6 @@ if (isset($_POST['action']) && $_POST['action'] !== 'login' && $_POST['action'] 
             $summaryMessage = "تمت معالجة الدفعة بنجاح: أضيف {$inserted}، مكرّر {$duplicates}.";
             if (!empty($errors)) {
                 $summaryMessage .= " أخطاء: " . implode(' | ', array_slice($errors, 0, 3));
-                if (count($errors) > 3) {
-                    $summaryMessage .= " ...";
-                }
             }
 
             echo json_encode([
@@ -3495,7 +3505,7 @@ if (isset($_POST['action']) && $_POST['action'] !== 'login' && $_POST['action'] 
             echo json_encode(['success'=>true,'message'=>'تم تغيير كلمة المرور بنجاح.']);
             break;
 
-        case 'account_fetch_payments':
+   case 'account_fetch_payments':
             if ($_SESSION['admin_role'] !== 'admin') { echo json_encode(['success'=>false,'message'=>'ليس لديك صلاحية.']); exit; }
             $pdo->exec("CREATE TABLE IF NOT EXISTS account_payments (
                 id INT AUTO_INCREMENT PRIMARY KEY,
@@ -3506,7 +3516,10 @@ if (isset($_POST['action']) && $_POST['action'] !== 'login' && $_POST['action'] 
                 created_by INT NULL,
                 FOREIGN KEY (user_id) REFERENCES admin_users(id) ON DELETE CASCADE
             ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci");
-            $uid = intval($_GET['user_id'] ?? 0);
+            
+            // التعديل هنا: قراءة الـ user_id من POST
+            $uid = intval($_POST['user_id'] ?? $_GET['user_id'] ?? 0);
+            
             $stmt = $pdo->prepare("SELECT ap.*, au.display_name AS created_by_name FROM account_payments ap LEFT JOIN admin_users au ON ap.created_by = au.id WHERE ap.user_id = ? ORDER BY ap.paid_at DESC");
             $stmt->execute([$uid]);
             echo json_encode(['success'=>true,'payments'=>$stmt->fetchAll()]);
@@ -4036,6 +4049,10 @@ if (!in_array($uiDataViewMode, ['table','compact','cards','zebra','glass','minim
             inset: 0;
             background: rgba(255,255,255,0);
             transition: background var(--t-fast) var(--ease);
+            pointer-events: none;
+        }
+        .btn i, .btn .bi, .action-btn i, .action-btn .bi {
+            pointer-events: none;
         }
 
         .btn:hover::after { background: rgba(255,255,255,0.1); }
@@ -6063,7 +6080,7 @@ if (!in_array($uiDataViewMode, ['table','compact','cards','zebra','glass','minim
         </div>
 
         <!-- ======================== تبويب المستشفيات ======================== -->
-        <div class="tab-pane fade" id="pane-hospitals" role="tabpanel">
+       <div class="tab-pane fade" id="pane-hospitals" role="tabpanel">
             <div class="card-custom">
                 <div class="card-header"><i class="bi bi-hospital text-primary"></i> إدارة المستشفيات</div>
                 <div class="card-body">
@@ -6098,6 +6115,14 @@ if (!in_array($uiDataViewMode, ['table','compact','cards','zebra','glass','minim
                             </div>
                         </form>
                     </div>
+                    
+                    <div class="toolbar mb-3">
+                        <div class="input-group" style="max-width:280px;">
+                            <input type="text" class="form-control" id="searchHospitals" placeholder="بحث في المستشفيات...">
+                            <button class="btn btn-gradient" id="btn-search-hospitals" type="button"><i class="bi bi-search"></i></button>
+                        </div>
+                    </div>
+                    
                     <div class="table-responsive">
                         <table class="table table-bordered table-hover table-striped text-center mobile-readable" id="hospitalsTable">
                             <thead><tr><th>#</th><th>الشعار</th><th>الاسم (عربي)</th><th>الاسم (English)</th><th>الترخيص</th><th>البادئة</th><th>التحكم</th></tr></thead>
@@ -6135,14 +6160,16 @@ if (!in_array($uiDataViewMode, ['table','compact','cards','zebra','glass','minim
                         </div>
                         <div class="col-md-2"><button type="submit" class="btn btn-gradient w-100"><i class="bi bi-plus"></i> إضافة طبيب</button></div>
                     </form>
-                    <div class="alert alert-light border mb-3">
+           <div class="alert alert-light border mb-3">
                         <div class="d-flex flex-wrap justify-content-between align-items-center gap-2 mb-2">
                             <strong><i class="bi bi-people-fill text-primary"></i> إضافة دفعة أطباء</strong>
                             <small class="text-muted">كل سطر = اسم عربي | اسم إنجليزي | مسمى عربي | مسمى إنجليزي</small>
                         </div>
+                        
                         <form id="addDoctorsBatchForm" class="row g-2">
                             <div class="col-md-4">
                                 <label class="form-label">المستشفى</label>
+                                <input type="text" class="form-control form-control-sm mb-2" id="batch_hospital_search" placeholder="بحث سريع باسم المستشفى...">
                                 <select class="form-select" name="batch_hospital_id" id="batch_hospital_id">
                                     <option value="">اختر مستشفى</option>
                                     <?php foreach ($hospitals_data as $h): ?>
@@ -7342,15 +7369,17 @@ if (!in_array($uiDataViewMode, ['table','compact','cards','zebra','glass','minim
                         <input type="text" class="form-control" id="acctNewDisplayName" placeholder="مثال: أحمد محمد">
                     </div>
                     <div class="col-12"><hr class="my-1"><small class="text-muted fw-bold"><i class="bi bi-person-badge"></i> ربط بمريض (اختياري)</small></div>
-                    <div class="col-12">
-                        <label class="form-label">المريض المرتبط</label>
-                        <select class="form-select" id="acctNewLinkPatient">
-                            <option value="0">-- بدون ربط --</option>
-                            <?php foreach ($patients as $pt): ?>
-                            <option value="<?= $pt['id'] ?>"><?= htmlspecialchars($pt['name_ar'] ?: $pt['name']) ?> — <?= htmlspecialchars($pt['identity_number']) ?></option>
-                            <?php endforeach; ?>
-                        </select>
-                    </div>
+                  <div class="col-12">
+    <label class="form-label">المريض المرتبط</label>
+    <input type="text" class="form-control form-control-sm mb-2" id="acctNewLinkPatientSearch" placeholder="بحث سريع باسم المريض أو الهوية...">
+    
+    <select class="form-select" id="acctNewLinkPatient">
+        <option value="0">-- بدون ربط --</option>
+        <?php foreach ($patients as $pt): ?>
+        <option value="<?= $pt['id'] ?>"><?= htmlspecialchars($pt['name_ar'] ?: $pt['name']) ?> — <?= htmlspecialchars($pt['identity_number']) ?></option>
+        <?php endforeach; ?>
+    </select>
+</div>
                     <div class="col-12">
                         <label class="form-label">عدد أيام الإجازة المسموحة</label>
                         <input type="number" class="form-control" id="acctNewAllowedDays" min="0" max="365" value="0" placeholder="0">
@@ -7358,7 +7387,10 @@ if (!in_array($uiDataViewMode, ['table','compact','cards','zebra','glass','minim
                     </div>
                 </div>
             </div>
-            <div class="modal-footer">
+          <div class="modal-footer">
+                <button type="button" class="btn btn-outline-success d-none me-auto" id="copyAcctMsgBtn">
+                    <i class="bi bi-whatsapp"></i> نسخ رسالة الواتساب
+                </button>
                 <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">إلغاء</button>
                 <button type="button" class="btn btn-gradient" id="acctNewUserSave"><i class="bi bi-plus"></i> إنشاء الحساب</button>
             </div>
@@ -8499,6 +8531,10 @@ document.addEventListener('DOMContentLoaded', () => {
     setupSelectQuickSearch('dup_doctor_search', 'dup_doctor_select');
     setupSelectQuickSearch('doctor_id_edit_search', 'doctor_id_edit');
     setupSelectQuickSearch('hospital_id_search', 'hospital_id');
+    // أضف هذا السطر لربط حقل البحث الجديد بالقائمة
+setupSelectQuickSearch('acctNewLinkPatientSearch', 'acctNewLinkPatient');
+    // أضف هذا السطر لربط حقل البحث الجديد بقائمة المستشفيات في نموذج الدفعة
+setupSelectQuickSearch('batch_hospital_search', 'batch_hospital_id');
 
     const quickPatientModalEl = document.getElementById('quickPatientModal');
     const quickDoctorModalEl = document.getElementById('quickDoctorModal');
@@ -9761,12 +9797,117 @@ document.addEventListener('DOMContentLoaded', () => {
         });
 
         // Add new user
-        document.getElementById('acctAddUserBtn')?.addEventListener('click', () => acctNewUserModal.show());
+  // 1. دالة توليد كلمات مرور قوية (حروف كبيرة وصغيرة + أرقام + رموز خاصة)
+        function generateStrongPassword(length = 10) {
+            const upper = 'ABCDEFGHJKLMNPQRSTUVWXYZ';
+            const lower = 'abcdefghijkmnpqrstuvwxyz';
+            const numbers = '23456789';
+            const special = '@#$%&*!';
+            const all = upper + lower + numbers + special;
+
+            let pass = '';
+            pass += upper.charAt(Math.floor(Math.random() * upper.length));
+            pass += lower.charAt(Math.floor(Math.random() * lower.length));
+            pass += numbers.charAt(Math.floor(Math.random() * numbers.length));
+            pass += special.charAt(Math.floor(Math.random() * special.length));
+
+            for (let i = 4; i < length; i++) {
+                pass += all.charAt(Math.floor(Math.random() * all.length));
+            }
+
+            return pass.split('').sort(() => 0.5 - Math.random()).join('');
+        }
+
+        // 2. تصفير الحقول وإخفاء زر النسخ عند فتح المودال
+       document.getElementById('acctAddUserBtn')?.addEventListener('click', () => {
+    // تصفير الحقول السابقة
+    document.getElementById('acctNewUsername').value = '';
+    document.getElementById('acctNewPassword').value = '';
+    document.getElementById('acctNewDisplayName').value = '';
+    
+    // تصفير حقل البحث الجديد وإعادة إظهار كل الخيارات
+    const searchInput = document.getElementById('acctNewLinkPatientSearch');
+    if (searchInput) {
+        searchInput.value = '';
+        searchInput.dispatchEvent(new Event('input')); // لتحديث القائمة وإظهار الكل
+    }
+
+    if (document.getElementById('acctNewLinkPatient')) document.getElementById('acctNewLinkPatient').value = '0';
+    document.getElementById('copyAcctMsgBtn')?.classList.add('d-none');
+    acctNewUserModal.show();
+});
+        // 3. التعبئة التلقائية وإظهار زر النسخ عند اختيار المريض
+        document.getElementById('acctNewLinkPatient')?.addEventListener('change', function() {
+            const ptId = this.value;
+            const copyBtn = document.getElementById('copyAcctMsgBtn');
+
+            if (ptId && ptId !== '0') {
+                const pt = (currentTableData.patients || []).find(x => x.id == ptId);
+                if (pt) {
+                    document.getElementById('acctNewDisplayName').value = pt.name_ar || pt.name || '';
+
+                    let baseUser = pt.name_en ? pt.name_en.trim().split(/\s+/)[0].replace(/[^a-zA-Z0-9]/g, '').toLowerCase() : 'patient';
+                    const rnd = Math.floor(Math.random() * 900 + 100);
+                    document.getElementById('acctNewUsername').value = baseUser + '.' + rnd;
+
+                    const passInput = document.getElementById('acctNewPassword');
+                    passInput.value = generateStrongPassword(12);
+                    passInput.type = 'text';
+
+                    copyBtn?.classList.remove('d-none');
+                }
+            } else {
+                document.getElementById('acctNewPassword').type = 'password';
+                copyBtn?.classList.add('d-none');
+            }
+        });
+
+        // 4. ميزة نسخ رسالة الواتساب الجذابة عند الضغط على الزر
+        document.getElementById('copyAcctMsgBtn')?.addEventListener('click', async function() {
+            const ptName = document.getElementById('acctNewDisplayName').value.trim();
+            const user = document.getElementById('acctNewUsername').value.trim();
+            const pass = document.getElementById('acctNewPassword').value;
+            
+            const portalUrl = window.location.origin + window.location.pathname.replace('admin.php', 'user.php');
+
+            if (!user || !pass) {
+                showToast('يرجى توليد أو كتابة اليوزر والباسوورد أولاً.', 'warning');
+                return;
+            }
+
+            const whatsappMsg = `🎉 *تم تفعيل حساب ${ptName} بنجاح* 🎉\n\n` +
+                                `👤 *اليوزر:* ${user}\n` +
+                                `🔑 *الباسوورد:* ${pass}\n\n` +
+                                `🌐 *سجل الدخول في الموقع الآتي بيوزرك والباسوورد:*\n` +
+                                `${portalUrl}\n\n` +
+                                `✨ استمتع بالخدمة الفورية لإصدار الاجازات! ولأي استفسار أو دعم وإضافة رصيد أيام لكم، معاكم هنا في الواتس دائماً 💬🤝`;
+
+            try {
+                await navigator.clipboard.writeText(whatsappMsg);
+                
+                const originalHtml = this.innerHTML;
+                this.innerHTML = '<i class="bi bi-check2-all"></i> تم النسخ للحافظة بنجاح! ✅';
+                this.classList.remove('btn-outline-success');
+                this.classList.add('btn-success');
+                showToast('تم نسخ رسالة الواتساب! الصقها مباشرة للمريض 📋✨', 'success');
+
+                setTimeout(() => {
+                    this.innerHTML = originalHtml;
+                    this.classList.remove('btn-success');
+                    this.classList.add('btn-outline-success');
+                }, 3000);
+
+            } catch (err) {
+                showToast('فشل النسخ التلقائي، يرجى نسخ البيانات يدوياً.', 'danger');
+            }
+        });
+
+        // 5. حفظ الحساب وإرساله للخادم
         document.getElementById('acctNewUserSave')?.addEventListener('click', async () => {
             const username = document.getElementById('acctNewUsername').value.trim();
             const password = document.getElementById('acctNewPassword').value;
             const displayName = document.getElementById('acctNewDisplayName').value.trim();
-            const role = 'user'; // حسابات المرضى دائماً بدور "مستخدم"
+            const role = 'user';
             const linkPatientId = document.getElementById('acctNewLinkPatient')?.value || '0';
             const allowedDays = document.getElementById('acctNewAllowedDays')?.value || '0';
             if (!username || !password || !displayName) { showToast('يرجى تعبئة جميع الحقول المطلوبة.', 'warning'); return; }
@@ -9790,7 +9931,6 @@ document.addEventListener('DOMContentLoaded', () => {
                 acctLoadData();
             } else { showToast(result.message, 'danger'); }
         });
-
         // Grid click delegation
         document.getElementById('accountsGrid')?.addEventListener('click', async (e) => {
             const addDaysBtn = e.target.closest('.acct-btn-add-days');
@@ -9852,13 +9992,15 @@ document.addEventListener('DOMContentLoaded', () => {
                 acctLinkPatientModal.show();
             }
 
-            if (paymentsBtn) {
+           if (paymentsBtn) {
                 const uid = paymentsBtn.dataset.id;
                 document.getElementById('acctPaymentsUserName').textContent = paymentsBtn.dataset.name;
                 document.getElementById('acctPaymentsList').innerHTML = '<div class="text-center py-4"><div class="spinner-border spinner-border-sm text-success"></div></div>';
                 acctPaymentsModal.show();
-                const res = await fetch(`${REQUEST_URL}?action=account_fetch_payments&user_id=${uid}`, { headers: { 'X-Requested-With': 'XMLHttpRequest' } });
-                const data = await res.json();
+                
+                // التعديل هنا: استخدام الدالة الموحدة لإرسال الطلب كـ POST مع توكن الأمان (CSRF)
+                const data = await sendAjaxRequest('account_fetch_payments', { user_id: uid });
+                
                 if (data.success) {
                     const payments = data.payments || [];
                     const total = payments.reduce((s, p) => s + parseFloat(p.amount || 0), 0);
@@ -10348,7 +10490,7 @@ document.addEventListener('DOMContentLoaded', () => {
         updatePaymentNotifications(data);
     }
 
-    document.getElementById('searchLeaves').addEventListener('input', debounce(function() {
+  document.getElementById('searchLeaves').addEventListener('input', debounce(function() {
         filtersState.leaves.search = this.value;
         applyLeavesFilters();
     }));
@@ -10377,6 +10519,15 @@ document.addEventListener('DOMContentLoaded', () => {
         filtersState.payments.search = this.value;
         applyPaymentsFilters();
     }));
+
+    // ====== إضافة البحث الفوري للمستشفيات هنا ======
+    document.getElementById('searchHospitals')?.addEventListener('input', debounce(function() {
+        renderHospitals();
+    }));
+
+    document.getElementById('btn-search-hospitals')?.addEventListener('click', () => {
+        renderHospitals();
+    });
 
     document.getElementById('showPaidLeaves').addEventListener('click', () => { filtersState.leaves.typeFilter = 'paid'; applyLeavesFilters(); });
     document.getElementById('showUnpaidLeaves').addEventListener('click', () => { filtersState.leaves.typeFilter = 'unpaid'; applyLeavesFilters(); });
@@ -10927,12 +11078,17 @@ document.addEventListener('DOMContentLoaded', () => {
         const logoImg = hasLogo ? '<span class="badge bg-success"><i class="bi bi-image"></i> موجود</span>' : (h.logo_url ? `<img src="${htmlspecialchars(h.logo_url)}" style="max-height:40px;max-width:80px;" onerror="this.parentElement.innerHTML='افتراضي'">` : 'افتراضي');
         return `<tr data-id="${h.id}"><td class="row-num"></td><td>${logoImg}</td><td>${htmlspecialchars(h.name_ar || '')}</td><td>${htmlspecialchars(h.name_en || '')}</td><td>${h.license_number || '-'}</td><td><span class="badge ${h.service_prefix === 'PSL' ? 'bg-warning' : 'bg-success'}">${h.service_prefix || 'GSL'}</span></td><td><button class="btn btn-sm btn-gradient action-btn btn-edit-hospital" data-id="${h.id}" data-name-ar="${htmlspecialchars(h.name_ar || '')}" data-name-en="${htmlspecialchars(h.name_en || '')}" data-license="${htmlspecialchars(h.license_number || '')}" data-prefix="${h.service_prefix || 'GSL'}" data-logo="${hasLogo ? 'has_logo' : htmlspecialchars(h.logo_url || '')}" data-logo-scale="${h.logo_scale || 1}" data-logo-offset-x="${h.logo_offset_x || 0}" data-logo-offset-y="${h.logo_offset_y || 0}"><i class="bi bi-pencil"></i></button> <button class="btn btn-sm btn-danger-custom action-btn btn-delete-hospital" data-id="${h.id}"><i class="bi bi-trash3"></i></button></td></tr>`;
     }
-    function renderHospitals() {
+  function renderHospitals() {
         if (hospitalsTable && currentTableData.hospitals) {
-            updateTable(hospitalsTable, currentTableData.hospitals, generateHospitalRow);
+            let filtered = [...currentTableData.hospitals];
+            const q = normalizeSearchText(document.getElementById('searchHospitals')?.value || '');
+            if (q) {
+                filtered = filtered.filter(h => matchesSearch(h, q));
+            }
+            updateTable(hospitalsTable, filtered, generateHospitalRow);
         }
     }
-    function updateHospitalSelects() {
+   function updateHospitalSelects() {
         const selects = [
             document.querySelector('#addDoctorForm [name="doctor_hospital_id"]'),
             document.getElementById('hospital_id'),
@@ -10940,7 +11096,8 @@ document.addEventListener('DOMContentLoaded', () => {
             document.getElementById('edit_doctor_hospital_id'),
             document.getElementById('quick_doctor_hospital_id'),
             document.getElementById('dup_hospital_id'),
-            document.getElementById('hospital_id_edit')
+            document.getElementById('hospital_id_edit'),
+            document.getElementById('dup_hospital_select')
         ];
         const seen = new Set();
         selects.forEach(sel => {
@@ -10949,7 +11106,7 @@ document.addEventListener('DOMContentLoaded', () => {
             const curVal = sel.value;
             const isLeaveForm = sel.id === 'hospital_id';
             const isBatch = sel.id === 'batch_hospital_id';
-            const isRequiredLeaveHospital = ['hospital_id', 'dup_hospital_id', 'hospital_id_edit'].includes(sel.id);
+            const isRequiredLeaveHospital = ['hospital_id', 'dup_hospital_id', 'hospital_id_edit', 'dup_hospital_select'].includes(sel.id);
             sel.innerHTML = isRequiredLeaveHospital ? '<option value="">-- اختر مستشفى --</option>' : (isBatch ? '<option value="">اختر مستشفى</option>' : '<option value="">المستشفى (اختياري)</option>');
             (currentTableData.hospitals || []).forEach(h => {
                 const opt = document.createElement('option');
@@ -10959,6 +11116,11 @@ document.addEventListener('DOMContentLoaded', () => {
                 if (h.id == curVal) opt.selected = true;
                 sel.appendChild(opt);
             });
+
+            // ⚠️ التعديل الأهم: تحديث ذاكرة البحث للقائمة فور تعبئتها بالبيانات
+            if (sel.id) {
+                refreshSelectQuickSearchData(sel.id);
+            }
         });
     }
     renderHospitals();
@@ -11023,47 +11185,103 @@ document.addEventListener('DOMContentLoaded', () => {
         if (url) { const testImg = new Image(); testImg.onload = () => showLogoPreview(url); testImg.onerror = () => {}; testImg.src = url; }
     });
 
-    hospitalsTable?.addEventListener('click', (e) => {
+// ====== التقاط أحداث أزرار المستشفيات (تعديل وحذف) عبر Event Delegation على مستوى المستند ======
+    document.addEventListener('click', (e) => {
         const editBtn = e.target.closest('.btn-edit-hospital');
         const delBtn = e.target.closest('.btn-delete-hospital');
+        
+        // 1. معالجة زر التعديل
         if (editBtn) {
-            document.getElementById('edit_hospital_id').value = editBtn.dataset.id;
-            document.getElementById('edit_hospital_name_ar').value = editBtn.dataset.nameAr || '';
-            document.getElementById('edit_hospital_name_en').value = editBtn.dataset.nameEn || '';
-            document.getElementById('edit_hospital_license').value = editBtn.dataset.license || '';
-            document.getElementById('edit_hospital_prefix').value = editBtn.dataset.prefix || 'GSL';
-            document.getElementById('edit_hospital_logo_url').value = '';
-            document.getElementById('edit_hospital_logo_file').value = '';
-            // Load saved logo scale/offset
+            e.preventDefault();
+            
+            const hid = editBtn.dataset.id || '';
+            const elId = document.getElementById('edit_hospital_id');
+            const elNameAr = document.getElementById('edit_hospital_name_ar');
+            const elNameEn = document.getElementById('edit_hospital_name_en');
+            const elLicense = document.getElementById('edit_hospital_license');
+            const elPrefix = document.getElementById('edit_hospital_prefix');
+            const elLogoUrl = document.getElementById('edit_hospital_logo_url');
+            const elLogoFile = document.getElementById('edit_hospital_logo_file');
+            
+            if (elId) elId.value = hid;
+            if (elNameAr) elNameAr.value = editBtn.dataset.nameAr || '';
+            if (elNameEn) elNameEn.value = editBtn.dataset.nameEn || '';
+            if (elLicense) elLicense.value = editBtn.dataset.license || '';
+            if (elPrefix) elPrefix.value = editBtn.dataset.prefix || 'GSL';
+            if (elLogoUrl) elLogoUrl.value = '';
+            if (elLogoFile) elLogoFile.value = '';
+            
+            // تحميل إعدادات إزاحة وتكبير الشعار المحفوظة للمستشفى
             logoScale = parseFloat(editBtn.dataset.logoScale || 1);
             logoOffX = parseFloat(editBtn.dataset.logoOffsetX || 0);
             logoOffY = parseFloat(editBtn.dataset.logoOffsetY || 0);
-            logoSlider.value = logoScale;
-            updateLogoTransform();
+            
+            const lSlider = document.getElementById('logoScaleSlider');
+            if (lSlider) lSlider.value = logoScale;
+            
+            if (typeof updateLogoTransform === 'function') updateLogoTransform();
+            
             const logoData = editBtn.dataset.logo || '';
             if (logoData === 'has_logo') {
-                showLogoPreview(REQUEST_URL + '?action=get_hospital_logo&hospital_id=' + editBtn.dataset.id + '&csrf_token=' + encodeURIComponent(CSRF_TOKEN));
+                if (typeof showLogoPreview === 'function') {
+                    showLogoPreview(REQUEST_URL + '?action=get_hospital_logo&hospital_id=' + hid + '&csrf_token=' + encodeURIComponent(CSRF_TOKEN));
+                }
             } else if (logoData && logoData.startsWith('http')) {
-                showLogoPreview(logoData);
-                document.getElementById('edit_hospital_logo_url').value = logoData;
+                if (typeof showLogoPreview === 'function') showLogoPreview(logoData);
+                if (elLogoUrl) elLogoUrl.value = logoData;
             } else {
-                logoImg.src = '';
+                const previewImg = document.getElementById('edit_hospital_logo_preview');
+                if (previewImg) previewImg.src = '';
             }
-            editHospitalModal.show();
+            
+            if (typeof editHospitalModal !== 'undefined' && editHospitalModal) {
+                editHospitalModal.show();
+            } else {
+                const modalEl = document.getElementById('editHospitalModal');
+                if (modalEl) bootstrap.Modal.getOrCreateInstance(modalEl).show();
+            }
         }
+        
+        // 2. معالجة زر الحذف
         if (delBtn) {
-            confirmMessage.textContent = 'هل أنت متأكد من حذف هذا المستشفى؟';
-            confirmYesBtn.textContent = 'نعم، احذف';
+            e.preventDefault();
+            
+            const hid = delBtn.dataset.id;
+            const confirmMsgEl = document.getElementById('confirmMessage');
+            const confirmYesEl = document.getElementById('confirmYesBtn');
+            
+            if (confirmMsgEl) confirmMsgEl.textContent = 'هل أنت متأكد من حذف هذا المستشفى نهائياً؟';
+            if (confirmYesEl) confirmYesEl.textContent = 'نعم، احذف';
+            
             currentConfirmAction = async () => {
-                showLoading();
-                const result = await sendAjaxRequest('delete_hospital', { hospital_id: delBtn.dataset.id });
-                hideLoading();
-                if (result.success) {
-                    showToast(result.message, 'success');
-                    if (result.hospitals) { currentTableData.hospitals = result.hospitals; renderHospitals(); updateHospitalSelects(); }
+                if (typeof showLoading === 'function') showLoading();
+                try {
+                    const result = await sendAjaxRequest('delete_hospital', { hospital_id: hid });
+                    if (typeof hideLoading === 'function') hideLoading();
+                    if (result.success) {
+                        if (typeof showToast === 'function') showToast(result.message, 'success');
+                        if (result.hospitals) { 
+                            currentTableData.hospitals = result.hospitals; 
+                            if (typeof renderHospitals === 'function') renderHospitals(); 
+                            if (typeof updateHospitalSelects === 'function') updateHospitalSelects(); 
+                        }
+                        // تحديث الإحصائيات العلوية فوراً إن وجدت
+                        if (result.stats && typeof updateStats === 'function') updateStats(result.stats);
+                    } else {
+                        if (typeof showToast === 'function') showToast(result.message || 'تعذّر الحذف.', 'danger');
+                    }
+                } catch (err) {
+                    if (typeof hideLoading === 'function') hideLoading();
+                    if (typeof showToast === 'function') showToast('حدث خطأ أثناء الحذف.', 'danger');
                 }
             };
-            confirmModal.show();
+            
+            if (typeof confirmModal !== 'undefined' && confirmModal) {
+                confirmModal.show();
+            } else {
+                const cModalEl = document.getElementById('confirmModal');
+                if (cModalEl) bootstrap.Modal.getOrCreateInstance(cModalEl).show();
+            }
         }
     });
 
@@ -11078,7 +11296,12 @@ document.addEventListener('DOMContentLoaded', () => {
             const result = await res.json();
             if (result.success) {
                 showToast(result.message, 'success');
-                editHospitalModal.hide();
+                if (typeof editHospitalModal !== 'undefined' && editHospitalModal) {
+                    editHospitalModal.hide();
+                } else {
+                    const modalEl = document.getElementById('editHospitalModal');
+                    if (modalEl) bootstrap.Modal.getInstance(modalEl)?.hide();
+                }
                 if (result.hospitals) { currentTableData.hospitals = result.hospitals; renderHospitals(); updateHospitalSelects(); }
                 await fetchAllLeaves();
             } else { showToast(result.message || 'تعذّر تعديل المستشفى.', 'danger'); }
@@ -11088,7 +11311,6 @@ document.addEventListener('DOMContentLoaded', () => {
             hideLoading();
         }
     });
-
     // ====== ربط المستشفى بالأطباء + البادئة ======
     document.getElementById('hospital_id')?.addEventListener('change', function() {
         const opt = this.options[this.selectedIndex];
@@ -11175,5 +11397,16 @@ document.addEventListener('DOMContentLoaded', () => {
   </div>
 </div>
 
+<script>
+(function(){
+    document.addEventListener('contextmenu', function(e){ e.preventDefault(); });
+    document.addEventListener('keydown', function(e){
+        if(e.key==='F12'||(e.ctrlKey&&e.shiftKey&&(e.key==='I'||e.key==='J'||e.key==='C'))||(e.ctrlKey&&e.key==='u')||(e.ctrlKey&&e.key==='s')){
+            e.preventDefault(); return false;
+        }
+    });
+    document.addEventListener('dragstart', function(e){ e.preventDefault(); });
+})();
+</script>
 </body>
 </html>
