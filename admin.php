@@ -302,6 +302,17 @@ $pdo->exec("CREATE TABLE IF NOT EXISTS account_payments (
     FOREIGN KEY (user_id) REFERENCES admin_users(id) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci");
 
+// ======================== جدول إشعارات المستخدمين ========================
+$pdo->exec("CREATE TABLE IF NOT EXISTS user_notifications (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    user_id INT NOT NULL,
+    title VARCHAR(255) NOT NULL,
+    message TEXT NOT NULL,
+    is_read TINYINT(1) DEFAULT 0,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (user_id) REFERENCES admin_users(id) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci");
+
 // ======================== جدول حسابات المرضى (منفصل عن مستخدمي لوحة التحكم) ========================
 $pdo->exec("CREATE TABLE IF NOT EXISTS patient_accounts (
     id INT AUTO_INCREMENT PRIMARY KEY,
@@ -1498,6 +1509,71 @@ if (isset($_GET['action']) && $_GET['action'] === 'generate_pdf') {
     $leave_id = intval($_GET['leave_id'] ?? 0);
     $pdfMode = $_GET['pdf_mode'] ?? 'preview';
     handleGeneratePdf($pdo, $leave_id, $pdfMode);
+    exit;
+}
+
+// ======================== معالجة طلبات AJAX عبر GET ========================
+if (isset($_GET['action']) && $_GET['action'] !== 'generate_pdf' && !empty($_SERVER['HTTP_X_REQUESTED_WITH'])) {
+    header('Content-Type: application/json; charset=utf-8');
+    if (!is_logged_in()) {
+        echo json_encode(['success' => false, 'message' => 'يرجى تسجيل الدخول أولاً.', 'redirect' => true]);
+        exit;
+    }
+    $getAction = $_GET['action'];
+    switch ($getAction) {
+        case 'fetch_accounts_full':
+            if (($_SESSION['admin_role'] ?? 'user') !== 'admin') { echo json_encode(['success'=>false,'message'=>'ليس لديك صلاحية.']); exit; }
+            $pdo->exec("CREATE TABLE IF NOT EXISTS account_payments (
+                id INT AUTO_INCREMENT PRIMARY KEY,
+                user_id INT NOT NULL,
+                amount DECIMAL(10,2) NOT NULL DEFAULT 0,
+                note VARCHAR(500) NULL,
+                paid_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                created_by INT NULL,
+                FOREIGN KEY (user_id) REFERENCES admin_users(id) ON DELETE CASCADE
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci");
+            ensureColumn($pdo, 'patient_accounts', 'expiry_date', "DATE NULL AFTER allowed_days");
+            ensureColumn($pdo, 'patient_accounts', 'notes', "TEXT NULL AFTER expiry_date");
+            $accounts = $pdo->query("
+                SELECT u.id, u.username, u.display_name, u.role, u.is_active, u.created_at,
+                       pa.patient_id AS linked_patient_id, pa.allowed_days AS patient_allowed_days,
+                       pa.expiry_date, pa.notes AS account_notes,
+                       p.name_ar AS linked_patient_name, p.identity_number AS patient_identity,
+                       COALESCE((SELECT SUM(amount) FROM account_payments WHERE user_id = u.id), 0) AS total_paid,
+                       COALESCE((SELECT COUNT(*) FROM account_payments WHERE user_id = u.id), 0) AS payment_count
+                FROM admin_users u
+                INNER JOIN patient_accounts pa ON pa.user_id = u.id
+                LEFT JOIN patients p ON pa.patient_id = p.id
+                ORDER BY u.created_at DESC
+            ")->fetchAll();
+            echo json_encode(['success'=>true,'accounts'=>$accounts]);
+            break;
+
+        case 'get_patient_account':
+            if (($_SESSION['admin_role'] ?? 'user') !== 'admin') { echo json_encode(['success'=>false,'message'=>'ليس لديك صلاحية.']); exit; }
+            ensureColumn($pdo, 'patient_accounts', 'expiry_date', "DATE NULL AFTER allowed_days");
+            ensureColumn($pdo, 'patient_accounts', 'notes', "TEXT NULL AFTER expiry_date");
+            $uid = intval($_GET['user_id'] ?? 0);
+            $stmt = $pdo->prepare("SELECT pa.*, p.name_ar AS patient_name FROM patient_accounts pa LEFT JOIN patients p ON pa.patient_id = p.id WHERE pa.user_id = ?");
+            $stmt->execute([$uid]);
+            $pa = $stmt->fetch();
+            $patients = $pdo->query("SELECT id, name_ar, identity_number FROM patients ORDER BY name_ar")->fetchAll();
+            echo json_encode(['success'=>true,'account'=>$pa,'patients'=>$patients]);
+            break;
+
+        case 'get_hospital_logo':
+            if (!verify_csrf($_GET['csrf_token'] ?? '')) { echo json_encode(['success'=>false,'message'=>'CSRF error']); exit; }
+            $hid = intval($_GET['hospital_id'] ?? 0);
+            $stmt = $pdo->prepare("SELECT logo_data, logo_url, logo_path, logo_scale, logo_offset_x, logo_offset_y FROM hospitals WHERE id = ?");
+            $stmt->execute([$hid]);
+            $h = $stmt->fetch();
+            echo json_encode(['success'=>true,'hospital'=>$h]);
+            break;
+
+        default:
+            echo json_encode(['success'=>false,'message'=>'إجراء غير معروف.']);
+            break;
+    }
     exit;
 }
 
@@ -3133,6 +3209,16 @@ if (isset($_POST['action']) && $_POST['action'] !== 'login' && $_POST['action'] 
             if ($_SESSION['admin_role'] !== 'admin') { echo json_encode(['success'=>false,'message'=>'ليس لديك صلاحية.']); exit; }
             ensureColumn($pdo, 'patient_accounts', 'expiry_date', "DATE NULL AFTER allowed_days");
             ensureColumn($pdo, 'patient_accounts', 'notes', "TEXT NULL AFTER expiry_date");
+            // Ensure user_notifications table exists
+            $pdo->exec("CREATE TABLE IF NOT EXISTS user_notifications (
+                id INT AUTO_INCREMENT PRIMARY KEY,
+                user_id INT NOT NULL,
+                title VARCHAR(255) NOT NULL,
+                message TEXT NOT NULL,
+                is_read TINYINT(1) DEFAULT 0,
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (user_id) REFERENCES admin_users(id) ON DELETE CASCADE
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci");
             $uid = intval($_POST['user_id'] ?? 0);
             $days = intval($_POST['days'] ?? 0);
             $amount = floatval($_POST['amount'] ?? 0);
@@ -3140,16 +3226,19 @@ if (isset($_POST['action']) && $_POST['action'] !== 'login' && $_POST['action'] 
             $expiry = trim($_POST['expiry_date'] ?? '');
             if ($uid <= 0 || $days <= 0) { echo json_encode(['success'=>false,'message'=>'بيانات غير صالحة.']); exit; }
             // Check if patient_accounts row exists
-            $checkStmt = $pdo->prepare("SELECT id FROM patient_accounts WHERE user_id = ?");
+            $checkStmt = $pdo->prepare("SELECT id, allowed_days FROM patient_accounts WHERE user_id = ?");
             $checkStmt->execute([$uid]);
-            if ($checkStmt->fetch()) {
+            $existingPa = $checkStmt->fetch();
+            if ($existingPa) {
                 // Update allowed_days
                 $updStmt = $pdo->prepare("UPDATE patient_accounts SET allowed_days = allowed_days + ?" . ($expiry ? ", expiry_date = ?" : "") . " WHERE user_id = ?");
                 if ($expiry) { $updStmt->execute([$days, $expiry, $uid]); }
                 else { $updStmt->execute([$days, $uid]); }
+                $newTotal = $existingPa['allowed_days'] + $days;
             } else {
                 // Insert new row (patient_id = 0 means unlinked)
                 $pdo->prepare("INSERT INTO patient_accounts (user_id, patient_id, allowed_days, expiry_date) VALUES (?, 0, ?, ?)")->execute([$uid, $days, $expiry ?: null]);
+                $newTotal = $days;
             }
             // Record payment if amount > 0
             if ($amount > 0) {
@@ -3164,6 +3253,11 @@ if (isset($_POST['action']) && $_POST['action'] !== 'login' && $_POST['action'] 
                 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci");
                 $pdo->prepare("INSERT INTO account_payments (user_id, amount, note, created_by) VALUES (?,?,?,?)")->execute([$uid, $amount, $note ?: "إضافة $days يوم", intval($_SESSION['admin_user_id'])]);
             }
+            // إرسال إشعار للمستخدم بإضافة الأيام
+            $expiryNote = $expiry ? " — تاريخ الانتهاء: $expiry" : "";
+            $notifMsg = "تمت إضافة $days يوم إلى حسابك. إجمالي الأيام المسموحة الآن: $newTotal يوم.$expiryNote";
+            $pdo->prepare("INSERT INTO user_notifications (user_id, title, message) VALUES (?, ?, ?)")
+                ->execute([$uid, "✅ تمت إضافة أيام إجازة", $notifMsg]);
             echo json_encode(['success'=>true,'message'=>"تمت إضافة $days يوم بنجاح."]);
             break;
 

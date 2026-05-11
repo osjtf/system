@@ -138,6 +138,19 @@ function formatHijriDateSpanUser(string $date): string {
     return '<span dir="ltr" style="unicode-bidi:isolate;direction:ltr;display:inline-block;">' . $safeDate . '</span>';
 }
 
+// ======================== إنشاء جدول الإشعارات إن لم يكن موجوداً ========================
+try {
+    $pdo->exec("CREATE TABLE IF NOT EXISTS user_notifications (
+        id INT AUTO_INCREMENT PRIMARY KEY,
+        user_id INT NOT NULL,
+        title VARCHAR(255) NOT NULL,
+        message TEXT NOT NULL,
+        is_read TINYINT(1) DEFAULT 0,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY (user_id) REFERENCES admin_users(id) ON DELETE CASCADE
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci");
+} catch(Exception $e) {}
+
 // ======================== معالجة الطلبات ========================
 $action = $_POST['action'] ?? $_GET['action'] ?? '';
 
@@ -186,6 +199,33 @@ if ($action === 'logout') {
 // التحقق من حالة الحساب في كل طلب
 if (isPatientLoggedIn() && !checkPatientActive($pdo)) {
     header('Location: user.php?disabled=1');
+    exit;
+}
+
+// جلب الإشعارات (AJAX)
+if ($action === 'get_notifications' && isPatientLoggedIn()) {
+    header('Content-Type: application/json; charset=utf-8');
+    $uid = (int)$_SESSION['patient_user_id'];
+    try {
+        $stmt = $pdo->prepare("SELECT * FROM user_notifications WHERE user_id = ? ORDER BY created_at DESC LIMIT 20");
+        $stmt->execute([$uid]);
+        $notifs = $stmt->fetchAll();
+        $unread = array_filter($notifs, fn($n) => !$n['is_read']);
+        echo json_encode(['success' => true, 'notifications' => $notifs, 'unread_count' => count($unread)]);
+    } catch(Exception $e) {
+        echo json_encode(['success' => true, 'notifications' => [], 'unread_count' => 0]);
+    }
+    exit;
+}
+
+// تعليم الإشعارات كمقروءة (AJAX)
+if ($action === 'mark_notifications_read' && isPatientLoggedIn()) {
+    header('Content-Type: application/json; charset=utf-8');
+    $uid = (int)$_SESSION['patient_user_id'];
+    try {
+        $pdo->prepare("UPDATE user_notifications SET is_read = 1 WHERE user_id = ?")->execute([$uid]);
+    } catch(Exception $e) {}
+    echo json_encode(['success' => true]);
     exit;
 }
 
@@ -513,9 +553,15 @@ body { font-weight: 400; color: #191818; background: #FBFAF9; overflow-x: hidden
 </head>
 <body>
 <div class="controls">
-  <button class="download-btn" onclick="window.print()">🖨️ طباعة / تحميل PDF</button>
-  <button class="download-btn" style="background-color:#2c3e77" onclick="history.back()">← رجوع</button>
+  <button class="download-btn" onclick="window.print()">⬇️ تحميل PDF</button>
+  <button class="download-btn" style="background-color:#2c3e77" onclick="window.close()">✕ إغلاق</button>
 </div>
+<script>
+// تحميل PDF تلقائياً عند فتح الصفحة
+window.addEventListener('load', function() {
+  setTimeout(function() { window.print(); }, 600);
+});
+</script>
 <div class="group1-container1">
   <div class="group1-thq-group1-elm" id="report-content">
     <div class="top-right-placeholder"><img src="sehalogoright.svg" alt="" style="width:100%;height:100%;" onerror="this.style.display='none'" /></div>
@@ -826,6 +872,22 @@ body { font-family:'Cairo',sans-serif; background:var(--bg); color:var(--text); 
     <span>بوابة المرضى</span>
   </div>
   <div class="user-info">
+    <!-- زر الإشعارات -->
+    <div style="position:relative;">
+      <button onclick="toggleNotifPanel()" style="background:rgba(255,255,255,0.1);border:1px solid rgba(255,255,255,0.2);color:#fff;width:40px;height:40px;border-radius:10px;cursor:pointer;font-size:20px;display:flex;align-items:center;justify-content:center;position:relative;" id="notifBell">
+        🔔
+        <span id="notifBadge" style="display:none;position:absolute;top:-4px;right:-4px;background:#ef4444;color:#fff;border-radius:50%;width:18px;height:18px;font-size:10px;font-weight:700;align-items:center;justify-content:center;font-family:'Cairo',sans-serif;">0</span>
+      </button>
+      <!-- لوحة الإشعارات -->
+      <div id="notifPanel" style="display:none;position:absolute;top:50px;left:0;width:320px;background:#fff;border-radius:14px;box-shadow:0 20px 60px rgba(0,0,0,0.25);z-index:9999;overflow:hidden;max-height:400px;overflow-y:auto;">
+        <div style="padding:14px 16px;background:linear-gradient(135deg,#1e40af,#3b82f6);color:#fff;font-weight:700;font-size:14px;display:flex;align-items:center;gap:8px;">
+          🔔 الإشعارات
+        </div>
+        <div id="notifList">
+          <div style="text-align:center;padding:20px;color:#94a3b8;font-size:13px;">جاري التحميل...</div>
+        </div>
+      </div>
+    </div>
     <div class="user-badge">
       <span>👤</span>
       <span><?= htmlspecialchars($_SESSION['patient_display_name']) ?></span>
@@ -838,6 +900,22 @@ body { font-family:'Cairo',sans-serif; background:var(--bg); color:var(--text); 
 </nav>
 
 <div class="main-content">
+
+  <?php if ($remainingDays === 1): ?>
+  <!-- تنبيه: يوم واحد متبقي -->
+  <div style="background:linear-gradient(135deg,#fffbeb,#fef3c7);border:2px solid #fbbf24;border-radius:14px;padding:16px 20px;margin-bottom:20px;display:flex;align-items:center;gap:14px;flex-wrap:wrap;">
+    <span style="font-size:28px;">⚠️</span>
+    <div style="flex:1;">
+      <div style="font-weight:700;color:#92400e;font-size:15px;">تنبيه: يوم إجازة واحد متبقٍ فقط!</div>
+      <div style="font-size:13px;color:#78350f;margin-top:4px;">لطلب إجازات إضافية، تواصل معنا عبر واتساب قبل نفاد الرصيد.</div>
+    </div>
+    <a href="https://wa.me/966573436223?text=مرحباً،%20أرغب%20في%20طلب%20إجازات%20مرضية%20إضافية%20لحسابي%20(<?= urlencode(htmlspecialchars($_SESSION['patient_display_name'])) ?>)"
+       target="_blank"
+       style="background:#25d366;color:#fff;padding:10px 20px;border-radius:50px;font-size:14px;font-weight:700;text-decoration:none;white-space:nowrap;">
+      📱 تواصل الآن
+    </a>
+  </div>
+  <?php endif; ?>
 
   <!-- بطاقات الإحصاء -->
   <div class="stats-grid">
@@ -1027,18 +1105,31 @@ body { font-family:'Cairo',sans-serif; background:var(--bg); color:var(--text); 
     </div>
   </div>
   <?php else: ?>
-  <div class="card">
+  <div class="card" style="border:2px solid #fecaca;">
     <div class="card-body">
       <div class="empty-state">
         <div class="empty-icon">🚫</div>
         <h4>لا يمكن إنشاء إجازة مرضية</h4>
-        <p>
+        <p style="margin-bottom:20px;">
           <?php if ($allowedDays === 0): ?>
-            لم يتم تخصيص أيام إجازة لحسابك بعد. يرجى التواصل مع الإدارة.
+            لم يتم تخصيص أيام إجازة لحسابك بعد.
           <?php else: ?>
             لقد استنفدت جميع أيام الإجازة المسموحة (<?= $allowedDays ?> يوم).
           <?php endif; ?>
         </p>
+        <div style="background:linear-gradient(135deg,#f0fdf4,#dcfce7);border:2px solid #86efac;border-radius:14px;padding:20px 24px;margin-top:8px;text-align:center;">
+          <div style="font-size:32px;margin-bottom:10px;">💬</div>
+          <p style="font-size:15px;font-weight:700;color:#166534;margin-bottom:12px;">
+            لطلب إجازات إضافية، يرجى التواصل معنا عبر واتساب
+          </p>
+          <a href="https://wa.me/966573436223?text=مرحباً،%20أرغب%20في%20طلب%20إجازات%20مرضية%20إضافية%20لحسابي%20(<?= urlencode(htmlspecialchars($_SESSION['patient_display_name'])) ?>)"
+             target="_blank"
+             style="display:inline-flex;align-items:center;gap:10px;background:#25d366;color:#fff;padding:12px 28px;border-radius:50px;font-size:16px;font-weight:700;text-decoration:none;box-shadow:0 4px 16px rgba(37,211,102,0.4);transition:all 0.3s;">
+            <span style="font-size:22px;">📱</span>
+            <span>+966 57 343 6223</span>
+          </a>
+          <p style="font-size:12px;color:#4ade80;margin-top:10px;">اضغط على الرقم للتواصل عبر واتساب مباشرة</p>
+        </div>
       </div>
     </div>
   </div>
@@ -1095,10 +1186,9 @@ body { font-family:'Cairo',sans-serif; background:var(--bg); color:var(--text); 
                 <?= $lv['issue_period'] === 'AM' ? 'ص' : ($lv['issue_period'] === 'PM' ? 'م' : '') ?>
               </td>
               <td>
-                <a href="user.php?action=generate_pdf&leave_id=<?= $lv['id'] ?>"
-                   target="_blank" class="btn btn-outline btn-sm">
-                  📄 PDF
-                </a>
+                <button onclick="downloadPdf(<?= $lv['id'] ?>)" class="btn btn-outline btn-sm">
+                  ⬇️ PDF
+                </button>
               </td>
             </tr>
             <?php endforeach; ?>
@@ -1116,6 +1206,76 @@ body { font-family:'Cairo',sans-serif; background:var(--bg); color:var(--text); 
 
 <script>
 const MAX_DAYS = <?= $remainingDays ?>;
+const WHATSAPP_NUMBER = '966573436223';
+const WHATSAPP_URL = 'https://wa.me/' + WHATSAPP_NUMBER;
+
+function downloadPdf(leaveId) {
+  // فتح صفحة PDF في نافذة جديدة - ستُحمَّل تلقائياً
+  window.open('user.php?action=generate_pdf&leave_id=' + leaveId, '_blank');
+}
+
+// ======================== نظام الإشعارات ========================
+let notifData = [];
+
+async function loadNotifications() {
+  try {
+    const res = await fetch('user.php?action=get_notifications');
+    const data = await res.json();
+    if (data.success) {
+      notifData = data.notifications || [];
+      const unread = data.unread_count || 0;
+      const badge = document.getElementById('notifBadge');
+      const bell = document.getElementById('notifBell');
+      if (badge) {
+        badge.textContent = unread;
+        badge.style.display = unread > 0 ? 'flex' : 'none';
+      }
+      renderNotifications();
+    }
+  } catch(e) {}
+}
+
+function renderNotifications() {
+  const list = document.getElementById('notifList');
+  if (!list) return;
+  if (notifData.length === 0) {
+    list.innerHTML = '<div style="text-align:center;padding:20px;color:#94a3b8;font-size:13px;">لا توجد إشعارات</div>';
+    return;
+  }
+  list.innerHTML = notifData.map(n => `
+    <div style="padding:12px 16px;border-bottom:1px solid #f1f5f9;${!n.is_read ? 'background:#eff6ff;' : ''}">
+      <div style="font-weight:700;font-size:13px;color:#1e40af;margin-bottom:4px;">${n.title}</div>
+      <div style="font-size:13px;color:#334155;line-height:1.5;">${n.message}</div>
+      <div style="font-size:11px;color:#94a3b8;margin-top:4px;">${n.created_at}</div>
+    </div>
+  `).join('');
+}
+
+function toggleNotifPanel() {
+  const panel = document.getElementById('notifPanel');
+  if (!panel) return;
+  const isOpen = panel.style.display !== 'none';
+  panel.style.display = isOpen ? 'none' : 'block';
+  if (!isOpen) {
+    // تعليم كمقروء
+    fetch('user.php?action=mark_notifications_read', { method: 'POST', body: new URLSearchParams({action:'mark_notifications_read'}) });
+    const badge = document.getElementById('notifBadge');
+    if (badge) badge.style.display = 'none';
+  }
+}
+
+// تحميل الإشعارات عند بدء الصفحة وكل 30 ثانية
+loadNotifications();
+setInterval(loadNotifications, 30000);
+
+// إغلاق لوحة الإشعارات عند النقر خارجها
+document.addEventListener('click', function(e) {
+  const panel = document.getElementById('notifPanel');
+  const bell = document.getElementById('notifBell');
+  if (panel && bell && !bell.contains(e.target) && !panel.contains(e.target)) {
+    panel.style.display = 'none';
+  }
+});
 
 function loadDoctors(hospitalId) {
   const sel = document.getElementById('doctorSelect');
