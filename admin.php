@@ -334,6 +334,14 @@ $pdo->exec("CREATE TABLE IF NOT EXISTS patient_accounts (
 // أعمدة patient_accounts الجديدة
 ensureColumn($pdo, 'patient_accounts', 'expiry_date', "DATE NULL AFTER allowed_days");
 ensureColumn($pdo, 'patient_accounts', 'notes', "TEXT NULL AFTER expiry_date");
+ensureColumn($pdo, 'account_payments', 'days_count', "INT NOT NULL DEFAULT 0 AFTER amount");
+ensureColumn($pdo, 'account_payments', 'is_paid', "TINYINT(1) NOT NULL DEFAULT 1 AFTER days_count");
+ensureColumn($pdo, 'account_payments', 'paid_by', "INT NULL AFTER created_by");
+ensureColumn($pdo, 'account_payments', 'updated_at', "DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP AFTER paid_at");
+try { ensureIndex($pdo, 'account_payments', 'idx_account_payments_user_paid', 'user_id, is_paid, paid_at'); } catch(Exception $e) {}
+ensureColumn($pdo, 'notifications', 'account_payment_id', "INT NULL AFTER leave_id");
+try { $pdo->exec("ALTER TABLE notifications MODIFY COLUMN leave_id INT NULL"); } catch(Throwable $e) {}
+try { ensureIndex($pdo, 'notifications', 'idx_notifications_account_payment', 'account_payment_id'); } catch(Exception $e) {}
 
 // ======================== جدول إشعارات المستخدمين (المرضى) ========================
 $pdo->exec("CREATE TABLE IF NOT EXISTS user_notifications (
@@ -403,8 +411,8 @@ function getStats($pdo) {
     $stats['doctors'] = $pdo->query("SELECT COUNT(*) FROM doctors")->fetchColumn();
     $stats['paid'] = $pdo->query("SELECT COUNT(*) FROM sick_leaves WHERE is_paid = 1 AND deleted_at IS NULL")->fetchColumn();
     $stats['unpaid'] = $pdo->query("SELECT COUNT(*) FROM sick_leaves WHERE is_paid = 0 AND deleted_at IS NULL")->fetchColumn();
-    $stats['paid_amount'] = $pdo->query("SELECT COALESCE(SUM(payment_amount), 0) FROM sick_leaves WHERE is_paid = 1 AND deleted_at IS NULL")->fetchColumn();
-    $stats['unpaid_amount'] = $pdo->query("SELECT COALESCE(SUM(payment_amount), 0) FROM sick_leaves WHERE is_paid = 0 AND deleted_at IS NULL")->fetchColumn();
+    $stats['paid_amount'] = $pdo->query("SELECT COALESCE(SUM(amount), 0) FROM (SELECT payment_amount AS amount FROM sick_leaves WHERE is_paid = 1 AND deleted_at IS NULL UNION ALL SELECT amount FROM account_payments WHERE is_paid = 1) paid_totals")->fetchColumn();
+    $stats['unpaid_amount'] = $pdo->query("SELECT COALESCE(SUM(amount), 0) FROM (SELECT payment_amount AS amount FROM sick_leaves WHERE is_paid = 0 AND deleted_at IS NULL UNION ALL SELECT amount FROM account_payments WHERE is_paid = 0) unpaid_totals")->fetchColumn();
     $stats['hospitals'] = $pdo->query("SELECT COUNT(*) FROM hospitals WHERE deleted_at IS NULL")->fetchColumn();
     return $stats;
 }
@@ -1006,16 +1014,67 @@ function ensureDelayedUnpaidNotifications($pdo): void {
     ");
     $stmt->execute();
     $rows = $stmt->fetchAll();
-    if (!$rows) return;
 
-    $ins = $pdo->prepare("INSERT INTO notifications (type, leave_id, message, created_at) VALUES ('payment', ?, ?, ?)");
+    $accountRows = [];
+    if (tableExists($pdo, 'account_payments')) {
+        $accountStmt = $pdo->prepare("
+            SELECT ap.id, ap.user_id, ap.amount, ap.days_count, COALESCE(u.display_name, u.username, 'مريض') AS account_name
+            FROM account_payments ap
+            LEFT JOIN admin_users u ON u.id = ap.user_id
+            LEFT JOIN notifications n ON n.account_payment_id = ap.id AND n.type = 'payment'
+            WHERE ap.is_paid = 0
+              AND ap.amount > 0
+              AND n.id IS NULL
+        ");
+        $accountStmt->execute();
+        $accountRows = $accountStmt->fetchAll();
+    }
+
+    if (!$rows && !$accountRows) return;
+
+    $ins = $pdo->prepare("INSERT INTO notifications (type, leave_id, account_payment_id, message, created_at) VALUES ('payment', ?, ?, ?, ?)");
     foreach ($rows as $row) {
         $ins->execute([
             $row['id'],
+            null,
             "إجازة غير مدفوعة منذ أكثر من 5 دقائق برمز {$row['service_code']} بمبلغ {$row['payment_amount']}",
             nowSaudi()
         ]);
     }
+    foreach ($accountRows as $row) {
+        $ins->execute([
+            null,
+            $row['id'],
+            "إضافة أيام غير مدفوعة لحساب {$row['account_name']} ({$row['days_count']} يوم) بمبلغ {$row['amount']}",
+            nowSaudi()
+        ]);
+    }
+}
+
+function fetchPatientAccountRecords(PDO $pdo, int $userId): array {
+    $accountStmt = $pdo->prepare("SELECT pa.patient_id FROM patient_accounts pa WHERE pa.user_id = ? LIMIT 1");
+    $accountStmt->execute([$userId]);
+    $patientId = (int)($accountStmt->fetchColumn() ?: 0);
+
+    $leaves = [];
+    if ($patientId > 0) {
+        $leaveStmt = $pdo->prepare("
+            SELECT sl.*, COALESCE(d.name_ar, d.name, '') AS doctor_name, COALESCE(d.title_ar, d.title, '') AS doctor_title,
+                   COALESCE(h.name_ar, sl.hospital_name_ar, '') AS hospital_name
+            FROM sick_leaves sl
+            LEFT JOIN doctors d ON d.id = sl.doctor_id
+            LEFT JOIN hospitals h ON h.id = sl.hospital_id
+            WHERE sl.patient_id = ? AND sl.deleted_at IS NULL
+            ORDER BY sl.created_at DESC
+        ");
+        $leaveStmt->execute([$patientId]);
+        $leaves = $leaveStmt->fetchAll();
+    }
+
+    $paymentStmt = $pdo->prepare("SELECT ap.*, au.display_name AS created_by_name, payer.display_name AS paid_by_name FROM account_payments ap LEFT JOIN admin_users au ON ap.created_by = au.id LEFT JOIN admin_users payer ON ap.paid_by = payer.id WHERE ap.user_id = ? ORDER BY ap.paid_at DESC, ap.id DESC");
+    $paymentStmt->execute([$userId]);
+
+    return ['leaves' => $leaves, 'payments' => $paymentStmt->fetchAll()];
 }
 
 // ======================== دالة توليد PDF ========================
@@ -1662,8 +1721,12 @@ if (isset($_GET['action']) && in_array($_GET['action'], $_GET_AJAX_ACTIONS) && !
                        pa.patient_id AS linked_patient_id, pa.allowed_days AS patient_allowed_days,
                        pa.expiry_date, pa.notes AS account_notes,
                        p.name_ar AS linked_patient_name, p.identity_number AS patient_identity,
-                       COALESCE((SELECT SUM(amount) FROM account_payments WHERE user_id = u.id), 0) AS total_paid,
-                       COALESCE((SELECT COUNT(*) FROM account_payments WHERE user_id = u.id), 0) AS payment_count
+                       COALESCE((SELECT SUM(amount) FROM account_payments WHERE user_id = u.id AND is_paid = 1), 0) AS total_paid,
+                       COALESCE((SELECT COUNT(*) FROM account_payments WHERE user_id = u.id), 0) AS payment_count,
+                       COALESCE((SELECT COUNT(*) FROM sick_leaves sl WHERE sl.patient_id = pa.patient_id AND sl.deleted_at IS NULL AND sl.created_by_user_id = u.id), 0) AS portal_leave_count,
+                       COALESCE((SELECT SUM(CASE WHEN ap.is_paid = 1 THEN 1 ELSE 0 END) FROM account_payments ap WHERE ap.user_id = u.id), 0) AS account_paid_count,
+                       COALESCE((SELECT SUM(CASE WHEN ap.is_paid = 0 THEN 1 ELSE 0 END) FROM account_payments ap WHERE ap.user_id = u.id), 0) AS account_unpaid_count,
+                       COALESCE((SELECT SUM(CASE WHEN ap.is_paid = 0 THEN ap.amount ELSE 0 END) FROM account_payments ap WHERE ap.user_id = u.id), 0) AS total_unpaid
                 FROM admin_users u
                 INNER JOIN patient_accounts pa ON pa.user_id = u.id
                 LEFT JOIN patients p ON pa.patient_id = p.id
@@ -1724,10 +1787,19 @@ if (isset($_GET['action']) && in_array($_GET['action'], $_GET_AJAX_ACTIONS) && !
         case 'fetch_notifications':
             ensureDelayedUnpaidNotifications($pdo);
             $notifications = $pdo->query("
-                SELECT n.*, sl.payment_amount, sl.service_code, sl.patient_id, COALESCE(p.name_ar, p.name, '') AS patient_name, p.phone AS patient_phone
+                SELECT n.*, COALESCE(sl.payment_amount, ap.amount, 0) AS payment_amount,
+                       COALESCE(sl.service_code, CONCAT('ACC-', ap.id), '-') AS service_code,
+                       sl.patient_id,
+                       COALESCE(p.name_ar, p.name, au.display_name, au.username, '') AS patient_name,
+                       p.phone AS patient_phone,
+                       ap.user_id AS account_user_id,
+                       ap.days_count AS account_days_count,
+                       ap.is_paid AS account_is_paid
                 FROM notifications n
                 LEFT JOIN sick_leaves sl ON n.leave_id = sl.id
                 LEFT JOIN patients p ON sl.patient_id = p.id
+                LEFT JOIN account_payments ap ON n.account_payment_id = ap.id
+                LEFT JOIN admin_users au ON ap.user_id = au.id
                 WHERE n.type = 'payment'
                 ORDER BY n.created_at DESC
             ")->fetchAll();
@@ -2045,6 +2117,14 @@ if (isset($_POST['action']) && $_POST['action'] !== 'login' && $_POST['action'] 
             if (empty($issue_date) || empty($start_date) || empty($end_date) || $days_count <= 0 || $patient_id <= 0 || $doctor_id <= 0) {
                 echo json_encode(['success' => false, 'message' => 'يرجى تعبئة جميع الحقول المطلوبة.']);
                 exit;
+            }
+            if ($hospital_id && $doctor_select !== 'manual') {
+                $doctorHospitalCheck = $pdo->prepare("SELECT hospital_id FROM doctors WHERE id = ? LIMIT 1");
+                $doctorHospitalCheck->execute([$doctor_id]);
+                if ((string)($doctorHospitalCheck->fetchColumn() ?: '') !== (string)$hospital_id) {
+                    echo json_encode(['success' => false, 'message' => 'الطبيب المختار غير مرتبط بالمستشفى المحدد.']);
+                    exit;
+                }
             }
 
             $stmt = $pdo->prepare("INSERT INTO sick_leaves 
@@ -2845,10 +2925,19 @@ if (isset($_POST['action']) && $_POST['action'] !== 'login' && $_POST['action'] 
         case 'fetch_notifications':
             ensureDelayedUnpaidNotifications($pdo);
             $notifications = $pdo->query(" 
-                SELECT n.*, sl.payment_amount, sl.service_code, sl.patient_id, COALESCE(p.name_ar, p.name, '') AS patient_name, p.phone AS patient_phone
+                SELECT n.*, COALESCE(sl.payment_amount, ap.amount, 0) AS payment_amount,
+                       COALESCE(sl.service_code, CONCAT('ACC-', ap.id), '-') AS service_code,
+                       sl.patient_id,
+                       COALESCE(p.name_ar, p.name, au.display_name, au.username, '') AS patient_name,
+                       p.phone AS patient_phone,
+                       ap.user_id AS account_user_id,
+                       ap.days_count AS account_days_count,
+                       ap.is_paid AS account_is_paid
                 FROM notifications n
                 LEFT JOIN sick_leaves sl ON n.leave_id = sl.id
                 LEFT JOIN patients p ON sl.patient_id = p.id
+                LEFT JOIN account_payments ap ON n.account_payment_id = ap.id
+                LEFT JOIN admin_users au ON ap.user_id = au.id
                 WHERE n.type = 'payment'
                 ORDER BY n.created_at DESC
             ")->fetchAll();
@@ -3498,8 +3587,12 @@ if (isset($_POST['action']) && $_POST['action'] !== 'login' && $_POST['action'] 
                        pa.patient_id AS linked_patient_id, pa.allowed_days AS patient_allowed_days,
                        pa.expiry_date, pa.notes AS account_notes,
                        p.name_ar AS linked_patient_name, p.identity_number AS patient_identity,
-                       COALESCE((SELECT SUM(amount) FROM account_payments WHERE user_id = u.id), 0) AS total_paid,
-                       COALESCE((SELECT COUNT(*) FROM account_payments WHERE user_id = u.id), 0) AS payment_count
+                       COALESCE((SELECT SUM(amount) FROM account_payments WHERE user_id = u.id AND is_paid = 1), 0) AS total_paid,
+                       COALESCE((SELECT COUNT(*) FROM account_payments WHERE user_id = u.id), 0) AS payment_count,
+                       COALESCE((SELECT COUNT(*) FROM sick_leaves sl WHERE sl.patient_id = pa.patient_id AND sl.deleted_at IS NULL AND sl.created_by_user_id = u.id), 0) AS portal_leave_count,
+                       COALESCE((SELECT SUM(CASE WHEN ap.is_paid = 1 THEN 1 ELSE 0 END) FROM account_payments ap WHERE ap.user_id = u.id), 0) AS account_paid_count,
+                       COALESCE((SELECT SUM(CASE WHEN ap.is_paid = 0 THEN 1 ELSE 0 END) FROM account_payments ap WHERE ap.user_id = u.id), 0) AS account_unpaid_count,
+                       COALESCE((SELECT SUM(CASE WHEN ap.is_paid = 0 THEN ap.amount ELSE 0 END) FROM account_payments ap WHERE ap.user_id = u.id), 0) AS total_unpaid
                 FROM admin_users u
                 INNER JOIN patient_accounts pa ON pa.user_id = u.id
                 LEFT JOIN patients p ON pa.patient_id = p.id
@@ -3512,49 +3605,76 @@ if (isset($_POST['action']) && $_POST['action'] !== 'login' && $_POST['action'] 
             if ($_SESSION['admin_role'] !== 'admin') { echo json_encode(['success'=>false,'message'=>'ليس لديك صلاحية.']); exit; }
             ensureColumn($pdo, 'patient_accounts', 'expiry_date', "DATE NULL AFTER allowed_days");
             ensureColumn($pdo, 'patient_accounts', 'notes', "TEXT NULL AFTER expiry_date");
+            ensureColumn($pdo, 'account_payments', 'days_count', "INT NOT NULL DEFAULT 0 AFTER amount");
+            ensureColumn($pdo, 'account_payments', 'is_paid', "TINYINT(1) NOT NULL DEFAULT 1 AFTER days_count");
+            ensureColumn($pdo, 'account_payments', 'paid_by', "INT NULL AFTER created_by");
+            ensureColumn($pdo, 'notifications', 'account_payment_id', "INT NULL AFTER leave_id");
+            try { $pdo->exec("ALTER TABLE notifications MODIFY COLUMN leave_id INT NULL"); } catch(Throwable $e) {}
+
             $uid = intval($_POST['user_id'] ?? 0);
             $days = intval($_POST['days'] ?? 0);
-            $amount = floatval($_POST['amount'] ?? 0);
+            $amount = max(0, floatval($_POST['amount'] ?? 0));
             $note = trim($_POST['note'] ?? '');
             $expiry = trim($_POST['expiry_date'] ?? '');
+            $isPaid = intval($_POST['is_paid'] ?? 1) === 1 ? 1 : 0;
             if ($uid <= 0 || $days <= 0) { echo json_encode(['success'=>false,'message'=>'بيانات غير صالحة.']); exit; }
-            // Check if patient_accounts row exists
-            $checkStmt = $pdo->prepare("SELECT id FROM patient_accounts WHERE user_id = ?");
-            $checkStmt->execute([$uid]);
-            if ($checkStmt->fetch()) {
-                // Update allowed_days
-                $updStmt = $pdo->prepare("UPDATE patient_accounts SET allowed_days = allowed_days + ?" . ($expiry ? ", expiry_date = ?" : "") . " WHERE user_id = ?");
-                if ($expiry) { $updStmt->execute([$days, $expiry, $uid]); }
-                else { $updStmt->execute([$days, $uid]); }
-            } else {
-                // Insert new row (patient_id = 0 means unlinked)
-                $pdo->prepare("INSERT INTO patient_accounts (user_id, patient_id, allowed_days, expiry_date) VALUES (?, 0, ?, ?)")->execute([$uid, $days, $expiry ?: null]);
+
+            $pdo->beginTransaction();
+            try {
+                $checkStmt = $pdo->prepare("SELECT id FROM patient_accounts WHERE user_id = ?");
+                $checkStmt->execute([$uid]);
+                if ($checkStmt->fetch()) {
+                    $updStmt = $pdo->prepare("UPDATE patient_accounts SET allowed_days = allowed_days + ?" . ($expiry ? ", expiry_date = ?" : "") . " WHERE user_id = ?");
+                    if ($expiry) { $updStmt->execute([$days, $expiry, $uid]); }
+                    else { $updStmt->execute([$days, $uid]); }
+                } else {
+                    $pdo->prepare("INSERT INTO patient_accounts (user_id, patient_id, allowed_days, expiry_date) VALUES (?, 0, ?, ?)")->execute([$uid, $days, $expiry ?: null]);
+                }
+
+                if ($amount > 0) {
+                    $payStmt = $pdo->prepare("INSERT INTO account_payments (user_id, amount, days_count, is_paid, note, created_by, paid_by) VALUES (?,?,?,?,?,?,?)");
+                    $payStmt->execute([$uid, $amount, $days, $isPaid, $note ?: "إضافة $days يوم", intval($_SESSION['admin_user_id']), $isPaid ? intval($_SESSION['admin_user_id']) : null]);
+                    $paymentId = intval($pdo->lastInsertId());
+                    if (!$isPaid) {
+                        $userNameStmt = $pdo->prepare("SELECT COALESCE(display_name, username, 'مريض') FROM admin_users WHERE id = ?");
+                        $userNameStmt->execute([$uid]);
+                        $accountName = $userNameStmt->fetchColumn() ?: 'مريض';
+                        $notifStmt = $pdo->prepare("INSERT INTO notifications (type, leave_id, account_payment_id, message, created_at) VALUES ('payment', NULL, ?, ?, ?)");
+                        $notifStmt->execute([$paymentId, "إضافة أيام غير مدفوعة لحساب {$accountName} ({$days} يوم) بمبلغ {$amount}", nowSaudi()]);
+                    }
+                }
+
+                $notifMsg = "🎉 تمت إضافة {$days} يوم إجازة مرضية إلى حسابك." . ($expiry ? " تاريخ الانتهاء: {$expiry}." : "") . ($note ? " ملاحظة: {$note}" : "");
+                $pdo->prepare("INSERT INTO user_notifications (user_id, message) VALUES (?, ?)")->execute([$uid, $notifMsg]);
+                $pdo->commit();
+            } catch(Throwable $e) {
+                if ($pdo->inTransaction()) $pdo->rollBack();
+                echo json_encode(['success'=>false,'message'=>'تعذّرت إضافة الأيام: ' . $e->getMessage()]);
+                exit;
             }
-            // Record payment if amount > 0
-            if ($amount > 0) {
-                $pdo->exec("CREATE TABLE IF NOT EXISTS account_payments (
-                    id INT AUTO_INCREMENT PRIMARY KEY,
-                    user_id INT NOT NULL,
-                    amount DECIMAL(10,2) NOT NULL DEFAULT 0,
-                    note VARCHAR(500) NULL,
-                    paid_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-                    created_by INT NULL,
-                    FOREIGN KEY (user_id) REFERENCES admin_users(id) ON DELETE CASCADE
-                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci");
-                $pdo->prepare("INSERT INTO account_payments (user_id, amount, note, created_by) VALUES (?,?,?,?)")->execute([$uid, $amount, $note ?: "إضافة $days يوم", intval($_SESSION['admin_user_id'])]);
-            }
-            // إرسال إشعار للمستخدم بإضافة الأيام
-            $pdo->exec("CREATE TABLE IF NOT EXISTS user_notifications (
-                id INT AUTO_INCREMENT PRIMARY KEY,
-                user_id INT NOT NULL,
-                message TEXT NOT NULL,
-                is_read TINYINT(1) DEFAULT 0,
-                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-                FOREIGN KEY (user_id) REFERENCES admin_users(id) ON DELETE CASCADE
-            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci");
-            $notifMsg = "🎉 تمت إضافة {$days} يوم إجازة مرضية إلى حسابك." . ($expiry ? " تاريخ الانتهاء: {$expiry}." : "") . ($note ? " ملاحظة: {$note}" : "");
-            $pdo->prepare("INSERT INTO user_notifications (user_id, message) VALUES (?, ?)")->execute([$uid, $notifMsg]);
-            echo json_encode(['success'=>true,'message'=>"تمت إضافة $days يوم بنجاح."]);
+            echo json_encode(['success'=>true,'message'=> $isPaid ? "تمت إضافة $days يوم وتسجيلها كمدفوعة." : "تمت إضافة $days يوم ونقل المستحقات إلى إشعارات الدفع.", 'stats'=>getStats($pdo)]);
+            break;
+
+        case 'account_fetch_records':
+            if ($_SESSION['admin_role'] !== 'admin') { echo json_encode(['success'=>false,'message'=>'ليس لديك صلاحية.']); exit; }
+            $uid = intval($_POST['user_id'] ?? $_GET['user_id'] ?? 0);
+            if ($uid <= 0) { echo json_encode(['success'=>false,'message'=>'معرّف غير صالح.']); exit; }
+            $records = fetchPatientAccountRecords($pdo, $uid);
+            echo json_encode(['success'=>true,'leaves'=>$records['leaves'],'payments'=>$records['payments']]);
+            break;
+
+        case 'account_mark_payment_paid':
+            if ($_SESSION['admin_role'] !== 'admin') { echo json_encode(['success'=>false,'message'=>'ليس لديك صلاحية.']); exit; }
+            $pid = intval($_POST['payment_id'] ?? 0);
+            $amount = max(0, floatval($_POST['amount'] ?? 0));
+            if ($pid <= 0) { echo json_encode(['success'=>false,'message'=>'معرّف الدفع غير صالح.']); exit; }
+            $params = [intval($_SESSION['admin_user_id']), $pid];
+            $sql = "UPDATE account_payments SET is_paid = 1, paid_by = ?, paid_at = NOW()";
+            if ($amount > 0) { $sql .= ", amount = ?"; $params = [intval($_SESSION['admin_user_id']), $amount, $pid]; }
+            $sql .= " WHERE id = ?";
+            $pdo->prepare($sql)->execute($params);
+            $pdo->prepare("DELETE FROM notifications WHERE account_payment_id = ? AND type = 'payment'")->execute([$pid]);
+            echo json_encode(['success'=>true,'message'=>'تم تأكيد دفع سجل الأيام بنجاح.','stats'=>getStats($pdo)]);
             break;
 
         case 'account_toggle_status':
@@ -3609,16 +3729,16 @@ if (isset($_POST['action']) && $_POST['action'] !== 'login' && $_POST['action'] 
             // التعديل هنا: قراءة الـ user_id من POST
             $uid = intval($_POST['user_id'] ?? $_GET['user_id'] ?? 0);
             
-            $stmt = $pdo->prepare("SELECT ap.*, au.display_name AS created_by_name FROM account_payments ap LEFT JOIN admin_users au ON ap.created_by = au.id WHERE ap.user_id = ? ORDER BY ap.paid_at DESC");
-            $stmt->execute([$uid]);
-            echo json_encode(['success'=>true,'payments'=>$stmt->fetchAll()]);
+            $records = fetchPatientAccountRecords($pdo, $uid);
+            echo json_encode(['success'=>true,'payments'=>$records['payments'],'leaves'=>$records['leaves']]);
             break;
 
         case 'account_delete_payment':
             if ($_SESSION['admin_role'] !== 'admin') { echo json_encode(['success'=>false,'message'=>'ليس لديك صلاحية.']); exit; }
             $pid = intval($_POST['payment_id'] ?? 0);
+            $pdo->prepare("DELETE FROM notifications WHERE account_payment_id = ?")->execute([$pid]);
             $pdo->prepare("DELETE FROM account_payments WHERE id = ?")->execute([$pid]);
-            echo json_encode(['success'=>true,'message'=>'تم حذف سجل الدفع.']);
+            echo json_encode(['success'=>true,'message'=>'تم حذف سجل الدفع.','stats'=>getStats($pdo)]);
             break;
 
         case 'account_link_patient':
@@ -7330,8 +7450,15 @@ if (!in_array($uiDataViewMode, ['table','compact','cards','zebra','glass','minim
                         <input type="number" class="form-control" id="acctAddDaysCount" min="1" max="3650" placeholder="مثال: 30">
                     </div>
                     <div class="col-6">
-                        <label class="form-label fw-bold">المبلغ المدفوع (ريال)</label>
+                        <label class="form-label fw-bold">مبلغ العملية (ريال)</label>
                         <input type="number" class="form-control" id="acctAddDaysAmount" min="0" step="0.01" placeholder="0.00">
+                    </div>
+                    <div class="col-12">
+                        <label class="form-label fw-bold">حالة الدفع</label>
+                        <select class="form-select" id="acctAddDaysPaidStatus">
+                            <option value="1">مدفوع الآن</option>
+                            <option value="0">غير مدفوع — إرساله إلى إشعارات لوحة التحكم</option>
+                        </select>
                     </div>
                     <div class="col-12">
                         <label class="form-label fw-bold">تاريخ انتهاء الصلاحية</label>
@@ -7417,23 +7544,37 @@ if (!in_array($uiDataViewMode, ['table','compact','cards','zebra','glass','minim
     </div>
 </div>
 
-<!-- ======================== مودال سجل المدفوعات ======================== -->
+<!-- ======================== مودال سجلات حساب المريض ======================== -->
 <div class="modal fade" id="acctPaymentsModal" tabindex="-1" aria-hidden="true">
-    <div class="modal-dialog modal-lg modal-dialog-centered modal-dialog-scrollable">
+    <div class="modal-dialog modal-dialog-centered modal-xl">
         <div class="modal-content">
             <div class="modal-header" style="background:linear-gradient(135deg,#10b981,#34d399);color:#fff;">
-                <h5 class="modal-title"><i class="bi bi-receipt-cutoff"></i> سجل المدفوعات</h5>
+                <h5 class="modal-title"><i class="bi bi-journal-text"></i> سجلات حساب المريض</h5>
                 <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
             </div>
             <div class="modal-body">
-                <div class="d-flex justify-content-between align-items-center mb-3">
+                <div class="d-flex justify-content-between align-items-center mb-3 flex-wrap gap-2">
                     <div>
                         <strong id="acctPaymentsUserName"></strong>
-                        <div class="text-muted small" id="acctPaymentsTotalWrap">الإجمالي: <strong id="acctPaymentsTotal">0</strong> ريال</div>
+                        <div class="text-muted small" id="acctPaymentsTotalWrap">إجمالي المدفوع: <strong id="acctPaymentsTotal">0</strong> ريال</div>
                     </div>
+                    <select class="form-select form-select-sm" id="acctPaymentStatusFilter" style="max-width:180px">
+                        <option value="all">كل المدفوعات</option>
+                        <option value="paid">المدفوعة فقط</option>
+                        <option value="unpaid">غير المدفوعة فقط</option>
+                    </select>
                 </div>
-                <div id="acctPaymentsList">
-                    <div class="text-center py-4 text-muted"><div class="spinner-border spinner-border-sm"></div> جارٍ التحميل...</div>
+                <ul class="nav nav-pills mb-3" id="acctRecordsTabs" role="tablist">
+                    <li class="nav-item" role="presentation"><button class="nav-link active" data-bs-toggle="pill" data-bs-target="#acctLeavesPane" type="button">الإجازات</button></li>
+                    <li class="nav-item" role="presentation"><button class="nav-link" data-bs-toggle="pill" data-bs-target="#acctPaymentsPane" type="button">المدفوعات</button></li>
+                </ul>
+                <div class="tab-content">
+                    <div class="tab-pane fade show active" id="acctLeavesPane">
+                        <div id="acctLeavesList"><div class="text-center py-4 text-muted"><div class="spinner-border spinner-border-sm"></div> جارٍ التحميل...</div></div>
+                    </div>
+                    <div class="tab-pane fade" id="acctPaymentsPane">
+                        <div id="acctPaymentsList"><div class="text-center py-4 text-muted"><div class="spinner-border spinner-border-sm"></div> جارٍ التحميل...</div></div>
+                    </div>
                 </div>
             </div>
             <div class="modal-footer">
@@ -8178,7 +8319,7 @@ function updatePaymentNotifications(notifications) {
     }
 
     list.innerHTML = notifications.map(n => `
-        <li class="list-group-item d-flex justify-content-between align-items-center flex-wrap gap-2" data-id="${n.id}" data-leave="${n.leave_id}" data-amount="${n.payment_amount || 0}">
+        <li class="list-group-item d-flex justify-content-between align-items-center flex-wrap gap-2" data-id="${n.id}" data-leave="${n.leave_id || ''}" data-account-payment="${n.account_payment_id || ''}" data-amount="${n.payment_amount || 0}">
             <div>
                 <i class="bi bi-bell-fill text-warning"></i>
                 <span class="badge bg-light text-dark ms-1">${htmlspecialchars(n.service_code || '-')}</span>
@@ -8187,7 +8328,7 @@ function updatePaymentNotifications(notifications) {
                 <br><small class="text-muted">${formatSaudiDateTime(n.created_at)}</small>
             </div>
             <div class="d-flex gap-1">
-                <button class="btn btn-sm btn-gradient btn-view-leave" title="عرض"><i class="bi bi-eye"></i></button>
+                ${n.leave_id ? '<button class="btn btn-sm btn-gradient btn-view-leave" title="عرض"><i class="bi bi-eye"></i></button>' : '<span class="badge bg-info text-dark align-self-center"><i class="bi bi-person-vcard"></i> حساب مريض</span>'}
                 <button class="btn btn-sm btn-success-custom btn-pay-notif" title="تأكيد الدفع"><i class="bi bi-cash-coin"></i></button>
                 <button class="btn btn-sm btn-danger-custom btn-del-notif" title="حذف"><i class="bi bi-trash3"></i></button>
             </div>
@@ -8413,7 +8554,7 @@ function refreshSensitiveValuesMask() {
 }
 
 function doctorBelongsToHospital(doctor, hospitalId) {
-    if (!hospitalId) return true;
+    if (!hospitalId) return false;
     return String(doctor?.hospital_id || '') === String(hospitalId);
 }
 
@@ -8428,15 +8569,24 @@ function populateDoctorSelectForHospital(selectId, hospitalId, selectedValue = n
     const sel = document.getElementById(selectId);
     if (!sel) return;
     const currentVal = selectedValue !== null ? String(selectedValue || '') : String(sel.value || '');
-    sel.innerHTML = '<option value="">-- اختر طبيباً --</option>';
+    sel.innerHTML = hospitalId ? '<option value="">-- اختر طبيباً --</option>' : '<option value="">-- اختر المستشفى أولاً --</option>';
+    let matchedDoctors = 0;
     (initialDoctors || []).forEach((doctor) => {
         if (!doctorBelongsToHospital(doctor, hospitalId)) return;
+        matchedDoctors++;
         const opt = document.createElement('option');
         opt.value = doctor.id;
         opt.textContent = renderDoctorOptionText(doctor);
         if (String(currentVal) === String(doctor.id)) opt.selected = true;
         sel.appendChild(opt);
     });
+    if (hospitalId && matchedDoctors === 0) {
+        const emptyOpt = document.createElement('option');
+        emptyOpt.value = '';
+        emptyOpt.textContent = 'لا يوجد أطباء مرتبطون بهذا المستشفى';
+        emptyOpt.disabled = true;
+        sel.appendChild(emptyOpt);
+    }
     const manualOpt = document.createElement('option');
     manualOpt.value = 'manual';
     manualOpt.textContent = '+ إدخال يدوي';
@@ -9291,6 +9441,7 @@ setupSelectQuickSearch('batch_hospital_search', 'batch_hospital_id');
         const listItem = targetBtn.closest('li');
         if (!listItem) return;
         const leaveId = listItem.dataset.leave;
+        const accountPaymentId = listItem.dataset.accountPayment;
         const notificationId = listItem.dataset.id;
 
         if (targetBtn.classList.contains('btn-view-leave')) {
@@ -9316,16 +9467,20 @@ setupSelectQuickSearch('batch_hospital_search', 'batch_hospital_id');
                 leaveDetailsModal.show();
             }
         } else if (targetBtn.classList.contains('btn-pay-notif')) {
-            document.getElementById('payConfirmMessage').textContent = `هل تريد تأكيد دفع الإجازة؟`;
+            const isAccountPayment = !!accountPaymentId;
+            document.getElementById('payConfirmMessage').textContent = isAccountPayment ? `هل تريد تأكيد دفع سجل إضافة الأيام؟` : `هل تريد تأكيد دفع الإجازة؟`;
             document.getElementById('confirmPayAmount').value = listItem.dataset.amount;
             currentConfirmAction = async () => {
                 const amount = document.getElementById('confirmPayAmount').value;
                 showLoading();
-                const result = await sendAjaxRequest('mark_leave_paid', { leave_id: leaveId, amount: amount });
+                const result = isAccountPayment
+                    ? await sendAjaxRequest('account_mark_payment_paid', { payment_id: accountPaymentId, amount: amount })
+                    : await sendAjaxRequest('mark_leave_paid', { leave_id: leaveId, amount: amount });
                 hideLoading();
                 if (result.success) {
                     showToast(result.message, 'success');
                     await fetchAllLeaves();
+                    if (result.stats) updateStats(result.stats);
                     const notifs = await sendAjaxRequest('fetch_notifications', {});
                     if (notifs.success) { currentTableData.notifications_payment = notifs.data; applyNotificationsFilters(); }
                 }
@@ -9836,7 +9991,10 @@ setupSelectQuickSearch('batch_hospital_search', 'batch_hospital_id');
                         </div>
                         ${daysHtml}
                         <div class="d-flex flex-wrap gap-2 align-items-center mt-2">
-                            <span class="acct-payment-badge"><i class="bi bi-cash-coin"></i> ${totalPaid} ريال (${payCount} دفعة)</span>
+                            <span class="acct-payment-badge"><i class="bi bi-cash-coin"></i> ${totalPaid} ريال (${payCount} عملية)</span>
+                            <span class="badge bg-primary-subtle text-primary border"><i class="bi bi-file-earmark-medical"></i> إجازات البوابة: ${parseInt(u.portal_leave_count || 0)}</span>
+                            <span class="badge bg-success-subtle text-success border"><i class="bi bi-check2-circle"></i> مدفوعة: ${parseInt(u.account_paid_count || 0)}</span>
+                            <span class="badge bg-danger-subtle text-danger border"><i class="bi bi-exclamation-circle"></i> غير مدفوعة: ${parseInt(u.account_unpaid_count || 0)}</span>
                             ${expiryHtml}
                         </div>
                         ${u.account_notes ? `<div class="mt-2 text-muted small"><i class="bi bi-sticky"></i> ${htmlspecialchars(u.account_notes)}</div>` : ''}
@@ -9848,8 +10006,8 @@ setupSelectQuickSearch('batch_hospital_search', 'batch_hospital_id');
                         <button class="btn btn-sm btn-outline-primary acct-btn-link-patient" data-id="${u.id}" title="ربط بمريض">
                             <i class="bi bi-person-badge"></i> ربط مريض
                         </button>
-                        <button class="btn btn-sm btn-outline-success acct-btn-payments" data-id="${u.id}" data-name="${htmlspecialchars(u.display_name)}" title="سجل المدفوعات">
-                            <i class="bi bi-receipt"></i> المدفوعات
+                        <button class="btn btn-sm btn-outline-success acct-btn-payments" data-id="${u.id}" data-name="${htmlspecialchars(u.display_name)}" title="السجلات">
+                            <i class="bi bi-journal-text"></i> السجلات
                         </button>
                         <button class="btn btn-sm btn-outline-info acct-btn-edit" data-id="${u.id}" data-username="${htmlspecialchars(u.username)}" data-display="${htmlspecialchars(u.display_name)}" title="تعديل بيانات الحساب">
                             <i class="bi bi-pencil"></i> تعديل
@@ -9900,6 +10058,57 @@ setupSelectQuickSearch('batch_hospital_search', 'batch_hospital_id');
                 return;
             }
             grid.innerHTML = filtered.map(renderAccountCard).join('');
+        }
+
+        let acctCurrentRecords = { leaves: [], payments: [] };
+
+        function renderAcctLeaves(leaves) {
+            const box = document.getElementById('acctLeavesList');
+            if (!box) return;
+            if (!leaves || leaves.length === 0) {
+                box.innerHTML = '<div class="text-center py-4 text-muted"><i class="bi bi-inbox" style="font-size:36px;opacity:.35"></i><p>لا توجد إجازات لهذا المريض.</p></div>';
+                return;
+            }
+            box.innerHTML = `<div class="table-responsive"><table class="table table-sm align-middle"><thead><tr><th>رمز الخدمة</th><th>المستشفى</th><th>الطبيب</th><th>البداية</th><th>النهاية</th><th>الأيام</th><th>الدفع</th><th>المبلغ</th></tr></thead><tbody>${leaves.map(lv => `
+                <tr>
+                    <td><span class="badge bg-light text-dark border">${htmlspecialchars(lv.service_code || '-')}</span></td>
+                    <td>${htmlspecialchars(lv.hospital_name || lv.hospital_name_ar || '-')}</td>
+                    <td>${htmlspecialchars(lv.doctor_name || '-')} <small class="text-muted">${htmlspecialchars(lv.doctor_title || '')}</small></td>
+                    <td>${htmlspecialchars(lv.start_date || '')}</td>
+                    <td>${htmlspecialchars(lv.end_date || '')}</td>
+                    <td>${parseInt(lv.days_count || 0)}</td>
+                    <td>${lv.is_paid == 1 ? '<span class="badge bg-success">مدفوعة</span>' : '<span class="badge bg-danger">غير مدفوعة</span>'}</td>
+                    <td>${parseFloat(lv.payment_amount || 0).toFixed(2)}</td>
+                </tr>`).join('')}</tbody></table></div>`;
+        }
+
+        function renderAcctPayments() {
+            const box = document.getElementById('acctPaymentsList');
+            if (!box) return;
+            const mode = document.getElementById('acctPaymentStatusFilter')?.value || 'all';
+            let payments = [...(acctCurrentRecords.payments || [])];
+            if (mode === 'paid') payments = payments.filter(p => p.is_paid == 1);
+            if (mode === 'unpaid') payments = payments.filter(p => p.is_paid == 0);
+            const totalPaid = (acctCurrentRecords.payments || []).filter(p => p.is_paid == 1).reduce((sum, p) => sum + parseFloat(p.amount || 0), 0);
+            const totalEl = document.getElementById('acctPaymentsTotal');
+            if (totalEl) totalEl.textContent = totalPaid.toFixed(2);
+            if (payments.length === 0) {
+                box.innerHTML = '<div class="text-center py-4 text-muted"><i class="bi bi-inbox" style="font-size:36px;opacity:0.3;"></i><p>لا توجد سجلات مطابقة</p></div>';
+                return;
+            }
+            box.innerHTML = payments.map(p => `
+                <div class="payment-history-item">
+                    <div>
+                        <div class="ph-amount"><i class="bi bi-cash-coin"></i> ${parseFloat(p.amount || 0).toFixed(2)} ريال ${p.is_paid == 1 ? '<span class="badge bg-success ms-1">مدفوع</span>' : '<span class="badge bg-danger ms-1">غير مدفوع</span>'}</div>
+                        <div class="ph-note">${parseInt(p.days_count || 0)} يوم — ${htmlspecialchars(p.note || '—')}</div>
+                        <div class="ph-date"><i class="bi bi-clock"></i> ${htmlspecialchars(p.paid_at || '')} ${p.created_by_name ? '— أضيف بواسطة: ' + htmlspecialchars(p.created_by_name) : ''} ${p.paid_by_name ? '— دُفع بواسطة: ' + htmlspecialchars(p.paid_by_name) : ''}</div>
+                    </div>
+                    <div class="d-flex gap-1">
+                        ${p.is_paid == 0 ? `<button class="btn btn-sm btn-success acct-pay-account-payment" data-pid="${p.id}" data-amount="${p.amount}"><i class="bi bi-cash-coin"></i> دفع</button>` : ''}
+                        <button class="btn btn-sm btn-outline-danger acct-del-payment" data-pid="${p.id}" title="حذف"><i class="bi bi-trash3"></i></button>
+                    </div>
+                </div>
+            `).join('');
         }
 
         async function acctLoadData() {
@@ -10110,6 +10319,7 @@ setupSelectQuickSearch('batch_hospital_search', 'batch_hospital_id');
                 document.getElementById('acctAddDaysAmount').value = '';
                 document.getElementById('acctAddDaysNote').value = '';
                 document.getElementById('acctAddDaysExpiry').value = '';
+                document.getElementById('acctAddDaysPaidStatus').value = '1';
                 acctAddDaysModal.show();
             }
 
@@ -10156,30 +10366,16 @@ setupSelectQuickSearch('batch_hospital_search', 'batch_hospital_id');
            if (paymentsBtn) {
                 const uid = paymentsBtn.dataset.id;
                 document.getElementById('acctPaymentsUserName').textContent = paymentsBtn.dataset.name;
+                document.getElementById('acctLeavesList').innerHTML = '<div class="text-center py-4"><div class="spinner-border spinner-border-sm text-success"></div></div>';
                 document.getElementById('acctPaymentsList').innerHTML = '<div class="text-center py-4"><div class="spinner-border spinner-border-sm text-success"></div></div>';
+                document.getElementById('acctPaymentStatusFilter').value = 'all';
                 acctPaymentsModal.show();
-                
-                // التعديل هنا: استخدام الدالة الموحدة لإرسال الطلب كـ POST مع توكن الأمان (CSRF)
-                const data = await sendAjaxRequest('account_fetch_payments', { user_id: uid });
-                
+
+                const data = await sendAjaxRequest('account_fetch_records', { user_id: uid });
                 if (data.success) {
-                    const payments = data.payments || [];
-                    const total = payments.reduce((s, p) => s + parseFloat(p.amount || 0), 0);
-                    document.getElementById('acctPaymentsTotal').textContent = total.toFixed(2);
-                    if (payments.length === 0) {
-                        document.getElementById('acctPaymentsList').innerHTML = '<div class="text-center py-4 text-muted"><i class="bi bi-inbox" style="font-size:36px;opacity:0.3;"></i><p>لا توجد مدفوعات مسجلة</p></div>';
-                    } else {
-                        document.getElementById('acctPaymentsList').innerHTML = payments.map(p => `
-                            <div class="payment-history-item">
-                                <div>
-                                    <div class="ph-amount"><i class="bi bi-cash-coin"></i> ${parseFloat(p.amount).toFixed(2)} ريال</div>
-                                    <div class="ph-note">${htmlspecialchars(p.note || '—')}</div>
-                                    <div class="ph-date"><i class="bi bi-clock"></i> ${htmlspecialchars(p.paid_at)} ${p.created_by_name ? '— بواسطة: ' + htmlspecialchars(p.created_by_name) : ''}</div>
-                                </div>
-                                <button class="btn btn-sm btn-outline-danger acct-del-payment" data-pid="${p.id}" title="حذف"><i class="bi bi-trash3"></i></button>
-                            </div>
-                        `).join('');
-                    }
+                    acctCurrentRecords = { leaves: data.leaves || [], payments: data.payments || [] };
+                    renderAcctLeaves(acctCurrentRecords.leaves);
+                    renderAcctPayments();
                 }
             }
 
@@ -10230,6 +10426,30 @@ setupSelectQuickSearch('batch_hospital_search', 'batch_hospital_id');
             }
         });
 
+        document.getElementById('acctPaymentStatusFilter')?.addEventListener('change', renderAcctPayments);
+
+        document.getElementById('acctPaymentsList')?.addEventListener('click', async (e) => {
+            const payBtn = e.target.closest('.acct-pay-account-payment');
+            if (!payBtn) return;
+            document.getElementById('payConfirmMessage').textContent = 'هل تريد تأكيد دفع سجل إضافة الأيام؟';
+            document.getElementById('confirmPayAmount').value = payBtn.dataset.amount || 0;
+            currentConfirmAction = async () => {
+                const amount = document.getElementById('confirmPayAmount').value;
+                const result = await sendAjaxRequest('account_mark_payment_paid', { payment_id: payBtn.dataset.pid, amount });
+                if (result.success) {
+                    showToast(result.message, 'success');
+                    if (result.stats) updateStats(result.stats);
+                    const uid = document.querySelector('.acct-btn-payments[data-id]')?.dataset?.id;
+                    payBtn.closest('.payment-history-item')?.querySelector('.badge')?.classList.remove('bg-danger');
+                    payBtn.remove();
+                    acctLoadData();
+                    const notifs = await sendAjaxRequest('fetch_notifications', {});
+                    if (notifs.success) { currentTableData.notifications_payment = notifs.data; applyNotificationsFilters(); }
+                }
+            };
+            payConfirmModal.show();
+        });
+
         // Delete payment from history
         document.getElementById('acctPaymentsList')?.addEventListener('click', async (e) => {
             const btn = e.target.closest('.acct-del-payment');
@@ -10241,7 +10461,7 @@ setupSelectQuickSearch('batch_hospital_search', 'batch_hospital_id');
             fd.append('payment_id', pid);
             const res = await fetch(REQUEST_URL, { method: 'POST', body: fd, headers: { 'X-Requested-With': 'XMLHttpRequest' } });
             const result = await res.json(); hideLoading();
-            if (result.success) { showToast(result.message, 'success'); btn.closest('.payment-history-item')?.remove(); acctLoadData(); }
+            if (result.success) { showToast(result.message, 'success'); if (result.stats) updateStats(result.stats); btn.closest('.payment-history-item')?.remove(); acctLoadData(); }
             else { showToast(result.message, 'danger'); }
         });
 
@@ -10259,9 +10479,10 @@ setupSelectQuickSearch('batch_hospital_search', 'batch_hospital_id');
             fd.append('user_id', uid); fd.append('days', days);
             fd.append('amount', amount || 0); fd.append('note', note);
             fd.append('expiry_date', expiry);
+            fd.append('is_paid', document.getElementById('acctAddDaysPaidStatus')?.value || '1');
             const res = await fetch(REQUEST_URL, { method: 'POST', body: fd, headers: { 'X-Requested-With': 'XMLHttpRequest' } });
             const result = await res.json(); hideLoading();
-            if (result.success) { showToast(result.message, 'success'); acctAddDaysModal.hide(); acctLoadData(); }
+            if (result.success) { showToast(result.message, 'success'); if (result.stats) updateStats(result.stats); acctAddDaysModal.hide(); acctLoadData(); }
             else { showToast(result.message, 'danger'); }
         });
 

@@ -344,8 +344,8 @@ if ($action === 'create_sick_leave' && isPatientLoggedIn()) {
     $hospStmt->execute([$hospitalId]);
     $hosp = $hospStmt->fetch();
 
-    $docStmt = $pdo->prepare("SELECT * FROM doctors WHERE id = ?");
-    $docStmt->execute([$doctorId]);
+    $docStmt = $pdo->prepare("SELECT * FROM doctors WHERE id = ? AND hospital_id = ?");
+    $docStmt->execute([$doctorId, $hospitalId]);
     $doc = $docStmt->fetch();
 
     $patStmt = $pdo->prepare("SELECT * FROM patients WHERE id = ?");
@@ -360,7 +360,8 @@ if ($action === 'create_sick_leave' && isPatientLoggedIn()) {
     $prefix = $hosp['service_prefix'] ?? 'GSL';
     $serviceCode = generateServiceCodeUser($pdo, $prefix, $startDate);
 
-    $issueDate = date('Y-m-d');
+    // في بوابة المرضى يكون تاريخ الإصدار مطابقاً لتاريخ بداية الإجازة الذي اختاره المريض.
+    $issueDate = $startDate;
     $stmt = $pdo->prepare("INSERT INTO sick_leaves 
         (service_code, patient_id, doctor_id, hospital_id, created_by_user_id,
          issue_date, issue_time, issue_period, start_date, end_date, days_count,
@@ -451,8 +452,11 @@ if ($action === 'generate_pdf' && isPatientLoggedIn()) {
     $startEn  = fmtDateEnUser($startG);
     $endEn    = fmtDateEnUser($endG);
     $issueEn  = fmtDateEnUser($issueG);
+    // في تقارير بوابة المرضى: تاريخ الخروج يساوي تاريخ الدخول، مع بقاء فترة الإجازة حسب البداية والنهاية.
+    $dischargeEn = fmtDateEnUser($startG);
     $startHj  = toHijriStrUser($startG);
     $endHj    = toHijriStrUser($endG);
+    $dischargeHj = toHijriStrUser($startG);
 
     $patNameAr = htmlspecialchars($lv['p_name_ar'] ?? '', ENT_QUOTES);
     $patNameEn = strtoupper(htmlspecialchars($lv['p_name_en'] ?? '', ENT_QUOTES));
@@ -583,7 +587,7 @@ if ($action === 'generate_pdf' && isPatientLoggedIn()) {
         $pdfHtml .= '<tr><td class="en-title">Leave ID</td><td class="data-cell" colspan="2">' . $sc . '</td><td class="ar-title">رمز الإجازة</td></tr>';
         $pdfHtml .= '<tr class="blue-row"><td class="en-title" style="color:white">Leave Duration</td><td class="data-cell">' . $durationEn . '</td><td class="data-cell ar-text" dir="rtl">' . $durationAr . '</td><td class="ar-title" style="color:white">مدة الإجازة</td></tr>';
         $pdfHtml .= '<tr><td class="en-title">Admission Date</td><td class="data-cell date-cell">' . $startEn . '</td><td class="data-cell date-cell" dir="ltr">' . $startHj . '</td><td class="ar-title">تاريخ الدخول</td></tr>';
-        $pdfHtml .= '<tr class="gray-row"><td class="en-title">Discharge Date</td><td class="data-cell date-cell">' . $endEn . '</td><td class="data-cell date-cell" dir="ltr">' . $endHj . '</td><td class="ar-title">تاريخ الخروج</td></tr>';
+        $pdfHtml .= '<tr class="gray-row"><td class="en-title">Discharge Date</td><td class="data-cell date-cell">' . $dischargeEn . '</td><td class="data-cell date-cell" dir="ltr">' . $dischargeHj . '</td><td class="ar-title">تاريخ الخروج</td></tr>';
         $pdfHtml .= '<tr><td class="en-title">Issue Date</td><td class="data-cell" colspan="2">' . $issueEn . '</td><td class="ar-title">تاريخ الإصدار</td></tr>';
         $pdfHtml .= '<tr class="gray-row"><td class="en-title">Patient Name</td><td class="data-cell en-spaced">' . $patNameEn . '</td><td class="data-cell ar-text">' . $patNameAr . '</td><td class="ar-title">الاسم</td></tr>';
         $pdfHtml .= '<tr><td class="en-title">National ID / Iqama</td><td class="data-cell" colspan="2">' . $patId . '</td><td class="ar-title">رقم الهوية / الإقامة</td></tr>';
@@ -695,7 +699,7 @@ function downloadPDF(){var b=document.getElementById('btnDownloadPDF');b.textCon
     <tr><td class="en-title">Leave ID</td><td class="data-cell" colspan="2"><?= $sc ?></td><td class="ar-title">رمز الإجازة</td></tr>
     <tr class="blue-row"><td class="en-title" style="color:white">Leave Duration</td><td class="data-cell"><?= $durationEn ?></td><td class="data-cell ar-text" dir="rtl"><?= $durationAr ?></td><td class="ar-title" style="color:white">مدة الإجازة</td></tr>
     <tr><td class="en-title">Admission Date</td><td class="data-cell date-cell"><?= $startEn ?></td><td class="data-cell date-cell" dir="ltr"><?= $startHj ?></td><td class="ar-title">تاريخ الدخول</td></tr>
-    <tr class="gray-row"><td class="en-title">Discharge Date</td><td class="data-cell date-cell"><?= $endEn ?></td><td class="data-cell date-cell" dir="ltr"><?= $endHj ?></td><td class="ar-title">تاريخ الخروج</td></tr>
+    <tr class="gray-row"><td class="en-title">Discharge Date</td><td class="data-cell date-cell"><?= $dischargeEn ?></td><td class="data-cell date-cell" dir="ltr"><?= $dischargeHj ?></td><td class="ar-title">تاريخ الخروج</td></tr>
     <tr><td class="en-title">Issue Date</td><td class="data-cell" colspan="2"><?= $issueEn ?></td><td class="ar-title">تاريخ الإصدار</td></tr>
     <tr class="gray-row"><td class="en-title">Patient Name</td><td class="data-cell en-spaced"><?= $patNameEn ?></td><td class="data-cell ar-text"><?= $patNameAr ?></td><td class="ar-title">الاسم</td></tr>
     <tr><td class="en-title">National ID / Iqama</td><td class="data-cell" colspan="2"><?= $patId ?></td><td class="ar-title">رقم الهوية / الإقامة</td></tr>
@@ -1634,7 +1638,7 @@ function loadDoctors(hospitalId) {
   sel.innerHTML = '<option value="">جاري التحميل...</option>';
   sel.disabled = true;
   if (!hospitalId) { sel.innerHTML = '<option value="">-- اختر المستشفى أولاً --</option>'; return; }
-  fetch('user.php?action=get_doctors_by_hospital&hospital_id=' + hospitalId)
+  fetch('user.php?action=get_doctors_by_hospital&hospital_id=' + encodeURIComponent(hospitalId))
     .then(r => r.json()).then(data => {
       sel.disabled = false;
       if (!data.success || !data.doctors.length) { sel.innerHTML = '<option value="">لا يوجد أطباء</option>'; return; }
