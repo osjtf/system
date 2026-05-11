@@ -302,6 +302,18 @@ $pdo->exec("CREATE TABLE IF NOT EXISTS account_payments (
     FOREIGN KEY (user_id) REFERENCES admin_users(id) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci");
 
+// ======================== جدول حسابات المرضى (منفصل عن مستخدمي لوحة التحكم) ========================
+$pdo->exec("CREATE TABLE IF NOT EXISTS patient_accounts (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    user_id INT NOT NULL UNIQUE,
+    patient_id INT NOT NULL,
+    allowed_days INT DEFAULT 0,
+    expiry_date DATE NULL,
+    notes TEXT NULL,
+    FOREIGN KEY (user_id) REFERENCES admin_users(id) ON DELETE CASCADE,
+    FOREIGN KEY (patient_id) REFERENCES patients(id) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci");
+
 // أعمدة patient_accounts الجديدة
 ensureColumn($pdo, 'patient_accounts', 'expiry_date', "DATE NULL AFTER allowed_days");
 ensureColumn($pdo, 'patient_accounts', 'notes', "TEXT NULL AFTER expiry_date");
@@ -2865,7 +2877,7 @@ if (isset($_POST['action']) && $_POST['action'] !== 'login' && $_POST['action'] 
             $stmt = $pdo->prepare("INSERT INTO admin_users (username, password_hash, display_name, role) VALUES (?, ?, ?, ?)");
             $stmt->execute([$username, $hash, $display_name, $role]);
             
-            $users = $pdo->query("SELECT u.*, pa.patient_id AS linked_patient_id, pa.allowed_days AS patient_allowed_days, p.name_ar AS linked_patient_name FROM admin_users u LEFT JOIN patient_accounts pa ON pa.user_id = u.id LEFT JOIN patients p ON pa.patient_id = p.id ORDER BY u.created_at DESC")->fetchAll();
+            $users = $pdo->query("SELECT u.* FROM admin_users u ORDER BY u.created_at DESC")->fetchAll();
             echo json_encode(['success' => true, 'message' => 'تمت إضافة المستخدم بنجاح.', 'users' => $users]);
             break;
 
@@ -2894,7 +2906,7 @@ if (isset($_POST['action']) && $_POST['action'] !== 'login' && $_POST['action'] 
                 $stmt->execute([$display_name, $role, $is_active, $user_id]);
             }
             
-            $users = $pdo->query("SELECT u.*, pa.patient_id AS linked_patient_id, pa.allowed_days AS patient_allowed_days, p.name_ar AS linked_patient_name FROM admin_users u LEFT JOIN patient_accounts pa ON pa.user_id = u.id LEFT JOIN patients p ON pa.patient_id = p.id ORDER BY u.created_at DESC")->fetchAll();
+            $users = $pdo->query("SELECT u.* FROM admin_users u ORDER BY u.created_at DESC")->fetchAll();
             echo json_encode(['success' => true, 'message' => 'تم تعديل المستخدم بنجاح.', 'users' => $users]);
             break;
 
@@ -2910,7 +2922,7 @@ if (isset($_POST['action']) && $_POST['action'] !== 'login' && $_POST['action'] 
             }
             $pdo->prepare("DELETE FROM user_sessions WHERE user_id = ?")->execute([$user_id]);
             $pdo->prepare("DELETE FROM admin_users WHERE id = ?")->execute([$user_id]);
-            $users = $pdo->query("SELECT u.*, pa.patient_id AS linked_patient_id, pa.allowed_days AS patient_allowed_days, p.name_ar AS linked_patient_name FROM admin_users u LEFT JOIN patient_accounts pa ON pa.user_id = u.id LEFT JOIN patients p ON pa.patient_id = p.id ORDER BY u.created_at DESC")->fetchAll();
+            $users = $pdo->query("SELECT u.* FROM admin_users u ORDER BY u.created_at DESC")->fetchAll();
             echo json_encode(['success' => true, 'message' => 'تم حذف المستخدم بنجاح.', 'users' => $users]);
             break;
 
@@ -2919,7 +2931,7 @@ if (isset($_POST['action']) && $_POST['action'] !== 'login' && $_POST['action'] 
                 echo json_encode(['success' => false, 'message' => 'ليس لديك صلاحية.']);
                 exit;
             }
-            $users = $pdo->query("SELECT u.*, pa.patient_id AS linked_patient_id, pa.allowed_days AS patient_allowed_days, p.name_ar AS linked_patient_name FROM admin_users u LEFT JOIN patient_accounts pa ON pa.user_id = u.id LEFT JOIN patients p ON pa.patient_id = p.id ORDER BY u.created_at DESC")->fetchAll();
+            $users = $pdo->query("SELECT u.* FROM admin_users u ORDER BY u.created_at DESC")->fetchAll();
             echo json_encode(['success' => true, 'users' => $users]);
             break;
 
@@ -3054,7 +3066,7 @@ if (isset($_POST['action']) && $_POST['action'] !== 'login' && $_POST['action'] 
                 $msg = 'تم إزالة ربط المريض من هذا المستخدم.';
             }
 
-            $users = $pdo->query("SELECT u.*, pa.patient_id AS linked_patient_id, pa.allowed_days AS patient_allowed_days, p.name_ar AS linked_patient_name FROM admin_users u LEFT JOIN patient_accounts pa ON pa.user_id = u.id LEFT JOIN patients p ON pa.patient_id = p.id ORDER BY u.created_at DESC")->fetchAll();
+            $users = $pdo->query("SELECT u.* FROM admin_users u ORDER BY u.created_at DESC")->fetchAll();
             echo json_encode(['success' => true, 'message' => $msg, 'users' => $users]);
             break;
 
@@ -3086,6 +3098,7 @@ if (isset($_POST['action']) && $_POST['action'] !== 'login' && $_POST['action'] 
             ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci");
             ensureColumn($pdo, 'patient_accounts', 'expiry_date', "DATE NULL AFTER allowed_days");
             ensureColumn($pdo, 'patient_accounts', 'notes', "TEXT NULL AFTER expiry_date");
+            // جلب حسابات المرضى فقط (المرتبطة بـ patient_accounts) - منفصلة عن مستخدمي لوحة التحكم
             $accounts = $pdo->query("
                 SELECT u.id, u.username, u.display_name, u.role, u.is_active, u.created_at,
                        pa.patient_id AS linked_patient_id, pa.allowed_days AS patient_allowed_days,
@@ -3094,7 +3107,7 @@ if (isset($_POST['action']) && $_POST['action'] !== 'login' && $_POST['action'] 
                        COALESCE((SELECT SUM(amount) FROM account_payments WHERE user_id = u.id), 0) AS total_paid,
                        COALESCE((SELECT COUNT(*) FROM account_payments WHERE user_id = u.id), 0) AS payment_count
                 FROM admin_users u
-                LEFT JOIN patient_accounts pa ON pa.user_id = u.id
+                INNER JOIN patient_accounts pa ON pa.user_id = u.id
                 LEFT JOIN patients p ON pa.patient_id = p.id
                 ORDER BY u.created_at DESC
             ")->fetchAll();
@@ -3294,7 +3307,7 @@ if ($loggedIn) {
     $chat_users_stmt->execute([intval($_SESSION['admin_user_id'])]);
     $chat_users = $chat_users_stmt->fetchAll();
     if ($_SESSION['admin_role'] === 'admin') {
-        $users = $pdo->query("SELECT u.*, pa.patient_id AS linked_patient_id, pa.allowed_days AS patient_allowed_days, p.name_ar AS linked_patient_name FROM admin_users u LEFT JOIN patient_accounts pa ON pa.user_id = u.id LEFT JOIN patients p ON pa.patient_id = p.id ORDER BY u.created_at DESC")->fetchAll();
+        $users = $pdo->query("SELECT u.* FROM admin_users u ORDER BY u.created_at DESC")->fetchAll();
     }
 } else {
     $doctors = $patients = $leaves = $archived = $queries = $notifications_payment = $payments = $users = $chat_users = $hospitals = [];
@@ -5864,8 +5877,8 @@ if (!in_array($uiDataViewMode, ['table','compact','cards','zebra','glass','minim
             <div class="accounts-mgmt-wrap">
                 <div class="alert alert-info mb-3 py-2" style="font-size:13px;">
                     <i class="bi bi-info-circle-fill"></i>
-                    <strong>حسابات المرضى:</strong> هذه الحسابات تُستخدم لتسجيل دخول المرضى في <strong>بوابة المرضى (user.php)</strong>. كل مريض يحتاج حساباً مرتبطاً بملفه لتقديم طلبات الإجازة.
-                    <br><i class="bi bi-shield-lock"></i> لإدارة حسابات لوحة التحكم (المشرفين)، اذهب إلى <strong>الإعدادات ← إدارة المستخدمين</strong>.
+                    <strong>حسابات المرضى:</strong> هذه الحسابات <strong>منفصلة تماماً</strong> عن مستخدمي لوحة التحكم. تُستخدم لتسجيل دخول المرضى في <strong>بوابة المرضى (user.php)</strong> فقط. كل مريض يحتاج حساباً مرتبطاً بملفه لتقديم طلبات الإجازة.
+                    <br><i class="bi bi-shield-lock"></i> لإدارة مستخدمي ومشرفي لوحة التحكم، اذهب إلى <strong>الإعدادات ← إدارة المستخدمين</strong>.
                 </div>
                 <!-- Header Stats Row -->
                 <div class="row g-3 mb-4" id="accountsStatsRow">
@@ -6718,13 +6731,18 @@ if (!in_array($uiDataViewMode, ['table','compact','cards','zebra','glass','minim
     <div class="modal-dialog modal-xl modal-dialog-centered modal-dialog-scrollable">
         <div class="modal-content">
             <div class="modal-header" style="background: var(--gradient-dark); color: #fff;">
-                <h5 class="modal-title"><i class="bi bi-people-fill"></i> إدارة المستخدمين</h5>
+                <h5 class="modal-title"><i class="bi bi-people-fill"></i> إدارة مستخدمي لوحة التحكم</h5>
                 <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
             </div>
             <div class="modal-body users-section">
+                <div class="alert alert-warning py-2 mb-3" style="font-size:13px;">
+                    <i class="bi bi-shield-lock-fill"></i>
+                    <strong>ملاحظة:</strong> هذا القسم مخصص لإدارة مستخدمي ومشرفي <strong>لوحة التحكم فقط</strong>.
+                    لإدارة حسابات المرضى (بوابة المرضى)، اذهب إلى تبويب <strong>حسابات المرضى</strong>.
+                </div>
                 <!-- إضافة مستخدم جديد -->
                 <div class="card-custom mb-3">
-                    <div class="card-header"><i class="bi bi-person-plus text-primary"></i> إضافة مستخدم جديد</div>
+                    <div class="card-header"><i class="bi bi-person-plus text-primary"></i> إضافة مستخدم لوحة تحكم جديد</div>
                     <div class="card-body">
                         <form id="addUserForm" class="row g-2">
                             <div class="col-md-3"><input type="text" class="form-control" name="new_username" placeholder="اسم المستخدم" required></div>
@@ -6743,7 +6761,7 @@ if (!in_array($uiDataViewMode, ['table','compact','cards','zebra','glass','minim
                 <!-- قائمة المستخدمين -->
                 <div class="table-responsive">
                     <table class="table table-bordered table-hover table-striped text-center mobile-readable" id="usersTable">
-                        <thead><tr><th>#</th><th>اسم المستخدم</th><th>الاسم المعروض</th><th>الدور</th><th>الحالة</th><th>المريض المرتبط</th><th>تاريخ الإنشاء</th><th>التحكم</th></tr></thead>
+                        <thead><tr><th>#</th><th>اسم المستخدم</th><th>الاسم المعروض</th><th>الدور</th><th>الحالة</th><th>تاريخ الإنشاء</th><th>التحكم</th></tr></thead>
                         <tbody></tbody>
                     </table>
                 </div>
@@ -6779,43 +6797,6 @@ if (!in_array($uiDataViewMode, ['table','compact','cards','zebra','glass','minim
             <div class="modal-footer">
                 <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">إلغاء</button>
                 <button type="button" class="btn btn-gradient" id="saveEditUser">حفظ</button>
-            </div>
-        </div>
-    </div>
-</div>
-
-<!-- ======================== مودال حساب المريض (بوابة المرضى) ======================== -->
-<div class="modal fade" id="patientAccountModal" tabindex="-1" aria-hidden="true">
-    <div class="modal-dialog modal-dialog-centered">
-        <div class="modal-content">
-            <div class="modal-header" style="background:linear-gradient(135deg,#1e40af,#3b82f6);color:#fff;">
-                <h5 class="modal-title"><i class="bi bi-person-badge-fill"></i> إعدادات حساب المريض — بوابة المرضى</h5>
-                <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
-            </div>
-            <div class="modal-body">
-                <div class="alert alert-info" style="font-size:13px;">
-                    <i class="bi bi-info-circle"></i> اربط هذا المستخدم بملف مريض وحدد عدد أيام الإجازة المسموحة له في <strong>بوابة المرضى (user.php)</strong>.
-                </div>
-                <form id="patientAccountForm">
-                    <input type="hidden" id="pa_user_id" name="target_user_id">
-                    <div class="mb-3">
-                        <label class="form-label fw-bold">المريض المرتبط</label>
-                        <select class="form-select" id="pa_patient_id" name="patient_id">
-                            <option value="0">-- بدون ربط (تعطيل الوصول) --</option>
-                        </select>
-                        <div class="form-text">اختر المريض الذي سيرى بياناته هذا المستخدم عند تسجيل الدخول.</div>
-                    </div>
-                    <div class="mb-3">
-                        <label class="form-label fw-bold">عدد أيام الإجازة المسموحة</label>
-                        <input type="number" class="form-control" id="pa_allowed_days" name="allowed_days" min="0" max="365" value="0">
-                        <div class="form-text">الحد الأقصى لأيام الإجازة التي يمكن للمريض طلبها. 0 = لا يُسمح بأي طلب.</div>
-                    </div>
-                    <div id="pa_current_info" class="alert alert-success" style="display:none;font-size:13px;"></div>
-                </form>
-            </div>
-            <div class="modal-footer">
-                <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">إلغاء</button>
-                <button type="button" class="btn btn-gradient" id="savePatientAccount"><i class="bi bi-save"></i> حفظ الإعدادات</button>
             </div>
         </div>
     </div>
@@ -7000,13 +6981,6 @@ if (!in_array($uiDataViewMode, ['table','compact','cards','zebra','glass','minim
                     <div class="col-12">
                         <label class="form-label fw-bold">الاسم المعروض <span class="text-danger">*</span></label>
                         <input type="text" class="form-control" id="acctNewDisplayName" placeholder="مثال: أحمد محمد">
-                    </div>
-                    <div class="col-12">
-                        <label class="form-label fw-bold">الدور</label>
-                        <select class="form-select" id="acctNewRole">
-                            <option value="user" selected>مستخدم (مريض)</option>
-                            <option value="admin">مشرف</option>
-                        </select>
                     </div>
                     <div class="col-12"><hr class="my-1"><small class="text-muted fw-bold"><i class="bi bi-person-badge"></i> ربط بمريض (اختياري)</small></div>
                     <div class="col-12">
@@ -7639,7 +7613,6 @@ function generatePaymentPatientRow(p) {
 function generateUserRow(u) {
     const roleBadge = u.role === 'admin' ? '<span class="badge bg-danger">مشرف</span>' : '<span class="badge bg-primary">مستخدم</span>';
     const statusBadge = u.is_active == 1 ? '<span class="badge bg-success">نشط</span>' : '<span class="badge bg-secondary">معطل</span>';
-    const patientBadge = u.linked_patient_id ? `<span class="badge bg-info" title="مرتبط بمريض: ${htmlspecialchars(u.linked_patient_name || '')}"><i class="bi bi-person-check"></i> ${htmlspecialchars(u.linked_patient_name || 'مريض')} (${u.patient_allowed_days || 0} يوم)</span>` : '<span class="badge bg-light text-muted">غير مرتبط</span>';
     return `
         <tr data-id="${u.id}">
             <td class="row-num"></td>
@@ -7647,12 +7620,10 @@ function generateUserRow(u) {
             <td>${htmlspecialchars(u.display_name)}</td>
             <td>${roleBadge}</td>
             <td>${statusBadge}</td>
-            <td>${patientBadge}</td>
             <td>${formatSaudiDateTime(u.created_at)}</td>
             <td>
                 <button class="btn btn-sm btn-gradient action-btn btn-edit-user" data-id="${u.id}" data-name="${htmlspecialchars(u.display_name)}" data-role="${u.role}" data-active="${u.is_active}"><i class="bi bi-pencil"></i></button>
                 <button class="btn btn-sm btn-info action-btn btn-view-sessions" data-id="${u.id}" title="سجل الجلسات"><i class="bi bi-clock-history"></i></button>
-                <button class="btn btn-sm btn-success action-btn btn-patient-account" data-id="${u.id}" title="إعدادات بوابة المرضى"><i class="bi bi-person-badge"></i></button>
                 <button class="btn btn-sm btn-danger-custom action-btn btn-delete-user" data-id="${u.id}"><i class="bi bi-trash3"></i></button>
             </td>
         </tr>`;
@@ -9071,41 +9042,10 @@ document.addEventListener('DOMContentLoaded', () => {
             } else { showToast(result.message, 'danger'); }
         });
 
-        const patientAccountModal = new bootstrap.Modal(document.getElementById('patientAccountModal'));
-
         usersTable.addEventListener('click', (e) => {
             const editBtn = e.target.closest('.btn-edit-user');
             const delBtn = e.target.closest('.btn-delete-user');
             const sessBtn = e.target.closest('.btn-view-sessions');
-            const paBtn = e.target.closest('.btn-patient-account');
-
-            if (paBtn) {
-                const userId = paBtn.dataset.id;
-                document.getElementById('pa_user_id').value = userId;
-                document.getElementById('pa_patient_id').innerHTML = '<option value="0">جاري التحميل...</option>';
-                document.getElementById('pa_allowed_days').value = 0;
-                document.getElementById('pa_current_info').style.display = 'none';
-                patientAccountModal.show();
-
-                fetch(`admin.php?action=get_patient_account&user_id=${userId}`, {
-                    headers: { 'X-Requested-With': 'XMLHttpRequest' }
-                }).then(r => r.json()).then(data => {
-                    if (data.success) {
-                        const sel = document.getElementById('pa_patient_id');
-                        sel.innerHTML = '<option value="0">-- بدون ربط (تعطيل الوصول) --</option>';
-                        (data.patients || []).forEach(p => {
-                            sel.innerHTML += `<option value="${p.id}">${htmlspecialchars(p.name_ar)} — ${htmlspecialchars(p.identity_number)}</option>`;
-                        });
-                        if (data.account) {
-                            sel.value = data.account.patient_id;
-                            document.getElementById('pa_allowed_days').value = data.account.allowed_days || 0;
-                            const info = document.getElementById('pa_current_info');
-                            info.style.display = 'block';
-                            info.innerHTML = `<i class="bi bi-check-circle"></i> مرتبط حالياً بـ: <strong>${htmlspecialchars(data.account.patient_name || '')}</strong> — الحصة: <strong>${data.account.allowed_days} يوم</strong>`;
-                        }
-                    }
-                });
-            }
 
             if (editBtn) {
                 document.getElementById('edit_user_id').value = editBtn.dataset.id;
@@ -9203,21 +9143,6 @@ document.addEventListener('DOMContentLoaded', () => {
             } else { showToast(result.message, 'danger'); }
         });
 
-        document.getElementById('savePatientAccount').addEventListener('click', async () => {
-            showLoading();
-            const formData = new FormData(document.getElementById('patientAccountForm'));
-            formData.append('action', 'save_patient_account');
-            formData.append('csrf_token', CSRF_TOKEN);
-            const res = await fetch(REQUEST_URL, { method: 'POST', body: formData, headers: { 'X-Requested-With': 'XMLHttpRequest' } });
-            const result = await res.json();
-            hideLoading();
-            if (result.success) {
-                showToast(result.message, 'success');
-                patientAccountModal.hide();
-                currentTableData.users = result.users;
-                updateTable(usersTable, currentTableData.users, generateUserRow);
-            } else { showToast(result.message, 'danger'); }
-        });
     }
 
     // ====== إدارة الحسابات (التبويب الجديد) ======
@@ -9433,7 +9358,7 @@ document.addEventListener('DOMContentLoaded', () => {
             const username = document.getElementById('acctNewUsername').value.trim();
             const password = document.getElementById('acctNewPassword').value;
             const displayName = document.getElementById('acctNewDisplayName').value.trim();
-            const role = document.getElementById('acctNewRole').value;
+            const role = 'user'; // حسابات المرضى دائماً بدور "مستخدم"
             const linkPatientId = document.getElementById('acctNewLinkPatient')?.value || '0';
             const allowedDays = document.getElementById('acctNewAllowedDays')?.value || '0';
             if (!username || !password || !displayName) { showToast('يرجى تعبئة جميع الحقول المطلوبة.', 'warning'); return; }

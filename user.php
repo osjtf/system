@@ -144,22 +144,24 @@ if ($action === 'patient_login') {
     if (empty($username) || empty($password)) {
         $loginError = 'يرجى إدخال اسم المستخدم وكلمة المرور.';
     } else {
-        $stmt = $pdo->prepare("SELECT u.*, pa.patient_id, pa.allowed_days, pa.expiry_date FROM admin_users u LEFT JOIN patient_accounts pa ON pa.user_id = u.id WHERE u.username = ? AND u.is_active = 1");
-        $stmt->execute([$username]);
-        $user = $stmt->fetch();
+        // أولاً: جلب المستخدم للتحقق من كلمة المرور
+        $stmtCheck = $pdo->prepare("SELECT u.*, pa.patient_id, pa.allowed_days, pa.expiry_date FROM admin_users u LEFT JOIN patient_accounts pa ON pa.user_id = u.id WHERE u.username = ? AND u.is_active = 1");
+        $stmtCheck->execute([$username]);
+        $userCheck = $stmtCheck->fetch();
         
-        if ($user && password_verify($password, $user['password_hash'])) {
-            if (empty($user['patient_id'])) {
+        if ($userCheck && password_verify($password, $userCheck['password_hash'])) {
+            // كلمة المرور صحيحة - الآن نتحقق أنه حساب مريض وليس مستخدم لوحة تحكم
+            if (empty($userCheck['patient_id']) || (int)$userCheck['patient_id'] <= 0) {
                 $loginError = 'هذا الحساب غير مرتبط بملف مريض. يرجى التواصل مع الإدارة.';
-            } elseif (!empty($user['expiry_date']) && $user['expiry_date'] < date('Y-m-d')) {
+            } elseif (!empty($userCheck['expiry_date']) && $userCheck['expiry_date'] < date('Y-m-d')) {
                 $loginError = 'انتهت صلاحية هذا الحساب. يرجى التواصل مع الإدارة.';
             } else {
                 $_SESSION['patient_logged_in'] = true;
-                $_SESSION['patient_user_id'] = $user['id'];
-                $_SESSION['patient_id'] = $user['patient_id'];
-                $_SESSION['patient_display_name'] = $user['display_name'];
-                $_SESSION['patient_username'] = $user['username'];
-                $_SESSION['patient_allowed_days'] = (int)$user['allowed_days'];
+                $_SESSION['patient_user_id'] = $userCheck['id'];
+                $_SESSION['patient_id'] = $userCheck['patient_id'];
+                $_SESSION['patient_display_name'] = $userCheck['display_name'];
+                $_SESSION['patient_username'] = $userCheck['username'];
+                $_SESSION['patient_allowed_days'] = (int)$userCheck['allowed_days'];
                 header('Location: user.php');
                 exit;
             }
