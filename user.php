@@ -1491,6 +1491,7 @@ body {
         <div class="leave-form-grid">
           <div class="form-group">
             <label class="form-label">المستشفى</label>
+            <input type="text" class="form-input" id="hospitalSearch" placeholder="ابحث باسم المستشفى..." autocomplete="off" style="margin-bottom:8px">
             <select class="form-select" id="hospitalSelect" name="hospital_id" required onchange="loadDoctors(this.value)">
               <option value="">-- اختر المستشفى --</option>
               <?php foreach ($hospitals as $h): ?>
@@ -1633,6 +1634,38 @@ function loadNotifications() {
       }
     }).catch(() => {});
 }
+
+// ═══ Hospital Quick Search ═══
+(function initHospitalQuickSearch(){
+  const input = document.getElementById('hospitalSearch');
+  const select = document.getElementById('hospitalSelect');
+  if (!input || !select) return;
+  const normalize = (value) => String(value || '')
+    .toLowerCase()
+    .replace(/[ً-ٰٟ]/g, '')
+    .replace(/[إأآا]/g, 'ا')
+    .replace(/[ى]/g, 'ي')
+    .replace(/[ؤ]/g, 'و')
+    .replace(/[ئ]/g, 'ي')
+    .replace(/[ة]/g, 'ه')
+    .replace(/[٠-٩]/g, d => String('٠١٢٣٤٥٦٧٨٩'.indexOf(d)))
+    .replace(/\s+/g, ' ')
+    .trim();
+  const allOptions = Array.from(select.options).map(opt => ({ value: opt.value, text: opt.textContent }));
+  input.addEventListener('input', () => {
+    const selectedValue = select.value;
+    const query = normalize(input.value);
+    select.innerHTML = '';
+    allOptions.forEach(opt => {
+      if (opt.value && query && !normalize(opt.text).includes(query)) return;
+      const option = document.createElement('option');
+      option.value = opt.value;
+      option.textContent = opt.text;
+      if (opt.value === selectedValue) option.selected = true;
+      select.appendChild(option);
+    });
+  });
+})();
 
 // ═══ Load Doctors ═══
 function loadDoctors(hospitalId) {

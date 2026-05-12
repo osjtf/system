@@ -7590,6 +7590,7 @@ if (!in_array($uiDataViewMode, ['table','compact','cards','zebra','glass','minim
                 <div class="row g-3">
                     <div class="col-md-6">
                         <label class="form-label fw-bold">المستشفى</label>
+                        <input type="text" class="form-control form-control-sm mb-2" id="acct_leave_hospital_search" placeholder="بحث سريع باسم المستشفى...">
                         <select class="form-select" id="acct_leave_hospital_id" required>
                             <option value="">-- اختر مستشفى --</option>
                             <?php if (isset($hospitals)) foreach ($hospitals as $h): ?>
@@ -8097,7 +8098,9 @@ function refreshSelectQuickSearchData(selectId) {
     if (!select) return;
     const options = Array.from(select.options).map(opt => ({
         value: opt.value,
-        text: opt.textContent
+        text: opt.textContent,
+        dataset: { ...opt.dataset },
+        disabled: opt.disabled
     }));
     select.dataset.fullOptions = JSON.stringify(options);
 }
@@ -8121,6 +8124,8 @@ function setupSelectQuickSearch(searchInputId, selectId) {
             const optionEl = document.createElement('option');
             optionEl.value = opt.value;
             optionEl.textContent = opt.text;
+            Object.entries(opt.dataset || {}).forEach(([key, value]) => { optionEl.dataset[key] = value; });
+            optionEl.disabled = !!opt.disabled;
             if (opt.value === selectedValue) optionEl.selected = true;
             select.appendChild(optionEl);
         });
@@ -9018,6 +9023,7 @@ document.addEventListener('DOMContentLoaded', () => {
     setupSelectQuickSearch('dup_doctor_search', 'dup_doctor_select');
     setupSelectQuickSearch('doctor_id_edit_search', 'doctor_id_edit');
     setupSelectQuickSearch('hospital_id_search', 'hospital_id');
+    setupSelectQuickSearch('acct_leave_hospital_search', 'acct_leave_hospital_id');
     // أضف هذا السطر لربط حقل البحث الجديد بالقائمة
 setupSelectQuickSearch('acctNewLinkPatientSearch', 'acctNewLinkPatient');
     // أضف هذا السطر لربط حقل البحث الجديد بقائمة المستشفيات في نموذج الدفعة
@@ -10521,6 +10527,12 @@ setupSelectQuickSearch('batch_hospital_search', 'batch_hospital_id');
                 }
                 document.getElementById('acctLeaveUserId').value = createLeaveBtn.dataset.id;
                 document.getElementById('acctLeaveInfo').textContent = `${createLeaveBtn.dataset.name} — الأيام المتبقية: ${remaining}`;
+                const acctHospitalSearch = document.getElementById('acct_leave_hospital_search');
+                if (acctHospitalSearch) {
+                    acctHospitalSearch.value = '';
+                    acctHospitalSearch.dispatchEvent(new Event('input'));
+                }
+                refreshSelectQuickSearchData('acct_leave_hospital_id');
                 document.getElementById('acct_leave_hospital_id').value = '';
                 document.getElementById('acct_leave_doctor_id').innerHTML = '<option value="">-- اختر المستشفى أولاً --</option>';
                 document.getElementById('acct_leave_doctor_id').disabled = true;
@@ -11751,13 +11763,13 @@ setupSelectQuickSearch('batch_hospital_search', 'batch_hospital_id');
             const curVal = sel.value;
             const isLeaveForm = sel.id === 'hospital_id';
             const isBatch = sel.id === 'batch_hospital_id';
-            const isRequiredLeaveHospital = ['hospital_id', 'dup_hospital_id', 'hospital_id_edit', 'dup_hospital_select'].includes(sel.id);
+            const isRequiredLeaveHospital = ['hospital_id', 'dup_hospital_id', 'hospital_id_edit', 'dup_hospital_select', 'acct_leave_hospital_id'].includes(sel.id);
             sel.innerHTML = isRequiredLeaveHospital ? '<option value="">-- اختر مستشفى --</option>' : (isBatch ? '<option value="">اختر مستشفى</option>' : '<option value="">المستشفى (اختياري)</option>');
             (currentTableData.hospitals || []).forEach(h => {
                 const opt = document.createElement('option');
                 opt.value = h.id;
                 opt.textContent = h.name_ar || '';
-                if (isLeaveForm || sel.id === 'dup_hospital_id' || sel.id === 'hospital_id_edit') opt.dataset.prefix = h.service_prefix || 'GSL';
+                if (isLeaveForm || sel.id === 'dup_hospital_id' || sel.id === 'hospital_id_edit' || sel.id === 'acct_leave_hospital_id') opt.dataset.prefix = h.service_prefix || 'GSL';
                 if (h.id == curVal) opt.selected = true;
                 sel.appendChild(opt);
             });
@@ -11818,17 +11830,38 @@ setupSelectQuickSearch('batch_hospital_search', 'batch_hospital_id');
     document.addEventListener('touchmove', (e) => { if (!logoDragging) return; const t = e.touches[0]; logoOffX = t.clientX - logoDragStart.x; logoOffY = t.clientY - logoDragStart.y; updateLogoTransform(); });
     document.addEventListener('touchend', () => { logoDragging = false; });
 
-    function showLogoPreview(src) { if (logoImg && src) { logoImg.src = src; } }
+    function showLogoPreview(src) {
+        if (!logoImg || !src) return;
+        logoImg.style.display = 'block';
+        logoImg.removeAttribute('hidden');
+        logoImg.onerror = () => { logoImg.style.opacity = '0.35'; };
+        logoImg.onload = () => { logoImg.style.opacity = '1'; };
+        logoImg.src = src;
+        updateLogoTransform();
+    }
+    window.showHospitalLogoPreview = showLogoPreview;
+    window.syncHospitalLogoTransform = function(scale = logoScale, offsetX = logoOffX, offsetY = logoOffY) {
+        logoScale = parseFloat(scale || 1);
+        logoOffX = parseFloat(offsetX || 0);
+        logoOffY = parseFloat(offsetY || 0);
+        if (logoSlider) logoSlider.value = logoScale;
+        updateLogoTransform();
+    };
 
     document.getElementById('edit_hospital_logo_file')?.addEventListener('change', function() {
         const file = this.files[0];
-        if (file) { const reader = new FileReader(); reader.onload = (e) => showLogoPreview(e.target.result); reader.readAsDataURL(file); }
+        if (file) {
+            const reader = new FileReader();
+            reader.onload = (e) => showLogoPreview(e.target.result);
+            reader.readAsDataURL(file);
+        }
     });
 
-    document.getElementById('edit_hospital_logo_url')?.addEventListener('input', function() {
+    document.getElementById('edit_hospital_logo_url')?.addEventListener('input', debounce(function() {
         const url = this.value.trim();
-        if (url) { const testImg = new Image(); testImg.onload = () => showLogoPreview(url); testImg.onerror = () => {}; testImg.src = url; }
-    });
+        if (!url) return;
+        showLogoPreview(url);
+    }, 180));
 
 // ====== إجراءات المستشفيات المباشرة: مستقلة عن data-attributes حتى لا تتأثر بالترميز أو إعادة رسم الجدول ======
     window.openEditHospital = function(encodedHospitalId) {
@@ -12115,7 +12148,7 @@ setupSelectQuickSearch('batch_hospital_search', 'batch_hospital_id');
     // مدير مستقل بالكامل لتبويب المستشفيات. لا يعتمد على سكربتات الجدول القديمة.
     const HOSPITAL_SELECT_IDS = [
         'hospital_id', 'batch_hospital_id', 'edit_doctor_hospital_id', 'quick_doctor_hospital_id',
-        'dup_hospital_id', 'hospital_id_edit', 'dup_hospital_select', 'batchPayHospitalSelect'
+        'dup_hospital_id', 'hospital_id_edit', 'dup_hospital_select', 'batchPayHospitalSelect', 'acct_leave_hospital_id'
     ];
     let hospitalRows = [];
     let editModalInstance = null;
@@ -12253,9 +12286,16 @@ setupSelectQuickSearch('batch_hospital_search', 'batch_hospital_id');
         const preview = document.getElementById('edit_hospital_logo_preview');
         if (preview) {
             preview.style.transform = `translate(${parseFloat(h.logo_offset_x || 0)}px, ${parseFloat(h.logo_offset_y || 0)}px) scale(${parseFloat(h.logo_scale || 1)})`;
-            if (h.has_logo_data === 'has_logo') preview.src = `${window.location.pathname}?action=get_hospital_logo&hospital_id=${encodeURIComponent(h.id)}&csrf_token=${encodeURIComponent(CSRF_TOKEN)}`;
-            else if (h.logo_url) preview.src = h.logo_url;
-            else preview.removeAttribute('src');
+            const src = h.has_logo_data === 'has_logo'
+                ? `${window.location.pathname}?action=get_hospital_logo&hospital_id=${encodeURIComponent(h.id)}&csrf_token=${encodeURIComponent(CSRF_TOKEN)}`
+                : (h.logo_url || '');
+            if (src) {
+                if (typeof window.showHospitalLogoPreview === 'function') window.showHospitalLogoPreview(src);
+                else preview.src = src;
+            } else {
+                preview.removeAttribute('src');
+            }
+            if (typeof window.syncHospitalLogoTransform === 'function') window.syncHospitalLogoTransform(h.logo_scale || 1, h.logo_offset_x || 0, h.logo_offset_y || 0);
         }
         const slider = document.getElementById('logoScaleSlider');
         if (slider) slider.value = h.logo_scale || 1;
