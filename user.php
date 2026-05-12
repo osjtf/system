@@ -76,6 +76,48 @@ try {
 $pdo->exec("SET time_zone = '+03:00'");
 try { $pdo->exec("ALTER TABLE hospitals ADD COLUMN deleted_at DATETIME NULL"); } catch (Throwable $e) {}
 
+
+// بوابة المرضى تستخدم جدولاً مستقلاً بالكامل عن مستخدمي لوحة التحكم.
+function patientTableExists(PDO $pdo, string $table): bool {
+    $stmt = $pdo->prepare("SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = DATABASE() AND table_name = ?");
+    $stmt->execute([$table]);
+    return (int)$stmt->fetchColumn() > 0;
+}
+function patientEnsureColumn(PDO $pdo, string $table, string $column, string $definition): void {
+    if (!patientTableExists($pdo, $table)) return;
+    $stmt = $pdo->prepare("SELECT COUNT(*) FROM information_schema.columns WHERE table_schema = DATABASE() AND table_name = ? AND column_name = ?");
+    $stmt->execute([$table, $column]);
+    if ((int)$stmt->fetchColumn() === 0) $pdo->exec("ALTER TABLE $table ADD COLUMN $column $definition");
+}
+$pdo->exec("CREATE TABLE IF NOT EXISTS patient_portal_users (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    username VARCHAR(100) NOT NULL UNIQUE,
+    password_hash VARCHAR(255) NOT NULL,
+    display_name VARCHAR(150) NOT NULL,
+    is_active TINYINT(1) DEFAULT 1,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci");
+patientEnsureColumn($pdo, 'patient_accounts', 'account_user_id', "INT NULL AFTER id");
+patientEnsureColumn($pdo, 'account_payments', 'account_user_id', "INT NULL AFTER id");
+try { $pdo->exec("ALTER TABLE account_payments MODIFY COLUMN user_id INT NULL"); } catch(Throwable $e) {}
+try { $pdo->exec("ALTER TABLE patient_accounts MODIFY COLUMN user_id INT NULL"); } catch(Throwable $e) {}
+try {
+    $legacyRows = $pdo->query("SELECT pa.id AS pa_id, pa.user_id, u.username, u.password_hash, u.display_name, u.is_active, u.created_at
+                               FROM patient_accounts pa
+                               INNER JOIN admin_users u ON u.id = pa.user_id
+                               WHERE pa.account_user_id IS NULL")->fetchAll();
+    $insertPortal = $pdo->prepare("INSERT IGNORE INTO patient_portal_users (id, username, password_hash, display_name, is_active, created_at) VALUES (?, ?, ?, ?, ?, ?)");
+    $updateAccount = $pdo->prepare("UPDATE patient_accounts SET account_user_id = ? WHERE id = ?");
+    foreach ($legacyRows as $row) {
+        $portalId = (int)$row['user_id'];
+        $insertPortal->execute([$portalId, $row['username'], $row['password_hash'], $row['display_name'], (int)$row['is_active'], $row['created_at'] ?: date('Y-m-d H:i:s')]);
+        $updateAccount->execute([$portalId, (int)$row['pa_id']]);
+    }
+    $pdo->exec("UPDATE account_payments SET account_user_id = user_id WHERE account_user_id IS NULL AND user_id IS NOT NULL");
+    $pdo->exec("UPDATE admin_users au INNER JOIN patient_accounts pa ON pa.user_id = au.id SET au.is_active = 0 WHERE pa.account_user_id IS NOT NULL");
+} catch (Throwable $e) {}
+
 // ======================== دوال الأمان ========================
 function patient_csrf_token(): string {
     if (empty($_SESSION['patient_csrf_token'])) {
@@ -104,7 +146,7 @@ function isPatientLoggedIn(): bool {
 function checkPatientActive(PDO $pdo): bool {
     if (!isPatientLoggedIn()) return false;
     $uid = (int)$_SESSION['patient_user_id'];
-    $stmt = $pdo->prepare("SELECT is_active FROM admin_users WHERE id = ?");
+    $stmt = $pdo->prepare("SELECT is_active FROM patient_portal_users WHERE id = ?");
     $stmt->execute([$uid]);
     $row = $stmt->fetch();
     if (!$row || !$row['is_active']) {
@@ -215,7 +257,7 @@ if ($action === 'patient_login') {
         } elseif (empty($username) || empty($password)) {
             $loginError = 'يرجى إدخال اسم المستخدم وكلمة المرور.';
         } else {
-            $stmtCheck = $pdo->prepare("SELECT u.*, pa.patient_id, pa.allowed_days, pa.expiry_date FROM admin_users u INNER JOIN patient_accounts pa ON pa.user_id = u.id WHERE u.username = ? AND u.is_active = 1");
+            $stmtCheck = $pdo->prepare("SELECT u.*, pa.patient_id, pa.allowed_days, pa.expiry_date FROM patient_portal_users u INNER JOIN patient_accounts pa ON pa.account_user_id = u.id WHERE u.username = ? AND u.is_active = 1");
             $stmtCheck->execute([$username]);
             $userCheck = $stmtCheck->fetch();
 
@@ -276,8 +318,7 @@ if ($action === 'get_user_notifications' && isPatientLoggedIn()) {
         user_id INT NOT NULL,
         message TEXT NOT NULL,
         is_read TINYINT(1) DEFAULT 0,
-        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-        FOREIGN KEY (user_id) REFERENCES admin_users(id) ON DELETE CASCADE
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci");
     $stmt = $pdo->prepare("SELECT * FROM user_notifications WHERE user_id = ? ORDER BY created_at DESC LIMIT 20");
     $stmt->execute([$uid]);
@@ -314,7 +355,7 @@ if ($action === 'create_sick_leave' && isPatientLoggedIn()) {
     $patientId = (int)$_SESSION['patient_id'];
     $userId    = (int)$_SESSION['patient_user_id'];
 
-    $paStmt = $pdo->prepare("SELECT allowed_days FROM patient_accounts WHERE user_id = ?");
+    $paStmt = $pdo->prepare("SELECT allowed_days FROM patient_accounts WHERE account_user_id = ?");
     $paStmt->execute([$userId]);
     $paRow = $paStmt->fetch();
     $allowedDays = $paRow ? (int)$paRow['allowed_days'] : 0;
@@ -759,7 +800,7 @@ if (isPatientLoggedIn()) {
     $patientId = (int)$_SESSION['patient_id'];
     $userId    = (int)$_SESSION['patient_user_id'];
 
-    $stmt2 = $pdo->prepare("SELECT allowed_days FROM patient_accounts WHERE user_id = ?");
+    $stmt2 = $pdo->prepare("SELECT allowed_days FROM patient_accounts WHERE account_user_id = ?");
     $stmt2->execute([$userId]);
     $paRow = $stmt2->fetch();
     if ($paRow) {
