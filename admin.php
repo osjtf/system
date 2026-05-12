@@ -22,6 +22,7 @@ ini_set('session.cookie_httponly', '1');
 ini_set('session.cookie_secure', (!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off') ? '1' : '0');
 ini_set('session.cookie_samesite', 'Strict');
 ini_set('session.use_strict_mode', '1');
+session_name('ADMINSESSID');
 session_start();
 
 // إخفاء معلومات الخادم والمسارات
@@ -370,6 +371,78 @@ ensureColumn($pdo, 'account_payments', 'is_paid', "TINYINT(1) NOT NULL DEFAULT 1
 ensureColumn($pdo, 'account_payments', 'paid_by', "INT NULL AFTER created_by");
 ensureColumn($pdo, 'account_payments', 'updated_at', "DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP AFTER paid_at");
 try { ensureIndex($pdo, 'account_payments', 'idx_account_payments_user_paid', 'user_id, is_paid, paid_at'); } catch(Exception $e) {}
+
+$pdo->exec("CREATE TABLE IF NOT EXISTS account_day_adjustments (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    account_user_id INT NOT NULL,
+    admin_user_id INT NULL,
+    delta_days INT NOT NULL,
+    remaining_before INT NOT NULL DEFAULT 0,
+    remaining_after INT NOT NULL DEFAULT 0,
+    note VARCHAR(500) NULL,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    INDEX idx_account_day_adjustments_account_created (account_user_id, created_at)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci");
+
+
+// ======================== حسابات المرضى المستقلة عن لوحة التحكم ========================
+$pdo->exec("CREATE TABLE IF NOT EXISTS patient_portal_users (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    username VARCHAR(100) NOT NULL UNIQUE,
+    password_hash VARCHAR(255) NOT NULL,
+    display_name VARCHAR(150) NOT NULL,
+    is_active TINYINT(1) DEFAULT 1,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci");
+ensureColumn($pdo, 'patient_accounts', 'account_user_id', "INT NULL AFTER id");
+try { ensureIndex($pdo, 'patient_accounts', 'idx_patient_accounts_account_user', 'account_user_id'); } catch(Exception $e) {}
+ensureColumn($pdo, 'account_payments', 'account_user_id', "INT NULL AFTER id");
+try { ensureIndex($pdo, 'account_payments', 'idx_account_payments_account_user_paid', 'account_user_id, is_paid, paid_at'); } catch(Exception $e) {}
+
+function dropForeignKeysForColumn(PDO $pdo, string $table, string $column): void {
+    $stmt = $pdo->prepare("SELECT CONSTRAINT_NAME FROM information_schema.KEY_COLUMN_USAGE WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ? AND COLUMN_NAME = ? AND REFERENCED_TABLE_NAME IS NOT NULL");
+    $stmt->execute([$table, $column]);
+    foreach ($stmt->fetchAll(PDO::FETCH_COLUMN) as $fkName) {
+        try { $pdo->exec("ALTER TABLE `$table` DROP FOREIGN KEY `$fkName`"); } catch (Throwable $e) {}
+    }
+}
+
+function ensureNullableColumn(PDO $pdo, string $table, string $column, string $definition): void {
+    $stmt = $pdo->prepare("SELECT IS_NULLABLE FROM information_schema.columns WHERE table_schema = DATABASE() AND table_name = ? AND column_name = ? LIMIT 1");
+    $stmt->execute([$table, $column]);
+    if (strtoupper((string)$stmt->fetchColumn()) !== 'YES') {
+        try { $pdo->exec("ALTER TABLE `$table` MODIFY COLUMN `$column` $definition"); } catch(Throwable $e) {}
+    }
+}
+
+ensureNullableColumn($pdo, 'account_payments', 'user_id', 'INT NULL');
+ensureNullableColumn($pdo, 'patient_accounts', 'user_id', 'INT NULL');
+try { ensureIndex($pdo, 'patient_accounts', 'idx_patient_accounts_legacy_user', 'user_id'); } catch(Exception $e) {}
+
+// ترحيل الحسابات القديمة المرتبطة بـ admin_users إلى جدول المرضى المستقل عند الحاجة فقط.
+try {
+    $hasLegacyStmt = $pdo->query("SELECT pa.id
+                                  FROM patient_accounts pa
+                                  INNER JOIN admin_users u ON u.id = pa.user_id
+                                  WHERE pa.account_user_id IS NULL
+                                  LIMIT 1");
+    if ($hasLegacyStmt && $hasLegacyStmt->fetchColumn()) {
+        $legacyRows = $pdo->query("SELECT pa.id AS pa_id, pa.user_id, u.username, u.password_hash, u.display_name, u.is_active, u.created_at
+                                   FROM patient_accounts pa
+                                   INNER JOIN admin_users u ON u.id = pa.user_id
+                                   WHERE pa.account_user_id IS NULL")->fetchAll();
+        $insertPortal = $pdo->prepare("INSERT IGNORE INTO patient_portal_users (id, username, password_hash, display_name, is_active, created_at) VALUES (?, ?, ?, ?, ?, ?)");
+        $updateAccount = $pdo->prepare("UPDATE patient_accounts SET account_user_id = ? WHERE id = ?");
+        foreach ($legacyRows as $row) {
+            $portalId = (int)$row['user_id'];
+            $insertPortal->execute([$portalId, $row['username'], $row['password_hash'], $row['display_name'], (int)$row['is_active'], $row['created_at'] ?: nowSaudi()]);
+            $updateAccount->execute([$portalId, (int)$row['pa_id']]);
+        }
+        $pdo->exec("UPDATE account_payments SET account_user_id = user_id WHERE account_user_id IS NULL AND user_id IS NOT NULL");
+    }
+} catch (Throwable $e) {}
+
 ensureColumn($pdo, 'notifications', 'account_payment_id', "INT NULL AFTER leave_id");
 try { $pdo->exec("ALTER TABLE notifications MODIFY COLUMN leave_id INT NULL"); } catch(Throwable $e) {}
 try { ensureIndex($pdo, 'notifications', 'idx_notifications_account_payment', 'account_payment_id'); } catch(Exception $e) {}
@@ -383,6 +456,7 @@ $pdo->exec("CREATE TABLE IF NOT EXISTS user_notifications (
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY (user_id) REFERENCES admin_users(id) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci");
+dropForeignKeysForColumn($pdo, 'user_notifications', 'user_id');
 
 // إنشاء مستخدم افتراضي إذا لم يوجد أي مستخدم
 $stmt = $pdo->query("SELECT COUNT(*) as cnt FROM admin_users");
@@ -473,14 +547,14 @@ function makePatientFirstNameUsername(array $patient): string {
 }
 
 function getNextPatientAccountNumber(PDO $pdo): int {
-    return ((int)$pdo->query("SELECT COUNT(*) FROM patient_accounts")->fetchColumn()) + 1;
+    return ((int)$pdo->query("SELECT COUNT(*) FROM patient_portal_users")->fetchColumn()) + 1;
 }
 
 function makeUniqueUsername(PDO $pdo, string $baseUsername): string {
     $baseUsername = normalizeUsernameText($baseUsername);
     $candidate = $baseUsername;
     $counter = 2;
-    $stmt = $pdo->prepare("SELECT id FROM admin_users WHERE username = ? LIMIT 1");
+    $stmt = $pdo->prepare("SELECT id FROM patient_portal_users WHERE username = ? LIMIT 1");
     while (true) {
         $stmt->execute([$candidate]);
         if (!$stmt->fetch()) return $candidate;
@@ -1089,7 +1163,7 @@ function ensureDelayedUnpaidNotifications($pdo): void {
 }
 
 function fetchPatientAccountRecords(PDO $pdo, int $userId): array {
-    $accountStmt = $pdo->prepare("SELECT pa.patient_id FROM patient_accounts pa WHERE pa.user_id = ? LIMIT 1");
+    $accountStmt = $pdo->prepare("SELECT pa.patient_id FROM patient_accounts pa WHERE pa.account_user_id = ? LIMIT 1");
     $accountStmt->execute([$userId]);
     $patientId = (int)($accountStmt->fetchColumn() ?: 0);
 
@@ -1108,7 +1182,7 @@ function fetchPatientAccountRecords(PDO $pdo, int $userId): array {
         $leaves = $leaveStmt->fetchAll();
     }
 
-    $paymentStmt = $pdo->prepare("SELECT ap.*, au.display_name AS created_by_name, payer.display_name AS paid_by_name FROM account_payments ap LEFT JOIN admin_users au ON ap.created_by = au.id LEFT JOIN admin_users payer ON ap.paid_by = payer.id WHERE ap.user_id = ? ORDER BY ap.paid_at DESC, ap.id DESC");
+    $paymentStmt = $pdo->prepare("SELECT ap.*, au.display_name AS created_by_name, payer.display_name AS paid_by_name FROM account_payments ap LEFT JOIN admin_users au ON ap.created_by = au.id LEFT JOIN admin_users payer ON ap.paid_by = payer.id WHERE COALESCE(ap.account_user_id, ap.user_id) = ? ORDER BY ap.paid_at DESC, ap.id DESC");
     $paymentStmt->execute([$userId]);
 
     return ['leaves' => $leaves, 'payments' => $paymentStmt->fetchAll()];
@@ -1629,6 +1703,13 @@ if ($pdfMode === 'download') {
     echo $html;
     exit;
 }
+// ======================== فحص الصحة لـ Railway ========================
+if (isset($_GET['action']) && $_GET['action'] === 'health') {
+    header('Content-Type: application/json; charset=utf-8');
+    echo json_encode(['ok' => true, 'role' => 'admin', 'db' => 'ok', 'time' => nowSaudi()], JSON_UNESCAPED_UNICODE);
+    exit;
+}
+
 // ======================== معالجة تسجيل الدخول والخروج ========================
 if (isset($_POST['action']) && $_POST['action'] === 'login') {
     header('Content-Type: application/json; charset=utf-8');
@@ -1757,20 +1838,20 @@ if (isset($_GET['action']) && in_array($_GET['action'], $_GET_AJAX_ACTIONS) && !
             ensureColumn($pdo, 'patient_accounts', 'expiry_date', "DATE NULL AFTER allowed_days");
             ensureColumn($pdo, 'patient_accounts', 'notes', "TEXT NULL AFTER expiry_date");
             $accounts = $pdo->query("
-                SELECT u.id, u.username, u.display_name, u.role, u.is_active, u.created_at,
+                SELECT u.id, u.username, u.display_name, 'patient' AS role, u.is_active, u.created_at,
                        pa.patient_id AS linked_patient_id, pa.allowed_days AS patient_allowed_days,
                        pa.expiry_date, pa.notes AS account_notes,
                        p.name_ar AS linked_patient_name, p.identity_number AS patient_identity,
-                       COALESCE((SELECT SUM(amount) FROM account_payments WHERE user_id = u.id AND is_paid = 1), 0) AS total_paid,
-                       COALESCE((SELECT COUNT(*) FROM account_payments WHERE user_id = u.id), 0) AS payment_count,
+                       COALESCE((SELECT SUM(amount) FROM account_payments WHERE COALESCE(account_user_id, user_id) = u.id AND is_paid = 1), 0) AS total_paid,
+                       COALESCE((SELECT COUNT(*) FROM account_payments WHERE COALESCE(account_user_id, user_id) = u.id), 0) AS payment_count,
                        COALESCE((SELECT COUNT(*) FROM sick_leaves sl WHERE sl.patient_id = pa.patient_id AND sl.deleted_at IS NULL AND sl.created_by_user_id = u.id), 0) AS portal_leave_count,
                        COALESCE((SELECT SUM(sl.days_count) FROM sick_leaves sl WHERE sl.patient_id = pa.patient_id AND sl.deleted_at IS NULL AND sl.created_by_user_id = u.id), 0) AS portal_used_days,
                        GREATEST(pa.allowed_days - COALESCE((SELECT SUM(sl.days_count) FROM sick_leaves sl WHERE sl.patient_id = pa.patient_id AND sl.deleted_at IS NULL AND sl.created_by_user_id = u.id), 0), 0) AS portal_remaining_days,
-                       COALESCE((SELECT SUM(CASE WHEN ap.is_paid = 1 THEN 1 ELSE 0 END) FROM account_payments ap WHERE ap.user_id = u.id), 0) AS account_paid_count,
-                       COALESCE((SELECT SUM(CASE WHEN ap.is_paid = 0 THEN 1 ELSE 0 END) FROM account_payments ap WHERE ap.user_id = u.id), 0) AS account_unpaid_count,
-                       COALESCE((SELECT SUM(CASE WHEN ap.is_paid = 0 THEN ap.amount ELSE 0 END) FROM account_payments ap WHERE ap.user_id = u.id), 0) AS total_unpaid
-                FROM admin_users u
-                INNER JOIN patient_accounts pa ON pa.user_id = u.id
+                       COALESCE((SELECT SUM(CASE WHEN ap.is_paid = 1 THEN 1 ELSE 0 END) FROM account_payments ap WHERE COALESCE(ap.account_user_id, ap.user_id) = u.id), 0) AS account_paid_count,
+                       COALESCE((SELECT SUM(CASE WHEN ap.is_paid = 0 THEN 1 ELSE 0 END) FROM account_payments ap WHERE COALESCE(ap.account_user_id, ap.user_id) = u.id), 0) AS account_unpaid_count,
+                       COALESCE((SELECT SUM(CASE WHEN ap.is_paid = 0 THEN ap.amount ELSE 0 END) FROM account_payments ap WHERE COALESCE(ap.account_user_id, ap.user_id) = u.id), 0) AS total_unpaid
+                FROM patient_portal_users u
+                INNER JOIN patient_accounts pa ON pa.account_user_id = u.id
                 LEFT JOIN patients p ON pa.patient_id = p.id
                 ORDER BY u.created_at DESC
             ")->fetchAll();
@@ -1780,7 +1861,7 @@ if (isset($_GET['action']) && in_array($_GET['action'], $_GET_AJAX_ACTIONS) && !
         case 'get_patient_account':
             if (($_SESSION['admin_role'] ?? 'user') !== 'admin') { echo json_encode(['success'=>false,'message'=>'ليس لديك صلاحية.']); exit; }
             $target_user_id = intval($_GET['user_id'] ?? 0);
-            $stmt = $pdo->prepare("SELECT pa.*, p.name_ar AS patient_name FROM patient_accounts pa LEFT JOIN patients p ON pa.patient_id = p.id WHERE pa.user_id = ?");
+            $stmt = $pdo->prepare("SELECT pa.*, p.name_ar AS patient_name FROM patient_accounts pa LEFT JOIN patients p ON pa.patient_id = p.id WHERE pa.account_user_id = ?");
             $stmt->execute([$target_user_id]);
             $pa = $stmt->fetch();
             $patients_list = $pdo->query("SELECT id, name_ar, identity_number FROM patients ORDER BY name_ar")->fetchAll();
@@ -3631,7 +3712,7 @@ if (isset($_POST['action']) && $_POST['action'] !== 'login' && $_POST['action'] 
                 $msg = 'تم ربط المستخدم بالمريض وتحديد الحصة بنجاح.';
             } else {
                 // إزالة الربط
-                $pdo->prepare("DELETE FROM patient_accounts WHERE user_id = ?")->execute([$target_user_id]);
+                $pdo->prepare("DELETE FROM patient_accounts WHERE account_user_id = ?")->execute([$target_user_id]);
                 $msg = 'تم إزالة ربط المريض من هذا المستخدم.';
             }
 
@@ -3645,7 +3726,7 @@ if (isset($_POST['action']) && $_POST['action'] !== 'login' && $_POST['action'] 
                 exit;
             }
             $target_user_id = intval($_GET['user_id'] ?? 0);
-            $stmt = $pdo->prepare("SELECT pa.*, p.name_ar AS patient_name FROM patient_accounts pa LEFT JOIN patients p ON pa.patient_id = p.id WHERE pa.user_id = ?");
+            $stmt = $pdo->prepare("SELECT pa.*, p.name_ar AS patient_name FROM patient_accounts pa LEFT JOIN patients p ON pa.patient_id = p.id WHERE pa.account_user_id = ?");
             $stmt->execute([$target_user_id]);
             $pa = $stmt->fetch();
             $patients_list = $pdo->query("SELECT id, name_ar, identity_number FROM patients ORDER BY name_ar")->fetchAll();
@@ -3669,20 +3750,20 @@ if (isset($_POST['action']) && $_POST['action'] !== 'login' && $_POST['action'] 
             ensureColumn($pdo, 'patient_accounts', 'notes', "TEXT NULL AFTER expiry_date");
             // جلب حسابات المرضى فقط (المرتبطة بـ patient_accounts) - منفصلة عن مستخدمي لوحة التحكم
             $accounts = $pdo->query("
-                SELECT u.id, u.username, u.display_name, u.role, u.is_active, u.created_at,
+                SELECT u.id, u.username, u.display_name, 'patient' AS role, u.is_active, u.created_at,
                        pa.patient_id AS linked_patient_id, pa.allowed_days AS patient_allowed_days,
                        pa.expiry_date, pa.notes AS account_notes,
                        p.name_ar AS linked_patient_name, p.identity_number AS patient_identity,
-                       COALESCE((SELECT SUM(amount) FROM account_payments WHERE user_id = u.id AND is_paid = 1), 0) AS total_paid,
-                       COALESCE((SELECT COUNT(*) FROM account_payments WHERE user_id = u.id), 0) AS payment_count,
+                       COALESCE((SELECT SUM(amount) FROM account_payments WHERE COALESCE(account_user_id, user_id) = u.id AND is_paid = 1), 0) AS total_paid,
+                       COALESCE((SELECT COUNT(*) FROM account_payments WHERE COALESCE(account_user_id, user_id) = u.id), 0) AS payment_count,
                        COALESCE((SELECT COUNT(*) FROM sick_leaves sl WHERE sl.patient_id = pa.patient_id AND sl.deleted_at IS NULL AND sl.created_by_user_id = u.id), 0) AS portal_leave_count,
                        COALESCE((SELECT SUM(sl.days_count) FROM sick_leaves sl WHERE sl.patient_id = pa.patient_id AND sl.deleted_at IS NULL AND sl.created_by_user_id = u.id), 0) AS portal_used_days,
                        GREATEST(pa.allowed_days - COALESCE((SELECT SUM(sl.days_count) FROM sick_leaves sl WHERE sl.patient_id = pa.patient_id AND sl.deleted_at IS NULL AND sl.created_by_user_id = u.id), 0), 0) AS portal_remaining_days,
-                       COALESCE((SELECT SUM(CASE WHEN ap.is_paid = 1 THEN 1 ELSE 0 END) FROM account_payments ap WHERE ap.user_id = u.id), 0) AS account_paid_count,
-                       COALESCE((SELECT SUM(CASE WHEN ap.is_paid = 0 THEN 1 ELSE 0 END) FROM account_payments ap WHERE ap.user_id = u.id), 0) AS account_unpaid_count,
-                       COALESCE((SELECT SUM(CASE WHEN ap.is_paid = 0 THEN ap.amount ELSE 0 END) FROM account_payments ap WHERE ap.user_id = u.id), 0) AS total_unpaid
-                FROM admin_users u
-                INNER JOIN patient_accounts pa ON pa.user_id = u.id
+                       COALESCE((SELECT SUM(CASE WHEN ap.is_paid = 1 THEN 1 ELSE 0 END) FROM account_payments ap WHERE COALESCE(ap.account_user_id, ap.user_id) = u.id), 0) AS account_paid_count,
+                       COALESCE((SELECT SUM(CASE WHEN ap.is_paid = 0 THEN 1 ELSE 0 END) FROM account_payments ap WHERE COALESCE(ap.account_user_id, ap.user_id) = u.id), 0) AS account_unpaid_count,
+                       COALESCE((SELECT SUM(CASE WHEN ap.is_paid = 0 THEN ap.amount ELSE 0 END) FROM account_payments ap WHERE COALESCE(ap.account_user_id, ap.user_id) = u.id), 0) AS total_unpaid
+                FROM patient_portal_users u
+                INNER JOIN patient_accounts pa ON pa.account_user_id = u.id
                 LEFT JOIN patients p ON pa.patient_id = p.id
                 ORDER BY u.created_at DESC
             ")->fetchAll();
@@ -3709,22 +3790,22 @@ if (isset($_POST['action']) && $_POST['action'] !== 'login' && $_POST['action'] 
 
             $pdo->beginTransaction();
             try {
-                $checkStmt = $pdo->prepare("SELECT id FROM patient_accounts WHERE user_id = ?");
+                $checkStmt = $pdo->prepare("SELECT id, patient_id FROM patient_accounts WHERE account_user_id = ? LIMIT 1 FOR UPDATE");
                 $checkStmt->execute([$uid]);
-                if ($checkStmt->fetch()) {
-                    $updStmt = $pdo->prepare("UPDATE patient_accounts SET allowed_days = allowed_days + ?" . ($expiry ? ", expiry_date = ?" : "") . " WHERE user_id = ?");
-                    if ($expiry) { $updStmt->execute([$days, $expiry, $uid]); }
-                    else { $updStmt->execute([$days, $uid]); }
-                } else {
-                    $pdo->prepare("INSERT INTO patient_accounts (user_id, patient_id, allowed_days, expiry_date) VALUES (?, 0, ?, ?)")->execute([$uid, $days, $expiry ?: null]);
+                $accountRow = $checkStmt->fetch();
+                if (!$accountRow || intval($accountRow['patient_id'] ?? 0) <= 0) {
+                    throw new RuntimeException('يجب ربط الحساب بمريض قبل إضافة الأيام.');
                 }
+                $updStmt = $pdo->prepare("UPDATE patient_accounts SET allowed_days = allowed_days + ?" . ($expiry ? ", expiry_date = ?" : "") . " WHERE account_user_id = ?");
+                if ($expiry) { $updStmt->execute([$days, $expiry, $uid]); }
+                else { $updStmt->execute([$days, $uid]); }
 
                 if ($amount > 0) {
-                    $payStmt = $pdo->prepare("INSERT INTO account_payments (user_id, amount, days_count, is_paid, note, created_by, paid_by) VALUES (?,?,?,?,?,?,?)");
+                    $payStmt = $pdo->prepare("INSERT INTO account_payments (account_user_id, user_id, amount, days_count, is_paid, note, created_by, paid_by) VALUES (?,NULL,?,?,?,?,?,?)");
                     $payStmt->execute([$uid, $amount, $days, $isPaid, $note ?: "إضافة $days يوم", intval($_SESSION['admin_user_id']), $isPaid ? intval($_SESSION['admin_user_id']) : null]);
                     $paymentId = intval($pdo->lastInsertId());
                     if (!$isPaid) {
-                        $userNameStmt = $pdo->prepare("SELECT COALESCE(display_name, username, 'مريض') FROM admin_users WHERE id = ?");
+                        $userNameStmt = $pdo->prepare("SELECT COALESCE(display_name, username, 'مريض') FROM patient_portal_users WHERE id = ?");
                         $userNameStmt->execute([$uid]);
                         $accountName = $userNameStmt->fetchColumn() ?: 'مريض';
                         $notifStmt = $pdo->prepare("INSERT INTO notifications (type, leave_id, account_payment_id, message, created_at) VALUES ('payment', NULL, ?, ?, ?)");
@@ -3741,6 +3822,44 @@ if (isset($_POST['action']) && $_POST['action'] !== 'login' && $_POST['action'] 
                 exit;
             }
             echo json_encode(['success'=>true,'message'=> $isPaid ? "تمت إضافة $days يوم وتسجيلها كمدفوعة." : "تمت إضافة $days يوم ونقل المستحقات إلى إشعارات الدفع.", 'stats'=>getStats($pdo)]);
+            break;
+
+        case 'account_deduct_days':
+            if ($_SESSION['admin_role'] !== 'admin') { echo json_encode(['success'=>false,'message'=>'ليس لديك صلاحية.']); exit; }
+            $uid = intval($_POST['user_id'] ?? 0);
+            $days = intval($_POST['days'] ?? 0);
+            $note = trim($_POST['note'] ?? '');
+            if ($uid <= 0 || $days <= 0) { echo json_encode(['success'=>false,'message'=>'يرجى إدخال عدد أيام صحيح للخصم.']); exit; }
+
+            $pdo->beginTransaction();
+            try {
+                $acctStmt = $pdo->prepare("SELECT pa.* FROM patient_accounts pa WHERE pa.account_user_id = ? LIMIT 1 FOR UPDATE");
+                $acctStmt->execute([$uid]);
+                $acct = $acctStmt->fetch();
+                if (!$acct || intval($acct['patient_id']) <= 0) {
+                    throw new RuntimeException('الحساب غير مرتبط بمريض.');
+                }
+                $patientId = intval($acct['patient_id']);
+                $allowedBefore = intval($acct['allowed_days'] ?? 0);
+                $usedDays = getUsedPatientAccountDays($pdo, $patientId, $uid);
+                $remainingBefore = max($allowedBefore - $usedDays, 0);
+                if ($days > $remainingBefore) {
+                    throw new RuntimeException("لا يمكن خصم {$days} يوم؛ الرصيد المتبقي المتاح للخصم هو {$remainingBefore} يوم فقط.");
+                }
+                $allowedAfter = max($allowedBefore - $days, 0);
+                $remainingAfter = max($allowedAfter - $usedDays, 0);
+                $pdo->prepare("UPDATE patient_accounts SET allowed_days = ? WHERE account_user_id = ?")->execute([$allowedAfter, $uid]);
+                $pdo->prepare("INSERT INTO account_day_adjustments (account_user_id, admin_user_id, delta_days, remaining_before, remaining_after, note) VALUES (?, ?, ?, ?, ?, ?)")
+                    ->execute([$uid, intval($_SESSION['admin_user_id'] ?? 0) ?: null, -$days, $remainingBefore, $remainingAfter, $note ?: "خصم {$days} يوم من رصيد الحساب"]);
+                $pdo->prepare("INSERT INTO user_notifications (user_id, message) VALUES (?, ?)")
+                    ->execute([$uid, "تم خصم {$days} يوم من رصيد حسابك. الرصيد المتبقي: {$remainingAfter} يوم." . ($note ? " ملاحظة: {$note}" : "")]);
+                $pdo->commit();
+            } catch(Throwable $e) {
+                if ($pdo->inTransaction()) $pdo->rollBack();
+                echo json_encode(['success'=>false,'message'=>$e->getMessage() ?: 'تعذّر خصم الأيام.']);
+                exit;
+            }
+            echo json_encode(['success'=>true,'message'=>"تم خصم {$days} يوم بنجاح من رصيد الحساب.",'stats'=>getStats($pdo)]);
             break;
 
         case 'account_fetch_records':
@@ -3779,7 +3898,7 @@ if (isset($_POST['action']) && $_POST['action'] !== 'login' && $_POST['action'] 
             if ($uid <= 0 || $hospitalId <= 0 || $doctorId <= 0 || !$startDate || !$endDate || $daysCount <= 0) {
                 echo json_encode(['success'=>false,'message'=>'يرجى تعبئة بيانات الإجازة كاملة.']); exit;
             }
-            $acctStmt = $pdo->prepare("SELECT pa.*, p.name_en, p.employer_ar, p.employer_en FROM patient_accounts pa LEFT JOIN patients p ON p.id = pa.patient_id WHERE pa.user_id = ? LIMIT 1");
+            $acctStmt = $pdo->prepare("SELECT pa.*, p.name_en, p.employer_ar, p.employer_en FROM patient_accounts pa LEFT JOIN patients p ON p.id = pa.patient_id WHERE pa.account_user_id = ? LIMIT 1");
             $acctStmt->execute([$uid]);
             $acct = $acctStmt->fetch();
             if (!$acct || intval($acct['patient_id']) <= 0) { echo json_encode(['success'=>false,'message'=>'الحساب غير مرتبط بمريض.']); exit; }
@@ -3825,7 +3944,7 @@ if (isset($_POST['action']) && $_POST['action'] !== 'login' && $_POST['action'] 
             $uid = intval($_POST['user_id'] ?? 0);
             $status = intval($_POST['status'] ?? 0);
             if ($uid == $_SESSION['admin_user_id']) { echo json_encode(['success'=>false,'message'=>'لا يمكنك تعطيل حسابك الخاص.']); exit; }
-            $pdo->prepare("UPDATE admin_users SET is_active = ? WHERE id = ?")->execute([$status, $uid]);
+            $pdo->prepare("UPDATE patient_portal_users SET is_active = ? WHERE id = ?")->execute([$status, $uid]);
             // إذا تم التعطيل: احذف جلسات المستخدم من جدول user_sessions وأبطل ملفات الجلسة
             if (!$status) {
                 // حذف سجلات الجلسات من قاعدة البيانات
@@ -3853,7 +3972,7 @@ if (isset($_POST['action']) && $_POST['action'] !== 'login' && $_POST['action'] 
             $uid = intval($_POST['user_id'] ?? 0);
             $newpass = $_POST['new_password'] ?? '';
             if ($uid <= 0 || strlen($newpass) < 4) { echo json_encode(['success'=>false,'message'=>'كلمة المرور يجب أن تكون 4 أحرف على الأقل.']); exit; }
-            $pdo->prepare("UPDATE admin_users SET password_hash = ? WHERE id = ?")->execute([password_hash($newpass, PASSWORD_DEFAULT), $uid]);
+            $pdo->prepare("UPDATE patient_portal_users SET password_hash = ? WHERE id = ?")->execute([password_hash($newpass, PASSWORD_DEFAULT), $uid]);
             echo json_encode(['success'=>true,'message'=>'تم تغيير كلمة المرور بنجاح.']);
             break;
 
@@ -3895,9 +4014,15 @@ if (isset($_POST['action']) && $_POST['action'] !== 'login' && $_POST['action'] 
             $notes = trim($_POST['notes'] ?? '');
             if ($uid <= 0) { echo json_encode(['success'=>false,'message'=>'معرّف المستخدم غير صالح.']); exit; }
             if ($pid > 0) {
-                $pdo->prepare("INSERT INTO patient_accounts (user_id, patient_id, allowed_days, expiry_date, notes) VALUES (?,?,?,?,?) ON DUPLICATE KEY UPDATE patient_id=VALUES(patient_id), allowed_days=VALUES(allowed_days), expiry_date=VALUES(expiry_date), notes=VALUES(notes)")->execute([$uid, $pid, $allowed, $expiry ?: null, $notes]);
+                $existsStmt = $pdo->prepare("SELECT id FROM patient_accounts WHERE account_user_id = ? LIMIT 1");
+                $existsStmt->execute([$uid]);
+                if ($existsStmt->fetch()) {
+                    $pdo->prepare("UPDATE patient_accounts SET patient_id = ?, allowed_days = ?, expiry_date = ?, notes = ? WHERE account_user_id = ?")->execute([$pid, $allowed, $expiry ?: null, $notes, $uid]);
+                } else {
+                    $pdo->prepare("INSERT INTO patient_accounts (account_user_id, user_id, patient_id, allowed_days, expiry_date, notes) VALUES (?, NULL, ?, ?, ?, ?)")->execute([$uid, $pid, $allowed, $expiry ?: null, $notes]);
+                }
             } else {
-                $pdo->prepare("DELETE FROM patient_accounts WHERE user_id = ?")->execute([$uid]);
+                $pdo->prepare("DELETE FROM patient_accounts WHERE account_user_id = ?")->execute([$uid]);
             }
             echo json_encode(['success'=>true,'message'=>'تم تحديث ربط الحساب بالمريض.']);
             break;
@@ -3907,38 +4032,32 @@ if (isset($_POST['action']) && $_POST['action'] !== 'login' && $_POST['action'] 
             $username = trim($_POST['username'] ?? '');
             $password = $_POST['password'] ?? '';
             $display_name = trim($_POST['display_name'] ?? '');
-            $role = in_array($_POST['role'] ?? '', ['admin','user']) ? $_POST['role'] : 'user';
             $link_patient_id = intval($_POST['link_patient_id'] ?? 0);
             $link_allowed_days = max(0, intval($_POST['link_allowed_days'] ?? 0));
-            if ($link_patient_id > 0) {
-                $patientStmt = $pdo->prepare("SELECT name, name_ar, name_en FROM patients WHERE id = ? LIMIT 1");
-                $patientStmt->execute([$link_patient_id]);
-                $patientForUsername = $patientStmt->fetch();
-                if ($patientForUsername) {
-                    $patientFirstName = makePatientFirstNameUsername($patientForUsername);
-                    $username = makeUniqueUsername($pdo, $patientFirstName . getNextPatientAccountNumber($pdo));
-                }
+            if ($link_patient_id <= 0) { echo json_encode(['success'=>false,'message'=>'يجب اختيار مريض لفتح حساب بوابة المرضى.']); exit; }
+            $patientStmt = $pdo->prepare("SELECT name, name_ar, name_en FROM patients WHERE id = ? LIMIT 1");
+            $patientStmt->execute([$link_patient_id]);
+            $patientForUsername = $patientStmt->fetch();
+            if (!$patientForUsername) { echo json_encode(['success'=>false,'message'=>'المريض غير موجود.']); exit; }
+            if ($patientForUsername) {
+                $display_name = $display_name ?: ($patientForUsername['name_ar'] ?: $patientForUsername['name'] ?: 'مريض');
+                $patientFirstName = makePatientFirstNameUsername($patientForUsername);
+                $username = makeUniqueUsername($pdo, $patientFirstName . getNextPatientAccountNumber($pdo));
             }
             if (empty($username) || empty($password) || empty($display_name)) { echo json_encode(['success'=>false,'message'=>'يرجى تعبئة جميع الحقول.']); exit; }
-            $check = $pdo->prepare("SELECT id FROM admin_users WHERE username = ?"); $check->execute([$username]);
-            if ($check->fetch()) { echo json_encode(['success'=>false,'message'=>'اسم المستخدم موجود مسبقاً.']); exit; }
-            $pdo->prepare("INSERT INTO admin_users (username, password_hash, display_name, role) VALUES (?,?,?,?)")->execute([$username, password_hash($password, PASSWORD_DEFAULT), $display_name, $role]);
-            $newUserId = intval($pdo->lastInsertId());
-            // Link to patient if provided
-            if ($link_patient_id > 0 && $newUserId > 0) {
-                $pdo->exec("CREATE TABLE IF NOT EXISTS patient_accounts (
-                    id INT AUTO_INCREMENT PRIMARY KEY,
-                    user_id INT NOT NULL UNIQUE,
-                    patient_id INT NOT NULL,
-                    allowed_days INT DEFAULT 0,
-                    expiry_date DATE NULL,
-                    notes TEXT NULL,
-                    FOREIGN KEY (user_id) REFERENCES admin_users(id) ON DELETE CASCADE,
-                    FOREIGN KEY (patient_id) REFERENCES patients(id) ON DELETE CASCADE
-                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci");
-                $pdo->prepare("INSERT INTO patient_accounts (user_id, patient_id, allowed_days) VALUES (?,?,?) ON DUPLICATE KEY UPDATE patient_id=VALUES(patient_id), allowed_days=VALUES(allowed_days)")->execute([$newUserId, $link_patient_id, $link_allowed_days]);
+            $check = $pdo->prepare("SELECT id FROM patient_portal_users WHERE username = ?"); $check->execute([$username]);
+            if ($check->fetch()) { echo json_encode(['success'=>false,'message'=>'اسم المستخدم موجود مسبقاً في حسابات المرضى.']); exit; }
+            $pdo->beginTransaction();
+            try {
+                $pdo->prepare("INSERT INTO patient_portal_users (username, password_hash, display_name, is_active) VALUES (?,?,?,1)")->execute([$username, password_hash($password, PASSWORD_DEFAULT), $display_name]);
+                $newUserId = intval($pdo->lastInsertId());
+                $pdo->prepare("INSERT INTO patient_accounts (account_user_id, user_id, patient_id, allowed_days) VALUES (?,?,?,?) ON DUPLICATE KEY UPDATE patient_id=VALUES(patient_id), allowed_days=VALUES(allowed_days)")->execute([$newUserId, null, $link_patient_id, $link_allowed_days]);
+                $pdo->commit();
+            } catch (Throwable $e) {
+                if ($pdo->inTransaction()) $pdo->rollBack();
+                echo json_encode(['success'=>false,'message'=>'تعذر إنشاء حساب المريض المستقل.']); exit;
             }
-            echo json_encode(['success'=>true,'message'=>'تمت إضافة الحساب بنجاح.','username'=>$username]);
+            echo json_encode(['success'=>true,'message'=>'تمت إضافة حساب المريض المستقل بنجاح.','username'=>$username]);
             break;
 
         case 'account_edit_user':
@@ -3948,34 +4067,31 @@ if (isset($_POST['action']) && $_POST['action'] !== 'login' && $_POST['action'] 
             $new_username = trim($_POST['new_username'] ?? '');
             $new_password = $_POST['new_password'] ?? '';
             if ($uid <= 0 || empty($display_name)) { echo json_encode(['success'=>false,'message'=>'بيانات غير صالحة.']); exit; }
-            // Check username uniqueness if changed
             if (!empty($new_username)) {
-                $dupCheck = $pdo->prepare("SELECT id FROM admin_users WHERE username = ? AND id <> ?");
+                $dupCheck = $pdo->prepare("SELECT id FROM patient_portal_users WHERE username = ? AND id <> ?");
                 $dupCheck->execute([$new_username, $uid]);
                 if ($dupCheck->fetch()) { echo json_encode(['success'=>false,'message'=>'اسم المستخدم موجود مسبقاً.']); exit; }
             }
             if (!empty($new_password) && !empty($new_username)) {
-                $pdo->prepare("UPDATE admin_users SET display_name=?, username=?, password_hash=? WHERE id=?")->execute([$display_name, $new_username, password_hash($new_password, PASSWORD_DEFAULT), $uid]);
+                $pdo->prepare("UPDATE patient_portal_users SET display_name=?, username=?, password_hash=? WHERE id=?")->execute([$display_name, $new_username, password_hash($new_password, PASSWORD_DEFAULT), $uid]);
             } elseif (!empty($new_password)) {
-                $pdo->prepare("UPDATE admin_users SET display_name=?, password_hash=? WHERE id=?")->execute([$display_name, password_hash($new_password, PASSWORD_DEFAULT), $uid]);
+                $pdo->prepare("UPDATE patient_portal_users SET display_name=?, password_hash=? WHERE id=?")->execute([$display_name, password_hash($new_password, PASSWORD_DEFAULT), $uid]);
             } elseif (!empty($new_username)) {
-                $pdo->prepare("UPDATE admin_users SET display_name=?, username=? WHERE id=?")->execute([$display_name, $new_username, $uid]);
+                $pdo->prepare("UPDATE patient_portal_users SET display_name=?, username=? WHERE id=?")->execute([$display_name, $new_username, $uid]);
             } else {
-                $pdo->prepare("UPDATE admin_users SET display_name=? WHERE id=?")->execute([$display_name, $uid]);
+                $pdo->prepare("UPDATE patient_portal_users SET display_name=? WHERE id=?")->execute([$display_name, $uid]);
             }
-            echo json_encode(['success'=>true,'message'=>'تم تعديل بيانات الحساب بنجاح.']);
+            echo json_encode(['success'=>true,'message'=>'تم تعديل بيانات حساب المريض بنجاح.']);
             break;
 
         case 'account_delete_user':
             if ($_SESSION['admin_role'] !== 'admin') { echo json_encode(['success'=>false,'message'=>'ليس لديك صلاحية.']); exit; }
             $uid = intval($_POST['user_id'] ?? 0);
             if ($uid <= 0) { echo json_encode(['success'=>false,'message'=>'معرّف غير صالح.']); exit; }
-            if ($uid == intval($_SESSION['admin_user_id'])) { echo json_encode(['success'=>false,'message'=>'لا يمكنك حذف حسابك الخاص.']); exit; }
-            $pdo->prepare("DELETE FROM patient_accounts WHERE user_id = ?")->execute([$uid]);
-            $pdo->prepare("DELETE FROM account_payments WHERE user_id = ?")->execute([$uid]);
-            $pdo->prepare("DELETE FROM user_sessions WHERE user_id = ?")->execute([$uid]);
-            $pdo->prepare("DELETE FROM admin_users WHERE id = ?")->execute([$uid]);
-            echo json_encode(['success'=>true,'message'=>'تم حذف الحساب بنجاح.']);
+            $pdo->prepare("DELETE FROM patient_accounts WHERE account_user_id = ?")->execute([$uid]);
+            $pdo->prepare("DELETE FROM account_payments WHERE COALESCE(account_user_id, user_id) = ?")->execute([$uid]);
+            $pdo->prepare("DELETE FROM patient_portal_users WHERE id = ?")->execute([$uid]);
+            echo json_encode(['success'=>true,'message'=>'تم حذف حساب المريض بنجاح.']);
             break;
 
         default:
@@ -6908,6 +7024,7 @@ if (!in_array($uiDataViewMode, ['table','compact','cards','zebra','glass','minim
                         </div>
                         <div class="col-md-6">
                             <label class="form-label">المستشفى</label>
+                            <input type="text" class="form-control form-control-sm mb-2" id="hospital_id_edit_search" placeholder="بحث سريع باسم المستشفى...">
                             <select class="form-select" name="hospital_id_edit" id="hospital_id_edit">
                                 <option value="">-- لا تغيير --</option>
                                 <?php if (isset($hospitals)) foreach ($hospitals as $h): ?>
@@ -7287,7 +7404,7 @@ if (!in_array($uiDataViewMode, ['table','compact','cards','zebra','glass','minim
                     <div class="mb-3"><label class="form-label">Doctor Name (EN)</label><input type="text" class="form-control" name="doctor_name_en" id="edit_doctor_name_en"></div>
                     <div class="mb-3"><label class="form-label">المسمى (عربي)</label><input type="text" class="form-control" name="doctor_title" id="edit_doctor_title" required></div>
                     <div class="mb-3"><label class="form-label">Title (EN)</label><input type="text" class="form-control" name="doctor_title_en" id="edit_doctor_title_en"></div>
-                    <div class="mb-3"><label class="form-label">المستشفى</label><select class="form-select" name="doctor_hospital_id" id="edit_doctor_hospital_id"><option value="">غير محدد</option></select></div>
+                    <div class="mb-3"><label class="form-label">المستشفى</label><input type="text" class="form-control form-control-sm mb-2" id="edit_doctor_hospital_search" placeholder="بحث سريع باسم المستشفى..."><select class="form-select" name="doctor_hospital_id" id="edit_doctor_hospital_id"><option value="">غير محدد</option></select></div>
                     <div class="mb-3"><label class="form-label">ملاحظة</label><input type="text" class="form-control" name="doctor_note" id="edit_doctor_note"></div>
                 </form>
             </div>
@@ -7599,32 +7716,33 @@ if (!in_array($uiDataViewMode, ['table','compact','cards','zebra','glass','minim
     <div class="modal-dialog modal-dialog-centered">
         <div class="modal-content">
             <div class="modal-header" style="background:linear-gradient(135deg,#6366f1,#8b5cf6);color:#fff;">
-                <h5 class="modal-title"><i class="bi bi-calendar-plus-fill"></i> إضافة أيام للحساب</h5>
+                <h5 class="modal-title" id="acctAddDaysTitle"><i class="bi bi-calendar-plus-fill"></i> إضافة أيام للحساب</h5>
                 <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
             </div>
             <div class="modal-body">
                 <input type="hidden" id="acctAddDaysUserId">
+                <input type="hidden" id="acctAddDaysMode" value="add">
                 <div class="mb-3">
                     <label class="form-label fw-bold">المستخدم</label>
                     <div class="alert alert-info py-2 px-3 mb-0" id="acctAddDaysUserInfo" style="font-size:13px;"></div>
                 </div>
                 <div class="row g-2">
                     <div class="col-6">
-                        <label class="form-label fw-bold">عدد الأيام المضافة <span class="text-danger">*</span></label>
+                        <label class="form-label fw-bold"><span id="acctAddDaysCountLabel">عدد الأيام المضافة</span> <span class="text-danger">*</span></label>
                         <input type="number" class="form-control" id="acctAddDaysCount" min="1" max="3650" placeholder="مثال: 30">
                     </div>
-                    <div class="col-6">
+                    <div class="col-6" id="acctAddDaysAmountWrap">
                         <label class="form-label fw-bold">مبلغ العملية (ريال)</label>
                         <input type="number" class="form-control" id="acctAddDaysAmount" min="0" step="0.01" placeholder="0.00">
                     </div>
-                    <div class="col-12">
+                    <div class="col-12" id="acctAddDaysPaidWrap">
                         <label class="form-label fw-bold">حالة الدفع</label>
                         <select class="form-select" id="acctAddDaysPaidStatus">
                             <option value="1">مدفوع الآن</option>
                             <option value="0">غير مدفوع — إرساله إلى إشعارات لوحة التحكم</option>
                         </select>
                     </div>
-                    <div class="col-12">
+                    <div class="col-12" id="acctAddDaysExpiryWrap">
                         <label class="form-label fw-bold">تاريخ انتهاء الصلاحية</label>
                         <input type="date" class="form-control" id="acctAddDaysExpiry">
                         <div class="form-text">اتركه فارغاً إذا لم يكن هناك تاريخ انتهاء.</div>
@@ -7637,7 +7755,7 @@ if (!in_array($uiDataViewMode, ['table','compact','cards','zebra','glass','minim
             </div>
             <div class="modal-footer">
                 <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">إلغاء</button>
-                <button type="button" class="btn btn-gradient" id="acctAddDaysSave"><i class="bi bi-plus-circle"></i> إضافة الأيام</button>
+                <button type="button" class="btn btn-gradient" id="acctAddDaysSave"><i class="bi bi-plus-circle"></i> <span id="acctAddDaysSaveText">إضافة الأيام</span></button>
             </div>
         </div>
     </div>
@@ -8203,6 +8321,13 @@ function setupSelectQuickSearch(searchInputId, selectId) {
             if (opt.value === selectedValue) optionEl.selected = true;
             select.appendChild(optionEl);
         });
+
+        const selectableOptions = Array.from(select.options).filter(opt => opt.value && opt.value !== 'manual' && !opt.disabled);
+        const hasCurrentVisible = selectableOptions.some(opt => opt.value === select.value);
+        if (q && selectableOptions.length === 1 && (!select.value || !hasCurrentVisible)) {
+            select.value = selectableOptions[0].value;
+            select.dispatchEvent(new Event('change', { bubbles: true }));
+        }
     };
 
     input.addEventListener('input', debounce((e) => renderOptions(e.target.value), 120));
@@ -8866,22 +8991,28 @@ async function fetchAndPopulateDoctorsForHospital(selectId, hospitalId, selected
 }
 
 function updatePatientSelects(patients) {
-    const sel = document.getElementById('patient_select');
-    if (!sel) return;
-    const currentVal = sel.value;
-    const firstOpt = sel.querySelector('option[value=""]');
-    const manualOpt = sel.querySelector('option[value="manual"]');
-    sel.innerHTML = '';
-    if (firstOpt) sel.appendChild(firstOpt);
-    patients.forEach(p => {
-        const opt = document.createElement('option');
-        opt.value = p.id;
-        opt.textContent = `${p.name_ar || p.name || ''} (${p.identity_number || ''})`;
-        sel.appendChild(opt);
-    });
-    if (manualOpt) sel.appendChild(manualOpt);
-    sel.value = currentVal;
-    refreshSelectQuickSearchData('patient_select');
+    const rebuild = (selectId, includeManual = false) => {
+        const sel = document.getElementById(selectId);
+        if (!sel) return;
+        const currentVal = sel.value;
+        sel.innerHTML = selectId === 'acctNewLinkPatient' ? '<option value="0">-- اختر مريض --</option>' : '<option value="">-- اختر مريض --</option>';
+        (patients || []).forEach(p => {
+            const opt = document.createElement('option');
+            opt.value = p.id;
+            opt.textContent = `${p.name_ar || p.name || ''} (${p.identity_number || ''})`;
+            sel.appendChild(opt);
+        });
+        if (includeManual) {
+            const manual = document.createElement('option');
+            manual.value = 'manual';
+            manual.textContent = 'إدخال مريض جديد يدوياً';
+            sel.appendChild(manual);
+        }
+        if (Array.from(sel.options).some(opt => opt.value === currentVal)) sel.value = currentVal;
+        refreshSelectQuickSearchData(selectId);
+    };
+    rebuild('patient_select', true);
+    rebuild('acctNewLinkPatient', false);
 }
 
 // ======================== الأحداث الرئيسية ========================
@@ -9097,6 +9228,8 @@ document.addEventListener('DOMContentLoaded', () => {
     setupSelectQuickSearch('dup_doctor_search', 'dup_doctor_select');
     setupSelectQuickSearch('doctor_id_edit_search', 'doctor_id_edit');
     setupSelectQuickSearch('hospital_id_search', 'hospital_id');
+    setupSelectQuickSearch('edit_doctor_hospital_search', 'edit_doctor_hospital_id');
+    setupSelectQuickSearch('hospital_id_edit_search', 'hospital_id_edit');
     setupSelectQuickSearch('acct_leave_hospital_search', 'acct_leave_hospital_id');
     // أضف هذا السطر لربط حقل البحث الجديد بالقائمة
 setupSelectQuickSearch('acctNewLinkPatientSearch', 'acctNewLinkPatient');
@@ -9913,6 +10046,7 @@ setupSelectQuickSearch('batch_hospital_search', 'batch_hospital_id');
                 currentTableData.hospitals.forEach(h => {
                     hospSelect.innerHTML += `<option value="${h.id}" ${h.id == editBtn.dataset.hospitalId ? 'selected' : ''}>${htmlspecialchars(h.name_ar || '')}</option>`;
                 });
+                refreshSelectQuickSearchData('edit_doctor_hospital_id');
             }
             editDoctorModal.show();
         }
@@ -10280,6 +10414,9 @@ setupSelectQuickSearch('batch_hospital_search', 'batch_hospital_id');
                         <button class="btn btn-sm btn-gradient acct-btn-add-days" data-id="${u.id}" data-name="${htmlspecialchars(u.display_name)}" data-username="${htmlspecialchars(u.username)}" title="إضافة أيام">
                             <i class="bi bi-calendar-plus"></i> إضافة أيام
                         </button>
+                        <button class="btn btn-sm btn-outline-danger acct-btn-deduct-days" data-id="${u.id}" data-name="${htmlspecialchars(u.display_name)}" data-username="${htmlspecialchars(u.username)}" data-remaining="${remainingDays}" title="خصم أيام من الرصيد" ${remainingDays <= 0 ? 'disabled' : ''}>
+                            <i class="bi bi-calendar-minus"></i> خصم أيام
+                        </button>
                         <button class="btn btn-sm btn-outline-secondary acct-btn-create-leave" data-id="${u.id}" data-name="${htmlspecialchars(u.display_name)}" data-patient-id="${u.linked_patient_id || ''}" data-remaining="${remainingDays}" title="إنشاء إجازة للمريض" ${remainingDays <= 0 || !u.linked_patient_id ? 'disabled' : ''}>
                             <i class="bi bi-file-earmark-medical"></i> إضافة إجازة
                         </button>
@@ -10519,6 +10656,7 @@ setupSelectQuickSearch('batch_hospital_search', 'batch_hospital_id');
             const pass = document.getElementById('acctNewPassword').value;
             
             const portalUrl = window.location.origin + window.location.pathname.replace('admin.php', 'user.php');
+            const tutorialUrl = 'https://2u.pw/LPfDTy';
 
             if (!user || !pass) {
                 showToast('يرجى توليد أو كتابة اليوزر والباسوورد أولاً.', 'warning');
@@ -10526,11 +10664,17 @@ setupSelectQuickSearch('batch_hospital_search', 'batch_hospital_id');
             }
 
             const whatsappMsg = `🎉 *تم تفعيل حساب ${ptName} بنجاح* 🎉\n\n` +
-                                `👤 *اليوزر:* ${user}\n` +
-                                `🔑 *الباسوورد:* ${pass}\n\n` +
-                                `🌐 *سجل الدخول في الموقع الآتي بيوزرك والباسوورد:*\n` +
+                                `👤 *اسم المستخدم:* ${user}\n` +
+                                `🔑 *كلمة المرور:* ${pass}\n\n` +
+                                `🌐 *رابط تسجيل الدخول إلى بوابة المريض:*\n` +
                                 `${portalUrl}\n\n` +
-                                `✨ استمتع بالخدمة الفورية لإصدار الاجازات! ولأي استفسار أو دعم وإضافة رصيد أيام لكم، معاكم هنا في الواتس دائماً 💬🤝`;
+                                `🎥 *شرح استخدام النظام خطوة بخطوة:*\n` +
+                                `${tutorialUrl}\n\n` +
+                                `✅ *ملاحظات مهمة:*\n` +
+                                `• احفظ بيانات الدخول ولا تشاركها مع أي شخص.\n` +
+                                `• شاهد شرح استخدام النظام قبل إصدار أول إجازة.\n` +
+                                `• عند انتهاء رصيد الأيام أو احتياجك للدعم، تواصل معنا هنا مباشرة.\n\n` +
+                                `✨ نتمنى لك تجربة سهلة وسريعة لإصدار الإجازات فورياً 💬🤝`;
 
             try {
                 await navigator.clipboard.writeText(whatsappMsg);
@@ -10584,6 +10728,7 @@ setupSelectQuickSearch('batch_hospital_search', 'batch_hospital_id');
         // Grid click delegation
         document.getElementById('accountsGrid')?.addEventListener('click', async (e) => {
             const addDaysBtn = e.target.closest('.acct-btn-add-days');
+            const deductDaysBtn = e.target.closest('.acct-btn-deduct-days');
             const createLeaveBtn = e.target.closest('.acct-btn-create-leave');
             const linkBtn = e.target.closest('.acct-btn-link-patient');
             const paymentsBtn = e.target.closest('.acct-btn-payments');
@@ -10592,16 +10737,35 @@ setupSelectQuickSearch('batch_hospital_search', 'batch_hospital_id');
             const editBtn = e.target.closest('.acct-btn-edit');
             const deleteBtn = e.target.closest('.acct-btn-delete');
 
-            if (addDaysBtn) {
-                const uid = addDaysBtn.dataset.id;
-                document.getElementById('acctAddDaysUserId').value = uid;
-                document.getElementById('acctAddDaysUserInfo').textContent = `${addDaysBtn.dataset.name} (${addDaysBtn.dataset.username})`;
+            const configureDaysModal = (mode, btn) => {
+                const isDeduct = mode === 'deduct';
+                document.getElementById('acctAddDaysMode').value = mode;
+                document.getElementById('acctAddDaysUserId').value = btn.dataset.id;
+                document.getElementById('acctAddDaysUserInfo').textContent = `${btn.dataset.name} (${btn.dataset.username})${isDeduct ? ` — الرصيد القابل للخصم: ${btn.dataset.remaining || 0} يوم` : ''}`;
+                document.getElementById('acctAddDaysTitle').innerHTML = isDeduct ? '<i class="bi bi-calendar-minus-fill"></i> خصم أيام من الحساب' : '<i class="bi bi-calendar-plus-fill"></i> إضافة أيام للحساب';
+                document.getElementById('acctAddDaysCountLabel').textContent = isDeduct ? 'عدد الأيام المراد خصمها' : 'عدد الأيام المضافة';
+                document.getElementById('acctAddDaysSaveText').textContent = isDeduct ? 'خصم الأيام' : 'إضافة الأيام';
                 document.getElementById('acctAddDaysCount').value = '';
+                document.getElementById('acctAddDaysCount').max = isDeduct ? (btn.dataset.remaining || 3650) : 3650;
                 document.getElementById('acctAddDaysAmount').value = '';
                 document.getElementById('acctAddDaysNote').value = '';
                 document.getElementById('acctAddDaysExpiry').value = '';
                 document.getElementById('acctAddDaysPaidStatus').value = '1';
+                ['acctAddDaysAmountWrap','acctAddDaysPaidWrap','acctAddDaysExpiryWrap'].forEach(id => {
+                    const el = document.getElementById(id);
+                    if (el) el.classList.toggle('d-none', isDeduct);
+                });
                 acctAddDaysModal.show();
+            };
+
+            if (addDaysBtn) {
+                configureDaysModal('add', addDaysBtn);
+            }
+
+            if (deductDaysBtn) {
+                const remaining = parseInt(deductDaysBtn.dataset.remaining || 0, 10);
+                if (remaining <= 0) { showToast('لا يوجد رصيد متاح للخصم.', 'warning'); return; }
+                configureDaysModal('deduct', deductDaysBtn);
             }
 
             if (createLeaveBtn) {
@@ -10829,6 +10993,7 @@ setupSelectQuickSearch('batch_hospital_search', 'batch_hospital_id');
         // Save add days
         document.getElementById('acctAddDaysSave')?.addEventListener('click', async () => {
             const uid = document.getElementById('acctAddDaysUserId').value;
+            const mode = document.getElementById('acctAddDaysMode')?.value || 'add';
             const days = document.getElementById('acctAddDaysCount').value;
             const amount = document.getElementById('acctAddDaysAmount').value;
             const note = document.getElementById('acctAddDaysNote').value;
@@ -10836,7 +11001,7 @@ setupSelectQuickSearch('batch_hospital_search', 'batch_hospital_id');
             if (!days || parseInt(days) <= 0) { showToast('يرجى إدخال عدد الأيام.', 'warning'); return; }
             showLoading();
             const fd = new FormData();
-            fd.append('action', 'account_add_days'); fd.append('csrf_token', CSRF_TOKEN);
+            fd.append('action', mode === 'deduct' ? 'account_deduct_days' : 'account_add_days'); fd.append('csrf_token', CSRF_TOKEN);
             fd.append('user_id', uid); fd.append('days', days);
             fd.append('amount', amount || 0); fd.append('note', note);
             fd.append('expiry_date', expiry);
