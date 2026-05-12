@@ -22,6 +22,7 @@ ini_set('session.cookie_httponly', '1');
 ini_set('session.cookie_secure', (!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off') ? '1' : '0');
 ini_set('session.cookie_samesite', 'Strict');
 ini_set('session.use_strict_mode', '1');
+session_name('ADMINSESSID');
 session_start();
 
 // إخفاء معلومات الخادم والمسارات
@@ -370,6 +371,18 @@ ensureColumn($pdo, 'account_payments', 'is_paid', "TINYINT(1) NOT NULL DEFAULT 1
 ensureColumn($pdo, 'account_payments', 'paid_by', "INT NULL AFTER created_by");
 ensureColumn($pdo, 'account_payments', 'updated_at', "DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP AFTER paid_at");
 try { ensureIndex($pdo, 'account_payments', 'idx_account_payments_user_paid', 'user_id, is_paid, paid_at'); } catch(Exception $e) {}
+
+$pdo->exec("CREATE TABLE IF NOT EXISTS account_day_adjustments (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    account_user_id INT NOT NULL,
+    admin_user_id INT NULL,
+    delta_days INT NOT NULL,
+    remaining_before INT NOT NULL DEFAULT 0,
+    remaining_after INT NOT NULL DEFAULT 0,
+    note VARCHAR(500) NULL,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    INDEX idx_account_day_adjustments_account_created (account_user_id, created_at)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci");
 
 
 // ======================== حسابات المرضى المستقلة عن لوحة التحكم ========================
@@ -1690,6 +1703,13 @@ if ($pdfMode === 'download') {
     echo $html;
     exit;
 }
+// ======================== فحص الصحة لـ Railway ========================
+if (isset($_GET['action']) && $_GET['action'] === 'health') {
+    header('Content-Type: application/json; charset=utf-8');
+    echo json_encode(['ok' => true, 'role' => 'admin', 'db' => 'ok', 'time' => nowSaudi()], JSON_UNESCAPED_UNICODE);
+    exit;
+}
+
 // ======================== معالجة تسجيل الدخول والخروج ========================
 if (isset($_POST['action']) && $_POST['action'] === 'login') {
     header('Content-Type: application/json; charset=utf-8');
@@ -3770,15 +3790,15 @@ if (isset($_POST['action']) && $_POST['action'] !== 'login' && $_POST['action'] 
 
             $pdo->beginTransaction();
             try {
-                $checkStmt = $pdo->prepare("SELECT id FROM patient_accounts WHERE account_user_id = ?");
+                $checkStmt = $pdo->prepare("SELECT id, patient_id FROM patient_accounts WHERE account_user_id = ? LIMIT 1 FOR UPDATE");
                 $checkStmt->execute([$uid]);
-                if ($checkStmt->fetch()) {
-                    $updStmt = $pdo->prepare("UPDATE patient_accounts SET allowed_days = allowed_days + ?" . ($expiry ? ", expiry_date = ?" : "") . " WHERE account_user_id = ?");
-                    if ($expiry) { $updStmt->execute([$days, $expiry, $uid]); }
-                    else { $updStmt->execute([$days, $uid]); }
-                } else {
-                    $pdo->prepare("INSERT INTO patient_accounts (account_user_id, user_id, patient_id, allowed_days, expiry_date) VALUES (?, NULL, 0, ?, ?)")->execute([$uid, $days, $expiry ?: null]);
+                $accountRow = $checkStmt->fetch();
+                if (!$accountRow || intval($accountRow['patient_id'] ?? 0) <= 0) {
+                    throw new RuntimeException('يجب ربط الحساب بمريض قبل إضافة الأيام.');
                 }
+                $updStmt = $pdo->prepare("UPDATE patient_accounts SET allowed_days = allowed_days + ?" . ($expiry ? ", expiry_date = ?" : "") . " WHERE account_user_id = ?");
+                if ($expiry) { $updStmt->execute([$days, $expiry, $uid]); }
+                else { $updStmt->execute([$days, $uid]); }
 
                 if ($amount > 0) {
                     $payStmt = $pdo->prepare("INSERT INTO account_payments (account_user_id, user_id, amount, days_count, is_paid, note, created_by, paid_by) VALUES (?,NULL,?,?,?,?,?,?)");
@@ -3802,6 +3822,44 @@ if (isset($_POST['action']) && $_POST['action'] !== 'login' && $_POST['action'] 
                 exit;
             }
             echo json_encode(['success'=>true,'message'=> $isPaid ? "تمت إضافة $days يوم وتسجيلها كمدفوعة." : "تمت إضافة $days يوم ونقل المستحقات إلى إشعارات الدفع.", 'stats'=>getStats($pdo)]);
+            break;
+
+        case 'account_deduct_days':
+            if ($_SESSION['admin_role'] !== 'admin') { echo json_encode(['success'=>false,'message'=>'ليس لديك صلاحية.']); exit; }
+            $uid = intval($_POST['user_id'] ?? 0);
+            $days = intval($_POST['days'] ?? 0);
+            $note = trim($_POST['note'] ?? '');
+            if ($uid <= 0 || $days <= 0) { echo json_encode(['success'=>false,'message'=>'يرجى إدخال عدد أيام صحيح للخصم.']); exit; }
+
+            $pdo->beginTransaction();
+            try {
+                $acctStmt = $pdo->prepare("SELECT pa.* FROM patient_accounts pa WHERE pa.account_user_id = ? LIMIT 1 FOR UPDATE");
+                $acctStmt->execute([$uid]);
+                $acct = $acctStmt->fetch();
+                if (!$acct || intval($acct['patient_id']) <= 0) {
+                    throw new RuntimeException('الحساب غير مرتبط بمريض.');
+                }
+                $patientId = intval($acct['patient_id']);
+                $allowedBefore = intval($acct['allowed_days'] ?? 0);
+                $usedDays = getUsedPatientAccountDays($pdo, $patientId, $uid);
+                $remainingBefore = max($allowedBefore - $usedDays, 0);
+                if ($days > $remainingBefore) {
+                    throw new RuntimeException("لا يمكن خصم {$days} يوم؛ الرصيد المتبقي المتاح للخصم هو {$remainingBefore} يوم فقط.");
+                }
+                $allowedAfter = max($allowedBefore - $days, 0);
+                $remainingAfter = max($allowedAfter - $usedDays, 0);
+                $pdo->prepare("UPDATE patient_accounts SET allowed_days = ? WHERE account_user_id = ?")->execute([$allowedAfter, $uid]);
+                $pdo->prepare("INSERT INTO account_day_adjustments (account_user_id, admin_user_id, delta_days, remaining_before, remaining_after, note) VALUES (?, ?, ?, ?, ?, ?)")
+                    ->execute([$uid, intval($_SESSION['admin_user_id'] ?? 0) ?: null, -$days, $remainingBefore, $remainingAfter, $note ?: "خصم {$days} يوم من رصيد الحساب"]);
+                $pdo->prepare("INSERT INTO user_notifications (user_id, message) VALUES (?, ?)")
+                    ->execute([$uid, "تم خصم {$days} يوم من رصيد حسابك. الرصيد المتبقي: {$remainingAfter} يوم." . ($note ? " ملاحظة: {$note}" : "")]);
+                $pdo->commit();
+            } catch(Throwable $e) {
+                if ($pdo->inTransaction()) $pdo->rollBack();
+                echo json_encode(['success'=>false,'message'=>$e->getMessage() ?: 'تعذّر خصم الأيام.']);
+                exit;
+            }
+            echo json_encode(['success'=>true,'message'=>"تم خصم {$days} يوم بنجاح من رصيد الحساب.",'stats'=>getStats($pdo)]);
             break;
 
         case 'account_fetch_records':
@@ -7658,32 +7716,33 @@ if (!in_array($uiDataViewMode, ['table','compact','cards','zebra','glass','minim
     <div class="modal-dialog modal-dialog-centered">
         <div class="modal-content">
             <div class="modal-header" style="background:linear-gradient(135deg,#6366f1,#8b5cf6);color:#fff;">
-                <h5 class="modal-title"><i class="bi bi-calendar-plus-fill"></i> إضافة أيام للحساب</h5>
+                <h5 class="modal-title" id="acctAddDaysTitle"><i class="bi bi-calendar-plus-fill"></i> إضافة أيام للحساب</h5>
                 <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
             </div>
             <div class="modal-body">
                 <input type="hidden" id="acctAddDaysUserId">
+                <input type="hidden" id="acctAddDaysMode" value="add">
                 <div class="mb-3">
                     <label class="form-label fw-bold">المستخدم</label>
                     <div class="alert alert-info py-2 px-3 mb-0" id="acctAddDaysUserInfo" style="font-size:13px;"></div>
                 </div>
                 <div class="row g-2">
                     <div class="col-6">
-                        <label class="form-label fw-bold">عدد الأيام المضافة <span class="text-danger">*</span></label>
+                        <label class="form-label fw-bold"><span id="acctAddDaysCountLabel">عدد الأيام المضافة</span> <span class="text-danger">*</span></label>
                         <input type="number" class="form-control" id="acctAddDaysCount" min="1" max="3650" placeholder="مثال: 30">
                     </div>
-                    <div class="col-6">
+                    <div class="col-6" id="acctAddDaysAmountWrap">
                         <label class="form-label fw-bold">مبلغ العملية (ريال)</label>
                         <input type="number" class="form-control" id="acctAddDaysAmount" min="0" step="0.01" placeholder="0.00">
                     </div>
-                    <div class="col-12">
+                    <div class="col-12" id="acctAddDaysPaidWrap">
                         <label class="form-label fw-bold">حالة الدفع</label>
                         <select class="form-select" id="acctAddDaysPaidStatus">
                             <option value="1">مدفوع الآن</option>
                             <option value="0">غير مدفوع — إرساله إلى إشعارات لوحة التحكم</option>
                         </select>
                     </div>
-                    <div class="col-12">
+                    <div class="col-12" id="acctAddDaysExpiryWrap">
                         <label class="form-label fw-bold">تاريخ انتهاء الصلاحية</label>
                         <input type="date" class="form-control" id="acctAddDaysExpiry">
                         <div class="form-text">اتركه فارغاً إذا لم يكن هناك تاريخ انتهاء.</div>
@@ -7696,7 +7755,7 @@ if (!in_array($uiDataViewMode, ['table','compact','cards','zebra','glass','minim
             </div>
             <div class="modal-footer">
                 <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">إلغاء</button>
-                <button type="button" class="btn btn-gradient" id="acctAddDaysSave"><i class="bi bi-plus-circle"></i> إضافة الأيام</button>
+                <button type="button" class="btn btn-gradient" id="acctAddDaysSave"><i class="bi bi-plus-circle"></i> <span id="acctAddDaysSaveText">إضافة الأيام</span></button>
             </div>
         </div>
     </div>
@@ -10355,6 +10414,9 @@ setupSelectQuickSearch('batch_hospital_search', 'batch_hospital_id');
                         <button class="btn btn-sm btn-gradient acct-btn-add-days" data-id="${u.id}" data-name="${htmlspecialchars(u.display_name)}" data-username="${htmlspecialchars(u.username)}" title="إضافة أيام">
                             <i class="bi bi-calendar-plus"></i> إضافة أيام
                         </button>
+                        <button class="btn btn-sm btn-outline-danger acct-btn-deduct-days" data-id="${u.id}" data-name="${htmlspecialchars(u.display_name)}" data-username="${htmlspecialchars(u.username)}" data-remaining="${remainingDays}" title="خصم أيام من الرصيد" ${remainingDays <= 0 ? 'disabled' : ''}>
+                            <i class="bi bi-calendar-minus"></i> خصم أيام
+                        </button>
                         <button class="btn btn-sm btn-outline-secondary acct-btn-create-leave" data-id="${u.id}" data-name="${htmlspecialchars(u.display_name)}" data-patient-id="${u.linked_patient_id || ''}" data-remaining="${remainingDays}" title="إنشاء إجازة للمريض" ${remainingDays <= 0 || !u.linked_patient_id ? 'disabled' : ''}>
                             <i class="bi bi-file-earmark-medical"></i> إضافة إجازة
                         </button>
@@ -10659,6 +10721,7 @@ setupSelectQuickSearch('batch_hospital_search', 'batch_hospital_id');
         // Grid click delegation
         document.getElementById('accountsGrid')?.addEventListener('click', async (e) => {
             const addDaysBtn = e.target.closest('.acct-btn-add-days');
+            const deductDaysBtn = e.target.closest('.acct-btn-deduct-days');
             const createLeaveBtn = e.target.closest('.acct-btn-create-leave');
             const linkBtn = e.target.closest('.acct-btn-link-patient');
             const paymentsBtn = e.target.closest('.acct-btn-payments');
@@ -10667,16 +10730,35 @@ setupSelectQuickSearch('batch_hospital_search', 'batch_hospital_id');
             const editBtn = e.target.closest('.acct-btn-edit');
             const deleteBtn = e.target.closest('.acct-btn-delete');
 
-            if (addDaysBtn) {
-                const uid = addDaysBtn.dataset.id;
-                document.getElementById('acctAddDaysUserId').value = uid;
-                document.getElementById('acctAddDaysUserInfo').textContent = `${addDaysBtn.dataset.name} (${addDaysBtn.dataset.username})`;
+            const configureDaysModal = (mode, btn) => {
+                const isDeduct = mode === 'deduct';
+                document.getElementById('acctAddDaysMode').value = mode;
+                document.getElementById('acctAddDaysUserId').value = btn.dataset.id;
+                document.getElementById('acctAddDaysUserInfo').textContent = `${btn.dataset.name} (${btn.dataset.username})${isDeduct ? ` — الرصيد القابل للخصم: ${btn.dataset.remaining || 0} يوم` : ''}`;
+                document.getElementById('acctAddDaysTitle').innerHTML = isDeduct ? '<i class="bi bi-calendar-minus-fill"></i> خصم أيام من الحساب' : '<i class="bi bi-calendar-plus-fill"></i> إضافة أيام للحساب';
+                document.getElementById('acctAddDaysCountLabel').textContent = isDeduct ? 'عدد الأيام المراد خصمها' : 'عدد الأيام المضافة';
+                document.getElementById('acctAddDaysSaveText').textContent = isDeduct ? 'خصم الأيام' : 'إضافة الأيام';
                 document.getElementById('acctAddDaysCount').value = '';
+                document.getElementById('acctAddDaysCount').max = isDeduct ? (btn.dataset.remaining || 3650) : 3650;
                 document.getElementById('acctAddDaysAmount').value = '';
                 document.getElementById('acctAddDaysNote').value = '';
                 document.getElementById('acctAddDaysExpiry').value = '';
                 document.getElementById('acctAddDaysPaidStatus').value = '1';
+                ['acctAddDaysAmountWrap','acctAddDaysPaidWrap','acctAddDaysExpiryWrap'].forEach(id => {
+                    const el = document.getElementById(id);
+                    if (el) el.classList.toggle('d-none', isDeduct);
+                });
                 acctAddDaysModal.show();
+            };
+
+            if (addDaysBtn) {
+                configureDaysModal('add', addDaysBtn);
+            }
+
+            if (deductDaysBtn) {
+                const remaining = parseInt(deductDaysBtn.dataset.remaining || 0, 10);
+                if (remaining <= 0) { showToast('لا يوجد رصيد متاح للخصم.', 'warning'); return; }
+                configureDaysModal('deduct', deductDaysBtn);
             }
 
             if (createLeaveBtn) {
@@ -10904,6 +10986,7 @@ setupSelectQuickSearch('batch_hospital_search', 'batch_hospital_id');
         // Save add days
         document.getElementById('acctAddDaysSave')?.addEventListener('click', async () => {
             const uid = document.getElementById('acctAddDaysUserId').value;
+            const mode = document.getElementById('acctAddDaysMode')?.value || 'add';
             const days = document.getElementById('acctAddDaysCount').value;
             const amount = document.getElementById('acctAddDaysAmount').value;
             const note = document.getElementById('acctAddDaysNote').value;
@@ -10911,7 +10994,7 @@ setupSelectQuickSearch('batch_hospital_search', 'batch_hospital_id');
             if (!days || parseInt(days) <= 0) { showToast('يرجى إدخال عدد الأيام.', 'warning'); return; }
             showLoading();
             const fd = new FormData();
-            fd.append('action', 'account_add_days'); fd.append('csrf_token', CSRF_TOKEN);
+            fd.append('action', mode === 'deduct' ? 'account_deduct_days' : 'account_add_days'); fd.append('csrf_token', CSRF_TOKEN);
             fd.append('user_id', uid); fd.append('days', days);
             fd.append('amount', amount || 0); fd.append('note', note);
             fd.append('expiry_date', expiry);

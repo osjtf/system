@@ -9,6 +9,7 @@ ini_set('session.cookie_httponly', '1');
 ini_set('session.cookie_secure', (!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off') ? '1' : '0');
 ini_set('session.cookie_samesite', 'Strict');
 ini_set('session.use_strict_mode', '1');
+session_name('PATIENTSESSID');
 session_start();
 
 // إخفاء معلومات الخادم والمسارات
@@ -250,6 +251,12 @@ function formatHijriDateSpanUser(string $date): string {
 // ======================== معالجة الطلبات ========================
 $action = $_POST['action'] ?? $_GET['action'] ?? '';
 
+if ($action === 'health') {
+    header('Content-Type: application/json; charset=utf-8');
+    echo json_encode(['ok' => true, 'role' => 'patient', 'db' => 'ok', 'time' => nowSaudiUser()], JSON_UNESCAPED_UNICODE);
+    exit;
+}
+
 // تسجيل الدخول
 if ($action === 'patient_login') {
     if (!patient_verify_csrf($_POST['csrf_token'] ?? '')) {
@@ -440,38 +447,74 @@ if ($action === 'create_sick_leave' && isPatientLoggedIn()) {
     // same_day: الدخول والخروج والإصدار على تاريخ البداية.
     // discharge_end: الدخول على البداية، والخروج والإصدار على تاريخ النهاية.
     $issueDate = $dateMode === 'discharge_end' ? $endDate : $startDate;
-    $serviceCode = generateServiceCodeUser($pdo, $prefix, $issueDate);
-    $stmt = $pdo->prepare("INSERT INTO sick_leaves 
-        (service_code, patient_id, doctor_id, hospital_id, created_by_user_id,
-         issue_date, issue_time, issue_period, start_date, end_date, days_count,
-         patient_name_en, doctor_name_en, doctor_title_en,
-         hospital_name_ar, hospital_name_en, logo_path,
-         employer_ar, employer_en, is_paid, payment_amount)
-        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)");
-    $stmt->execute([
-        $serviceCode,
-        $patientId,
-        $doctorId,
-        $hospitalId,
-        $userId,
-        $issueDate,
-        $issueTime,
-        $issuePeriod,
-        $startDate,
-        $endDate,
-        $daysCount,
-        $pat['name_en'] ?? '',
-        $doc['name_en'] ?? '',
-        $doc['title_en'] ?? '',
-        $hosp['name_ar'] ?? '',
-        $hosp['name_en'] ?? '',
-        $hosp['logo_url'] ?? $hosp['logo_path'] ?? '',
-        $pat['employer_ar'] ?? '',
-        $pat['employer_en'] ?? '',
-        1,
-        0,
-    ]);
-    $leaveId = (int)$pdo->lastInsertId();
+
+    $idempotencyKey = trim($_POST['idempotency_key'] ?? '');
+    if ($idempotencyKey === '') {
+        $idempotencyKey = hash('sha256', implode('|', [$userId, $hospitalId, $doctorId, $startDate, $endDate, $daysCount, microtime(true)]));
+    }
+    $_SESSION['patient_processed_leave_keys'] = $_SESSION['patient_processed_leave_keys'] ?? [];
+    if (isset($_SESSION['patient_processed_leave_keys'][$idempotencyKey])) {
+        echo json_encode(['success' => false, 'message' => 'تم استقبال هذا الطلب مسبقاً. يرجى تحديث السجل قبل إعادة المحاولة.']);
+        exit;
+    }
+
+    $pdo->beginTransaction();
+    try {
+        $lockedAccountStmt = $pdo->prepare("SELECT allowed_days FROM patient_accounts WHERE account_user_id = ? AND patient_id = ? LIMIT 1 FOR UPDATE");
+        $lockedAccountStmt->execute([$userId, $patientId]);
+        $lockedAccount = $lockedAccountStmt->fetch();
+        if (!$lockedAccount) {
+            throw new RuntimeException('حساب المريض غير مرتبط بشكل صحيح.');
+        }
+        $allowedDays = (int)$lockedAccount['allowed_days'];
+        $usedDays = getUsedDaysUser($pdo, $patientId, $userId);
+        $remainingDays = $allowedDays - $usedDays;
+        if ($daysCount > $remainingDays) {
+            throw new RuntimeException("عدد الأيام المطلوبة ($daysCount) يتجاوز الحصة المتبقية ($remainingDays يوم).");
+        }
+
+        $serviceCode = generateServiceCodeUser($pdo, $prefix, $issueDate);
+        $stmt = $pdo->prepare("INSERT INTO sick_leaves
+            (service_code, patient_id, doctor_id, hospital_id, created_by_user_id,
+             issue_date, issue_time, issue_period, start_date, end_date, days_count,
+             patient_name_en, doctor_name_en, doctor_title_en,
+             hospital_name_ar, hospital_name_en, logo_path,
+             employer_ar, employer_en, is_paid, payment_amount)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)");
+        $stmt->execute([
+            $serviceCode,
+            $patientId,
+            $doctorId,
+            $hospitalId,
+            $userId,
+            $issueDate,
+            $issueTime,
+            $issuePeriod,
+            $startDate,
+            $endDate,
+            $daysCount,
+            $pat['name_en'] ?? '',
+            $doc['name_en'] ?? '',
+            $doc['title_en'] ?? '',
+            $hosp['name_ar'] ?? '',
+            $hosp['name_en'] ?? '',
+            $hosp['logo_url'] ?? $hosp['logo_path'] ?? '',
+            $pat['employer_ar'] ?? '',
+            $pat['employer_en'] ?? '',
+            1,
+            0,
+        ]);
+        $leaveId = (int)$pdo->lastInsertId();
+        $pdo->commit();
+        $_SESSION['patient_processed_leave_keys'][$idempotencyKey] = $leaveId;
+        if (count($_SESSION['patient_processed_leave_keys']) > 20) {
+            $_SESSION['patient_processed_leave_keys'] = array_slice($_SESSION['patient_processed_leave_keys'], -20, null, true);
+        }
+    } catch (Throwable $e) {
+        if ($pdo->inTransaction()) $pdo->rollBack();
+        echo json_encode(['success' => false, 'message' => $e->getMessage() ?: 'تعذّر إنشاء الإجازة.']);
+        exit;
+    }
 
     echo json_encode([
         'success'        => true,
@@ -1899,6 +1942,7 @@ function submitLeave(e) {
   btn.innerHTML = '<span class="spinner"></span> جاري الإنشاء...';
   const fd = new FormData(document.getElementById('leaveForm'));
   fd.append('action', 'create_sick_leave');
+  fd.append('idempotency_key', (window.crypto && window.crypto.randomUUID) ? window.crypto.randomUUID() : String(Date.now()) + Math.random().toString(16).slice(2));
   fetch('user.php', { method: 'POST', body: fd })
     .then(r => r.json()).then(data => {
       btn.disabled = false;
