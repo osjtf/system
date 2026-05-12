@@ -89,6 +89,13 @@ function patientEnsureColumn(PDO $pdo, string $table, string $column, string $de
     $stmt->execute([$table, $column]);
     if ((int)$stmt->fetchColumn() === 0) $pdo->exec("ALTER TABLE $table ADD COLUMN $column $definition");
 }
+function patientEnsureNullableColumn(PDO $pdo, string $table, string $column, string $definition): void {
+    $stmt = $pdo->prepare("SELECT IS_NULLABLE FROM information_schema.columns WHERE table_schema = DATABASE() AND table_name = ? AND column_name = ? LIMIT 1");
+    $stmt->execute([$table, $column]);
+    if (strtoupper((string)$stmt->fetchColumn()) !== 'YES') {
+        try { $pdo->exec("ALTER TABLE `$table` MODIFY COLUMN `$column` $definition"); } catch(Throwable $e) {}
+    }
+}
 $pdo->exec("CREATE TABLE IF NOT EXISTS patient_portal_users (
     id INT AUTO_INCREMENT PRIMARY KEY,
     username VARCHAR(100) NOT NULL UNIQUE,
@@ -100,22 +107,28 @@ $pdo->exec("CREATE TABLE IF NOT EXISTS patient_portal_users (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci");
 patientEnsureColumn($pdo, 'patient_accounts', 'account_user_id', "INT NULL AFTER id");
 patientEnsureColumn($pdo, 'account_payments', 'account_user_id', "INT NULL AFTER id");
-try { $pdo->exec("ALTER TABLE account_payments MODIFY COLUMN user_id INT NULL"); } catch(Throwable $e) {}
-try { $pdo->exec("ALTER TABLE patient_accounts MODIFY COLUMN user_id INT NULL"); } catch(Throwable $e) {}
+patientEnsureNullableColumn($pdo, 'account_payments', 'user_id', 'INT NULL');
+patientEnsureNullableColumn($pdo, 'patient_accounts', 'user_id', 'INT NULL');
 try {
-    $legacyRows = $pdo->query("SELECT pa.id AS pa_id, pa.user_id, u.username, u.password_hash, u.display_name, u.is_active, u.created_at
-                               FROM patient_accounts pa
-                               INNER JOIN admin_users u ON u.id = pa.user_id
-                               WHERE pa.account_user_id IS NULL")->fetchAll();
-    $insertPortal = $pdo->prepare("INSERT IGNORE INTO patient_portal_users (id, username, password_hash, display_name, is_active, created_at) VALUES (?, ?, ?, ?, ?, ?)");
-    $updateAccount = $pdo->prepare("UPDATE patient_accounts SET account_user_id = ? WHERE id = ?");
-    foreach ($legacyRows as $row) {
-        $portalId = (int)$row['user_id'];
-        $insertPortal->execute([$portalId, $row['username'], $row['password_hash'], $row['display_name'], (int)$row['is_active'], $row['created_at'] ?: date('Y-m-d H:i:s')]);
-        $updateAccount->execute([$portalId, (int)$row['pa_id']]);
+    $hasLegacyStmt = $pdo->query("SELECT pa.id
+                                  FROM patient_accounts pa
+                                  INNER JOIN admin_users u ON u.id = pa.user_id
+                                  WHERE pa.account_user_id IS NULL
+                                  LIMIT 1");
+    if ($hasLegacyStmt && $hasLegacyStmt->fetchColumn()) {
+        $legacyRows = $pdo->query("SELECT pa.id AS pa_id, pa.user_id, u.username, u.password_hash, u.display_name, u.is_active, u.created_at
+                                   FROM patient_accounts pa
+                                   INNER JOIN admin_users u ON u.id = pa.user_id
+                                   WHERE pa.account_user_id IS NULL")->fetchAll();
+        $insertPortal = $pdo->prepare("INSERT IGNORE INTO patient_portal_users (id, username, password_hash, display_name, is_active, created_at) VALUES (?, ?, ?, ?, ?, ?)");
+        $updateAccount = $pdo->prepare("UPDATE patient_accounts SET account_user_id = ? WHERE id = ?");
+        foreach ($legacyRows as $row) {
+            $portalId = (int)$row['user_id'];
+            $insertPortal->execute([$portalId, $row['username'], $row['password_hash'], $row['display_name'], (int)$row['is_active'], $row['created_at'] ?: date('Y-m-d H:i:s')]);
+            $updateAccount->execute([$portalId, (int)$row['pa_id']]);
+        }
+        $pdo->exec("UPDATE account_payments SET account_user_id = user_id WHERE account_user_id IS NULL AND user_id IS NOT NULL");
     }
-    $pdo->exec("UPDATE account_payments SET account_user_id = user_id WHERE account_user_id IS NULL AND user_id IS NOT NULL");
-    $pdo->exec("UPDATE admin_users au INNER JOIN patient_accounts pa ON pa.user_id = au.id SET au.is_active = 0 WHERE pa.account_user_id IS NOT NULL");
 } catch (Throwable $e) {}
 
 // ======================== دوال الأمان ========================
