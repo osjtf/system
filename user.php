@@ -22,6 +22,7 @@ header('Referrer-Policy: strict-origin-when-cross-origin');
 header('Permissions-Policy: geolocation=(), microphone=(), camera=()');
 header('Content-Security-Policy: default-src \'self\'; script-src \'self\' \'unsafe-inline\' https://cdn.jsdelivr.net https://cdnjs.cloudflare.com; style-src \'self\' \'unsafe-inline\' https://cdn.jsdelivr.net https://cdnjs.cloudflare.com https://fonts.googleapis.com; font-src \'self\' https://fonts.gstatic.com https://cdnjs.cloudflare.com; img-src \'self\' data: https:; connect-src \'self\';');
 header('Strict-Transport-Security: max-age=31536000; includeSubDomains');
+header('X-Robots-Tag: noindex, nofollow, noarchive');
 
 // منع عرض أخطاء PHP للمستخدمين
 ini_set('display_errors', '0');
@@ -51,6 +52,7 @@ try {
 }
 
 $pdo->exec("SET time_zone = '+03:00'");
+try { $pdo->exec("ALTER TABLE hospitals ADD COLUMN deleted_at DATETIME NULL"); } catch (Throwable $e) {}
 
 // ======================== دوال الأمان ========================
 function patient_csrf_token(): string {
@@ -338,12 +340,12 @@ if ($action === 'create_sick_leave' && isPatientLoggedIn()) {
         $issuePeriod = $manualPeriod;
     }
 
-    $hospStmt = $pdo->prepare("SELECT * FROM hospitals WHERE id = ?");
+    $hospStmt = $pdo->prepare("SELECT * FROM hospitals WHERE id = ? AND deleted_at IS NULL");
     $hospStmt->execute([$hospitalId]);
     $hosp = $hospStmt->fetch();
 
-    $docStmt = $pdo->prepare("SELECT * FROM doctors WHERE id = ?");
-    $docStmt->execute([$doctorId]);
+    $docStmt = $pdo->prepare("SELECT * FROM doctors WHERE id = ? AND hospital_id = ?");
+    $docStmt->execute([$doctorId, $hospitalId]);
     $doc = $docStmt->fetch();
 
     $patStmt = $pdo->prepare("SELECT * FROM patients WHERE id = ?");
@@ -358,14 +360,15 @@ if ($action === 'create_sick_leave' && isPatientLoggedIn()) {
     $prefix = $hosp['service_prefix'] ?? 'GSL';
     $serviceCode = generateServiceCodeUser($pdo, $prefix, $startDate);
 
-    $issueDate = date('Y-m-d');
+    // في بوابة المرضى يكون تاريخ الإصدار مطابقاً لتاريخ بداية الإجازة الذي اختاره المريض.
+    $issueDate = $startDate;
     $stmt = $pdo->prepare("INSERT INTO sick_leaves 
         (service_code, patient_id, doctor_id, hospital_id, created_by_user_id,
          issue_date, issue_time, issue_period, start_date, end_date, days_count,
          patient_name_en, doctor_name_en, doctor_title_en,
          hospital_name_ar, hospital_name_en, logo_path,
-         employer_ar, employer_en)
-        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)");
+         employer_ar, employer_en, is_paid, payment_amount)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)");
     $stmt->execute([
         $serviceCode,
         $patientId,
@@ -386,6 +389,8 @@ if ($action === 'create_sick_leave' && isPatientLoggedIn()) {
         $hosp['logo_url'] ?? $hosp['logo_path'] ?? '',
         $pat['employer_ar'] ?? '',
         $pat['employer_en'] ?? '',
+        1,
+        0,
     ]);
     $leaveId = (int)$pdo->lastInsertId();
 
@@ -405,7 +410,11 @@ if ($action === 'generate_pdf' && isPatientLoggedIn()) {
     $leaveId = (int)($_GET['leave_id'] ?? 0);
     $userId  = (int)$_SESSION['patient_user_id'];
     $patientId = (int)$_SESSION['patient_id'];
-    $pdfMode = $_GET['pdf_mode'] ?? 'preview';
+    $pdfMode = 'download'; // Patient portal never exposes preview mode, even if the URL is manually changed.
+    if (!patient_verify_csrf($_GET['csrf_token'] ?? '')) {
+        http_response_code(403);
+        exit('Forbidden');
+    }
 
     $stmt = $pdo->prepare("
         SELECT sl.*,
@@ -445,8 +454,11 @@ if ($action === 'generate_pdf' && isPatientLoggedIn()) {
     $startEn  = fmtDateEnUser($startG);
     $endEn    = fmtDateEnUser($endG);
     $issueEn  = fmtDateEnUser($issueG);
+    // في تقارير بوابة المرضى: تاريخ الخروج يساوي تاريخ الدخول، مع بقاء فترة الإجازة حسب البداية والنهاية.
+    $dischargeEn = fmtDateEnUser($startG);
     $startHj  = toHijriStrUser($startG);
     $endHj    = toHijriStrUser($endG);
+    $dischargeHj = toHijriStrUser($startG);
 
     $patNameAr = htmlspecialchars($lv['p_name_ar'] ?? '', ENT_QUOTES);
     $patNameEn = strtoupper(htmlspecialchars($lv['p_name_en'] ?? '', ENT_QUOTES));
@@ -485,7 +497,7 @@ if ($action === 'generate_pdf' && isPatientLoggedIn()) {
 
     $licenseHtml = '';
     if (!empty($hospLicense)) {
-        $licenseHtml = '<span style="font-family: \'Noto Sans Arabic\', sans-serif; font-weight: 700;">رقم الترخيص :</span> <span style="font-family: \'Times New Roman\', serif; font-weight: 700;">' . htmlspecialchars($hospLicense) . '</span>';
+        $licenseHtml = '<span dir="rtl" style="direction:rtl;unicode-bidi:isolate;display:inline-block;font-weight:700;white-space:nowrap;"><span style="font-family: \'Noto Sans Arabic\', sans-serif;">رقم الترخيص:</span> <bdi dir="ltr" style="font-family: \'Times New Roman\', serif; direction:ltr; unicode-bidi:isolate;">' . htmlspecialchars($hospLicense, ENT_QUOTES, 'UTF-8') . '</bdi></span>';
     }
 
     $issuePeriod = $lv['issue_period'] ?? 'AM';
@@ -508,7 +520,7 @@ if ($action === 'generate_pdf' && isPatientLoggedIn()) {
     $dateLine      = $dayNameEn . ', ' . $dayNum . ' ' . $monthNameEn . ' ' . $yearNum;
 
     $durationEn = $daysEn . ' ( ' . $startEn . ' to ' . $endEn . ' )';
-    $durationAr = '<span style="font-family: \'Times New Roman\', serif; font-size: 14.5px; font-weight: 400;">' . $daysAr . '</span> <span style="font-family: \'Noto Sans Arabic\', sans-serif; font-size: 14.5px; font-weight: 400;">' . $daysArWord . '</span> ( ' . formatHijriDateSpanUser($startHj) . ' <span style="font-family: \'Noto Sans Arabic\', sans-serif; font-size: 13.5px; font-weight: 400;">إلى</span> ' . formatHijriDateSpanUser($endHj) . ' )';
+  $durationAr = '<span style="font-family: \'Times New Roman\', serif; font-size: 13.5px; font-weight: 400;">' . $daysAr . '</span> <span style="font-family: \'Noto Sans Arabic\', sans-serif; font-size: 14.5px; font-weight: 400;">' . $daysArWord . '</span> <span style="font-family: \'Times New Roman\', serif; font-size: 13.5px; font-weight: 400;">(</span> <span dir="ltr" style="unicode-bidi:isolate;direction:ltr;display:inline-block;font-family: \'Times New Roman\', serif; font-size: 13.5px; font-weight: 400;">' . htmlspecialchars($startHj, ENT_QUOTES, 'UTF-8') . '</span> <span style="font-family: \'Noto Sans Arabic\', sans-serif; font-size: 13.5px; font-weight: 400;">إلى</span> <span dir="ltr" style="unicode-bidi:isolate;direction:ltr;display:inline-block;font-family: \'Times New Roman\', serif; font-size: 13.5px; font-weight: 400;">' . htmlspecialchars($endHj, ENT_QUOTES, 'UTF-8') . '</span> <span style="font-family: \'Times New Roman\', serif; font-size: 13.5px; font-weight: 400;">)</span>';
 
     // PDF download mode - use same template as admin
     if ($pdfMode === 'download') {
@@ -577,10 +589,10 @@ if ($action === 'generate_pdf' && isPatientLoggedIn()) {
         $pdfHtml .= '<tr><td class="en-title">Leave ID</td><td class="data-cell" colspan="2">' . $sc . '</td><td class="ar-title">رمز الإجازة</td></tr>';
         $pdfHtml .= '<tr class="blue-row"><td class="en-title" style="color:white">Leave Duration</td><td class="data-cell">' . $durationEn . '</td><td class="data-cell ar-text" dir="rtl">' . $durationAr . '</td><td class="ar-title" style="color:white">مدة الإجازة</td></tr>';
         $pdfHtml .= '<tr><td class="en-title">Admission Date</td><td class="data-cell date-cell">' . $startEn . '</td><td class="data-cell date-cell" dir="ltr">' . $startHj . '</td><td class="ar-title">تاريخ الدخول</td></tr>';
-        $pdfHtml .= '<tr class="gray-row"><td class="en-title">Discharge Date</td><td class="data-cell date-cell">' . $endEn . '</td><td class="data-cell date-cell" dir="ltr">' . $endHj . '</td><td class="ar-title">تاريخ الخروج</td></tr>';
+        $pdfHtml .= '<tr class="gray-row"><td class="en-title">Discharge Date</td><td class="data-cell date-cell">' . $dischargeEn . '</td><td class="data-cell date-cell" dir="ltr">' . $dischargeHj . '</td><td class="ar-title">تاريخ الخروج</td></tr>';
         $pdfHtml .= '<tr><td class="en-title">Issue Date</td><td class="data-cell" colspan="2">' . $issueEn . '</td><td class="ar-title">تاريخ الإصدار</td></tr>';
         $pdfHtml .= '<tr class="gray-row"><td class="en-title">Patient Name</td><td class="data-cell en-spaced">' . $patNameEn . '</td><td class="data-cell ar-text">' . $patNameAr . '</td><td class="ar-title">الاسم</td></tr>';
-        $pdfHtml .= '<tr><td class="en-title">National ID / Iqama</td><td class="data-cell" colspan="2">' . $patId . '</td><td class="ar-title">رقم الهوية / الإقامة</td></tr>';
+        $pdfHtml .= '<tr><td class="en-title">National ID / Iqama</td><td class="data-cell" colspan="2">' . $patId . '</td><td class="ar-title">الإقامة<span class="thin-slash">/</span>رقم الهوية</td></tr>';
         $pdfHtml .= '<tr class="gray-row"><td class="en-title">Nationality</td><td class="data-cell en-spaced">' . $natEn . '</td><td class="data-cell ar-text">' . $natAr . '</td><td class="ar-title">الجنسية</td></tr>';
         $pdfHtml .= '<tr><td class="en-title">Employer</td><td class="data-cell en-spaced">' . $empEn . '</td><td class="data-cell ar-text">' . $empAr . '</td><td class="ar-title">جهة العمل</td></tr>';
         $pdfHtml .= '<tr class="gray-row"><td class="en-title">Physician Name</td><td class="data-cell en-spaced">' . $docNameEn . '</td><td class="data-cell ar-text">' . $docNameAr . '</td><td class="ar-title">اسم الطبيب المعالج</td></tr>';
@@ -608,6 +620,9 @@ if ($action === 'generate_pdf' && isPatientLoggedIn()) {
             header('Content-Type: application/pdf');
             header('Content-Disposition: attachment; filename="SickLeave_' . $scFile . '.pdf"');
             header('Content-Length: ' . filesize($pdfFile));
+            header('Cache-Control: no-store, no-cache, must-revalidate, max-age=0');
+            header('Pragma: no-cache');
+            header('X-Content-Type-Options: nosniff');
             readfile($pdfFile);
             @unlink($htmlFile);
             @unlink($pdfFile);
@@ -686,7 +701,7 @@ function downloadPDF(){var b=document.getElementById('btnDownloadPDF');b.textCon
     <tr><td class="en-title">Leave ID</td><td class="data-cell" colspan="2"><?= $sc ?></td><td class="ar-title">رمز الإجازة</td></tr>
     <tr class="blue-row"><td class="en-title" style="color:white">Leave Duration</td><td class="data-cell"><?= $durationEn ?></td><td class="data-cell ar-text" dir="rtl"><?= $durationAr ?></td><td class="ar-title" style="color:white">مدة الإجازة</td></tr>
     <tr><td class="en-title">Admission Date</td><td class="data-cell date-cell"><?= $startEn ?></td><td class="data-cell date-cell" dir="ltr"><?= $startHj ?></td><td class="ar-title">تاريخ الدخول</td></tr>
-    <tr class="gray-row"><td class="en-title">Discharge Date</td><td class="data-cell date-cell"><?= $endEn ?></td><td class="data-cell date-cell" dir="ltr"><?= $endHj ?></td><td class="ar-title">تاريخ الخروج</td></tr>
+    <tr class="gray-row"><td class="en-title">Discharge Date</td><td class="data-cell date-cell"><?= $dischargeEn ?></td><td class="data-cell date-cell" dir="ltr"><?= $dischargeHj ?></td><td class="ar-title">تاريخ الخروج</td></tr>
     <tr><td class="en-title">Issue Date</td><td class="data-cell" colspan="2"><?= $issueEn ?></td><td class="ar-title">تاريخ الإصدار</td></tr>
     <tr class="gray-row"><td class="en-title">Patient Name</td><td class="data-cell en-spaced"><?= $patNameEn ?></td><td class="data-cell ar-text"><?= $patNameAr ?></td><td class="ar-title">الاسم</td></tr>
     <tr><td class="en-title">National ID / Iqama</td><td class="data-cell" colspan="2"><?= $patId ?></td><td class="ar-title">رقم الهوية / الإقامة</td></tr>
@@ -742,7 +757,7 @@ if (isPatientLoggedIn()) {
     $stmt->execute([$patientId, $userId]);
     $myLeaves = $stmt->fetchAll();
 
-    $hospitals = $pdo->query("SELECT id, name_ar, name_en FROM hospitals ORDER BY name_ar")->fetchAll();
+    $hospitals = $pdo->query("SELECT id, name_ar, name_en FROM hospitals WHERE deleted_at IS NULL ORDER BY name_ar")->fetchAll();
 
     $usedDays = getUsedDaysUser($pdo, $patientId, $userId);
     $remainingDays = max(0, $allowedDays - $usedDays);
@@ -1464,6 +1479,14 @@ body {
       <h3><i class="fas fa-plus-circle"></i> إنشاء إجازة مرضية جديدة</h3>
     </div>
     <div class="card-body">
+      <?php if ($remainingDays <= 0): ?>
+        <div class="empty-state" style="padding:44px 18px;text-align:center">
+          <i class="fab fa-whatsapp" style="font-size:58px;color:#25d366;margin-bottom:16px"></i>
+          <h3 style="margin-bottom:10px;color:var(--danger);font-weight:900">استنفدت كل رصيدك من الأيام</h3>
+          <p style="color:var(--text-muted);font-weight:700;margin-bottom:22px">لإضافة رصيد أيام جديد أو طلب المساعدة، تواصل معنا مباشرة عبر الواتساب.</p>
+          <a href="https://wa.me/966500000000" target="_blank" class="btn-whatsapp" style="display:inline-flex;font-size:16px;padding:14px 26px"><i class="fab fa-whatsapp"></i> تواصل معنا على واتساب</a>
+        </div>
+      <?php else: ?>
       <form id="leaveForm" onsubmit="return submitLeave(event)">
         <div class="leave-form-grid">
           <div class="form-group">
@@ -1516,6 +1539,7 @@ body {
           </button>
         </div>
       </form>
+      <?php endif; ?>
     </div>
   </div>
 
@@ -1546,7 +1570,7 @@ body {
                 <td><?= htmlspecialchars($lv['d_name_ar'] ?? '') ?></td>
                 <td style="font-family:var(--font-en);font-weight:800"><?= (int)$lv['days_count'] ?> يوم</td>
                 <td style="font-family:var(--font-en)"><?= fmtDateUser($lv['start_date'] ?? '') ?></td>
-                <td><button class="btn-view-leave" onclick="viewLeave(<?= (int)$lv['id'] ?>)"><i class="fas fa-eye"></i> عرض</button></td>
+                <td><button class="btn-view-leave" onclick="viewLeave(<?= (int)$lv['id'] ?>)"><i class="fas fa-download"></i> تحميل</button></td>
               </tr>
             <?php endforeach; ?>
             </tbody>
@@ -1559,6 +1583,7 @@ body {
 <?php endif; ?>
 
 <script>
+const PATIENT_CSRF_TOKEN = '<?php echo patient_csrf_token(); ?>';
 // ═══ Theme Toggle ═══
 function toggleTheme() {
   const html = document.documentElement;
@@ -1615,7 +1640,7 @@ function loadDoctors(hospitalId) {
   sel.innerHTML = '<option value="">جاري التحميل...</option>';
   sel.disabled = true;
   if (!hospitalId) { sel.innerHTML = '<option value="">-- اختر المستشفى أولاً --</option>'; return; }
-  fetch('user.php?action=get_doctors_by_hospital&hospital_id=' + hospitalId)
+  fetch('user.php?action=get_doctors_by_hospital&hospital_id=' + encodeURIComponent(hospitalId))
     .then(r => r.json()).then(data => {
       sel.disabled = false;
       if (!data.success || !data.doctors.length) { sel.innerHTML = '<option value="">لا يوجد أطباء</option>'; return; }
@@ -1669,7 +1694,18 @@ function submitLeave(e) {
 
 // ═══ View Leave ═══
 function viewLeave(id) {
-  window.open('user.php?action=generate_pdf&leave_id=' + id + '&pdf_mode=preview', '_blank');
+  const url = 'user.php?action=generate_pdf&leave_id=' + encodeURIComponent(id) + '&pdf_mode=download&csrf_token=' + encodeURIComponent(PATIENT_CSRF_TOKEN);
+  let frame = document.getElementById('pdfDownloadFrame');
+  if (!frame) {
+    frame = document.createElement('iframe');
+    frame.id = 'pdfDownloadFrame';
+    frame.name = 'pdfDownloadFrame';
+    frame.style.display = 'none';
+    frame.setAttribute('aria-hidden', 'true');
+    document.body.appendChild(frame);
+  }
+  frame.src = url;
+  showToast('بدأ تحميل ملف الإجازة', 'success');
 }
 
 // ═══ Toast ═══
