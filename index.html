@@ -2060,15 +2060,24 @@ async function runLeaveInquiry() {
             service_code: code,
             identity_number: identityNumber
         });
-        const response = await fetch('/sickleave/search_service.php', {
-            method: 'POST',
-            headers: {
-                'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8',
-                'Accept': 'application/json'
-            },
-            body
-        });
-        const responseText = await response.text();
+        const searchEndpoints = Array.from(new Set([
+            new URL('search_service.php', window.location.href).pathname,
+            '/sickleave/search_service.php'
+        ]));
+        let response;
+        let responseText = '';
+        for (const endpoint of searchEndpoints) {
+            response = await fetch(endpoint, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8',
+                    'Accept': 'application/json'
+                },
+                body
+            });
+            responseText = await response.text();
+            if (response.ok || response.status !== 404) break;
+        }
         let data;
         try {
             data = JSON.parse(responseText);
