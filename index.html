@@ -2020,55 +2020,95 @@
                      
                     </div>
                   <script>
-document.getElementById('search-btn').addEventListener('click', function () {
-    const code = document.getElementById('service-code').value.trim();
-    const id = document.getElementById('identity-number').value.trim();
-    const errorDiv = document.getElementById('error-message');
+const searchButton = document.getElementById('search-btn');
+const serviceCodeInput = document.getElementById('service-code');
+const identityNumberInput = document.getElementById('identity-number');
+const errorDiv = document.getElementById('error-message');
+const resultArea = document.getElementById('result-area');
+const inquiryForm = document.getElementById('inquiry-form');
+
+function showInquiryError(message) {
+    errorDiv.innerHTML = `<p class="alert alert-danger">${message}</p>`;
+}
+
+async function runLeaveInquiry() {
+    const code = serviceCodeInput.value.trim();
+    const identityNumber = identityNumberInput.value.trim();
     errorDiv.innerHTML = '';
+    resultArea.style.display = 'none';
+    resultArea.innerHTML = '';
 
     if (!code) {
-        errorDiv.innerHTML = `<p class="alert alert-danger">فضلا اكتب الرمز</p>`;
+        showInquiryError('فضلاً اكتب رمز الخدمة');
+        serviceCodeInput.focus();
         return;
     }
-    if (!id) {
-        errorDiv.innerHTML = `<p class="alert alert-danger">رقم الهوية خاطئ</p>`;
+    if (!identityNumber) {
+        showInquiryError('فضلاً اكتب رقم الهوية / الإقامة');
+        identityNumberInput.focus();
         return;
     }
 
-    fetch('search_service.php', {
-        method: 'POST',
-        headers: {'Content-Type': 'application/x-www-form-urlencoded'},
-        body: `code=${encodeURIComponent(code)}&id=${encodeURIComponent(id)}`
-    })
-    .then(res => res.json())
-    .then(data => {
-        // معالجة حالة التحويل لصفحة المشرف
+    searchButton.disabled = true;
+    const originalButtonText = searchButton.textContent;
+    searchButton.textContent = 'جارٍ الاستعلام...';
+
+    try {
+        const body = new URLSearchParams({
+            code,
+            id: identityNumber,
+            service_code: code,
+            identity_number: identityNumber
+        });
+        const response = await fetch('search_service.php', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8',
+                'Accept': 'application/json'
+            },
+            body
+        });
+        const responseText = await response.text();
+        let data;
+        try {
+            data = JSON.parse(responseText);
+        } catch (parseError) {
+            throw new Error('رد الخادم غير صالح');
+        }
+
+        if (!response.ok) {
+            throw new Error(data.msg || 'تعذّر تنفيذ الاستعلام');
+        }
         if (data.status === 'redirect' && data.url) {
             window.location.href = data.url;
             return;
         }
-        // معالجة حالة الاستعلام العادية
         if (data.status === 'ok') {
-            let inquiryForm = document.getElementById('inquiry-form');
-if (inquiryForm) inquiryForm.style.display = 'none';
-            document.getElementById('result-area').style.display = '';
-            document.getElementById('result-area').innerHTML = data.html;
-        } 
-        // لم يتم العثور على النتيجة
-        else if (data.status === 'notfound') {
-            errorDiv.innerHTML = `<p class="alert alert-danger">لا يوجد نتائج</p>`;
-        } 
-        // خطأ مخصص من الخادم
-        else if (data.status === 'error' && data.msg) {
-            errorDiv.innerHTML = `<p class="alert alert-danger">${data.msg}</p>`;
+            if (inquiryForm) inquiryForm.style.display = 'none';
+            resultArea.style.display = '';
+            resultArea.innerHTML = data.html || '';
+        } else if (data.status === 'notfound') {
+            showInquiryError('لا يوجد نتائج');
+        } else if (data.status === 'error' && data.msg) {
+            showInquiryError(data.msg);
+        } else {
+            showInquiryError('حدث خطأ غير متوقع!');
         }
-        // أي خطأ غير متوقع آخر
-        else {
-            errorDiv.innerHTML = `<p class="alert alert-danger">حدث خطأ غير متوقع!</p>`;
+    } catch (error) {
+        showInquiryError(error.message || 'حدث خطأ في الاتصال بالخادم');
+    } finally {
+        searchButton.disabled = false;
+        searchButton.textContent = originalButtonText;
+    }
+}
+
+searchButton.addEventListener('click', runLeaveInquiry);
+[serviceCodeInput, identityNumberInput].forEach((input) => {
+    input.addEventListener('keydown', (event) => {
+        if (event.key === 'Enter') {
+            event.preventDefault();
+            runLeaveInquiry();
         }
-    })
-    .catch(() => {
-        errorDiv.innerHTML = `<p class="alert alert-danger">حدث خطأ في الاتصال بالخادم</p>`;
     });
 });
 
