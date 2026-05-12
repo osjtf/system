@@ -304,6 +304,7 @@ if ($action === 'create_sick_leave' && isPatientLoggedIn()) {
     $endDate     = trim($_POST['end_date'] ?? '');
     $daysCount   = (int)($_POST['days_count'] ?? 0);
     $timeMode    = in_array($_POST['time_mode'] ?? '', ['auto','random','manual']) ? $_POST['time_mode'] : 'auto';
+    $dateMode    = in_array($_POST['date_mode'] ?? '', ['same_day','discharge_end'], true) ? $_POST['date_mode'] : 'same_day';
     $manualTime  = trim($_POST['manual_time'] ?? '');
     $manualPeriod = in_array(strtoupper($_POST['manual_period'] ?? ''), ['AM','PM']) ? strtoupper($_POST['manual_period']) : 'AM';
 
@@ -358,10 +359,12 @@ if ($action === 'create_sick_leave' && isPatientLoggedIn()) {
     }
 
     $prefix = $hosp['service_prefix'] ?? 'GSL';
-    $serviceCode = generateServiceCodeUser($pdo, $prefix, $startDate);
 
-    // في بوابة المرضى يكون تاريخ الإصدار مطابقاً لتاريخ بداية الإجازة الذي اختاره المريض.
-    $issueDate = $startDate;
+    // نمط التواريخ يحدد تاريخ الخروج وتاريخ الإصدار في تقرير الإجازة.
+    // same_day: الدخول والخروج والإصدار على تاريخ البداية.
+    // discharge_end: الدخول على البداية، والخروج والإصدار على تاريخ النهاية.
+    $issueDate = $dateMode === 'discharge_end' ? $endDate : $startDate;
+    $serviceCode = generateServiceCodeUser($pdo, $prefix, $issueDate);
     $stmt = $pdo->prepare("INSERT INTO sick_leaves 
         (service_code, patient_id, doctor_id, hospital_id, created_by_user_id,
          issue_date, issue_time, issue_period, start_date, end_date, days_count,
@@ -454,11 +457,12 @@ if ($action === 'generate_pdf' && isPatientLoggedIn()) {
     $startEn  = fmtDateEnUser($startG);
     $endEn    = fmtDateEnUser($endG);
     $issueEn  = fmtDateEnUser($issueG);
-    // في تقارير بوابة المرضى: تاريخ الخروج يساوي تاريخ الدخول، مع بقاء فترة الإجازة حسب البداية والنهاية.
-    $dischargeEn = fmtDateEnUser($startG);
+    $useEndAsDischarge = $endG && $startG !== $endG && $issueG === $endG;
+    $dischargeG = $useEndAsDischarge ? $endG : $startG;
+    $dischargeEn = fmtDateEnUser($dischargeG);
     $startHj  = toHijriStrUser($startG);
     $endHj    = toHijriStrUser($endG);
-    $dischargeHj = toHijriStrUser($startG);
+    $dischargeHj = toHijriStrUser($dischargeG);
 
     $patNameAr = htmlspecialchars($lv['p_name_ar'] ?? '', ENT_QUOTES);
     $patNameEn = strtoupper(htmlspecialchars($lv['p_name_en'] ?? '', ENT_QUOTES));
@@ -1586,6 +1590,13 @@ body {
           <div class="form-group">
             <label class="form-label">عدد الأيام</label>
             <input type="number" class="form-input" id="daysCount" name="days_count" min="1" readonly style="background:var(--primary-50);font-weight:900;color:var(--primary)">
+          </div>
+          <div class="form-group">
+            <label class="form-label">طريقة تواريخ الدخول والخروج والإصدار</label>
+            <select class="form-select" id="dateMode" name="date_mode">
+              <option value="same_day">الدخول والخروج والإصدار = تاريخ البداية</option>
+              <option value="discharge_end">الدخول = البداية، الخروج والإصدار = النهاية</option>
+            </select>
           </div>
           <div class="form-group">
             <label class="form-label">وقت الإصدار</label>
