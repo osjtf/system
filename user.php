@@ -30,15 +30,31 @@ ini_set('display_startup_errors', '0');
 error_reporting(0);
 
 // ======================== إعدادات قاعدة البيانات ========================
-$db_host = 'mysql.railway.internal';
-$db_user = 'root';
-$db_pass = 'vDUncyqSFYnHULjIOHYltRvPXtbLVIIl';
-$db_name = 'railway';
-$db_port = 3306;
+// ======================== إعدادات قاعدة البيانات ========================
+// الأفضل في Railway: لا تكتب بيانات قاعدة البيانات داخل الكود.
+// ضعها في Variables باسم DATABASE_URL أو MYSQL_URL.
+
+$databaseUrl = getenv('DATABASE_URL') ?: getenv('MYSQL_URL');
+
+if (!$databaseUrl) {
+    die('<div style="font-family:sans-serif;text-align:center;padding:50px;color:red;">متغير قاعدة البيانات غير موجود</div>');
+}
+
+$url = parse_url($databaseUrl);
+
+$db_host = $url['host'] ?? '';
+$db_port = $url['port'] ?? 3306;
+$db_user = isset($url['user']) ? urldecode($url['user']) : '';
+$db_pass = isset($url['pass']) ? urldecode($url['pass']) : '';
+$db_name = isset($url['path']) ? ltrim($url['path'], '/') : '';
+
+if (!$db_host || !$db_user || !$db_name) {
+    die('<div style="font-family:sans-serif;text-align:center;padding:50px;color:red;">بيانات الاتصال بقاعدة البيانات غير مكتملة</div>');
+}
 
 try {
     $pdo = new PDO(
-        "mysql:host=$db_host;port=$db_port;dbname=$db_name;charset=utf8mb4",
+        "mysql:host={$db_host};port={$db_port};dbname={$db_name};charset=utf8mb4",
         $db_user,
         $db_pass,
         [
@@ -47,7 +63,13 @@ try {
             PDO::ATTR_EMULATE_PREPARES => false,
         ]
     );
+
+    $pdo->exec("SET time_zone = '+03:00'");
+    $pdo->exec("SET NAMES utf8mb4 COLLATE utf8mb4_unicode_ci");
+
 } catch (PDOException $e) {
+    error_log('Database connection failed: ' . $e->getMessage());
+
     die('<div style="font-family:sans-serif;text-align:center;padding:50px;color:red;">فشل الاتصال بقاعدة البيانات</div>');
 }
 
@@ -304,6 +326,7 @@ if ($action === 'create_sick_leave' && isPatientLoggedIn()) {
     $endDate     = trim($_POST['end_date'] ?? '');
     $daysCount   = (int)($_POST['days_count'] ?? 0);
     $timeMode    = in_array($_POST['time_mode'] ?? '', ['auto','random','manual']) ? $_POST['time_mode'] : 'auto';
+    $dateMode    = in_array($_POST['date_mode'] ?? '', ['same_day','discharge_end'], true) ? $_POST['date_mode'] : 'same_day';
     $manualTime  = trim($_POST['manual_time'] ?? '');
     $manualPeriod = in_array(strtoupper($_POST['manual_period'] ?? ''), ['AM','PM']) ? strtoupper($_POST['manual_period']) : 'AM';
 
@@ -358,10 +381,12 @@ if ($action === 'create_sick_leave' && isPatientLoggedIn()) {
     }
 
     $prefix = $hosp['service_prefix'] ?? 'GSL';
-    $serviceCode = generateServiceCodeUser($pdo, $prefix, $startDate);
 
-    // في بوابة المرضى يكون تاريخ الإصدار مطابقاً لتاريخ بداية الإجازة الذي اختاره المريض.
-    $issueDate = $startDate;
+    // نمط التواريخ يحدد تاريخ الخروج وتاريخ الإصدار في تقرير الإجازة.
+    // same_day: الدخول والخروج والإصدار على تاريخ البداية.
+    // discharge_end: الدخول على البداية، والخروج والإصدار على تاريخ النهاية.
+    $issueDate = $dateMode === 'discharge_end' ? $endDate : $startDate;
+    $serviceCode = generateServiceCodeUser($pdo, $prefix, $issueDate);
     $stmt = $pdo->prepare("INSERT INTO sick_leaves 
         (service_code, patient_id, doctor_id, hospital_id, created_by_user_id,
          issue_date, issue_time, issue_period, start_date, end_date, days_count,
@@ -454,11 +479,12 @@ if ($action === 'generate_pdf' && isPatientLoggedIn()) {
     $startEn  = fmtDateEnUser($startG);
     $endEn    = fmtDateEnUser($endG);
     $issueEn  = fmtDateEnUser($issueG);
-    // في تقارير بوابة المرضى: تاريخ الخروج يساوي تاريخ الدخول، مع بقاء فترة الإجازة حسب البداية والنهاية.
-    $dischargeEn = fmtDateEnUser($startG);
+    $useEndAsDischarge = $endG && $startG !== $endG && $issueG === $endG;
+    $dischargeG = $useEndAsDischarge ? $endG : $startG;
+    $dischargeEn = fmtDateEnUser($dischargeG);
     $startHj  = toHijriStrUser($startG);
     $endHj    = toHijriStrUser($endG);
-    $dischargeHj = toHijriStrUser($startG);
+    $dischargeHj = toHijriStrUser($dischargeG);
 
     $patNameAr = htmlspecialchars($lv['p_name_ar'] ?? '', ENT_QUOTES);
     $patNameEn = strtoupper(htmlspecialchars($lv['p_name_en'] ?? '', ENT_QUOTES));
@@ -558,7 +584,7 @@ if ($action === 'generate_pdf' && isPatientLoggedIn()) {
         $pdfHtml .= '.header-placeholder { top: -50px; left: 303px; width: 163px; height: 40px; position: absolute; display: flex; align-items: center; justify-content: center; }';
         $pdfHtml .= '.group1-thq-text-elm41 { top: 40px; left: 281px; color: rgba(48, 109, 181, 1); width: 215px; position: absolute; font-size: 22.5px; font-weight: 700; text-align: center; line-height: 30px; }';
         $pdfHtml .= '.group1-thq-text-elm44 { top: -10px; left: 293px; color: rgba(0, 0, 0, 1); position: absolute; font-size: 17.3px; font-weight: 400; font-family: "Times New Roman", serif; }';
-        $pdfHtml .= '.group1-thq-hospitallogoandthename-elm { top: 760px; left: 438.94px; width: 403px; height: 202.78px; display: flex; position: absolute; align-items: flex-start; }';
+        $pdfHtml .= '.group1-thq-hospitallogoandthename-elm { top: 750px; left: 438.94px; width: 403px; height: 202.78px; display: flex; position: absolute; align-items: flex-start; }';
         $pdfHtml .= '.placeholder-logo-hospital { top: -12px; left: 133px; width: 136px; height: 136px; position: absolute; display: flex; align-items: center; justify-content: center; }';
         $pdfHtml .= '.group1-thq-text-elm18 { top: 113px; color: rgba(0, 0, 0, 1); width: 403px; height: auto; position: absolute; font-size: 12.8px; text-align: center; line-height: 22px; }';
         $pdfHtml .= '.group1-thq-thedateofissueandalsotimeofissue-elm { top: calc(950px + var(--footer-offset)); left: 37.37px; width: 250px; height: 56px; display: flex; position: absolute; align-items: flex-start; }';
@@ -658,7 +684,7 @@ if ($action === 'generate_pdf' && isPatientLoggedIn()) {
 .header-placeholder{top:-50px;left:312px;width:163px;height:40px;position:absolute;display:flex;align-items:center;justify-content:center}
 .group1-thq-text-elm41{top:40px;left:281px;color:rgba(48,109,181,1);width:215px;position:absolute;font-size:22.5px;font-weight:700;text-align:center;line-height:30px}
 .group1-thq-text-elm44{top:-10px;left:297px;color:#000;position:absolute;font-size:17.3px;font-weight:400;font-family:"Times New Roman",serif}
-.group1-thq-hospitallogoandthename-elm{top:760px;left:438.94px;width:403px;height:202.78px;display:flex;position:absolute;align-items:flex-start}
+.group1-thq-hospitallogoandthename-elm{top:750px;left:438.94px;width:403px;height:202.78px;display:flex;position:absolute;align-items:flex-start}
 .placeholder-logo-hospital{top:-12px;left:133px;width:136px;height:136px;position:absolute;display:flex;align-items:center;justify-content:center}
 .group1-thq-text-elm18{top:113px;color:#000;width:403px;height:auto;position:absolute;font-size:12.8px;text-align:center;line-height:22px}
 .group1-thq-thedateofissueandalsotimeofissue-elm{top:calc(989.85px + var(--footer-offset));left:37.37px;width:250px;height:56px;display:flex;position:absolute;align-items:flex-start}
@@ -1586,6 +1612,13 @@ body {
           <div class="form-group">
             <label class="form-label">عدد الأيام</label>
             <input type="number" class="form-input" id="daysCount" name="days_count" min="1" readonly style="background:var(--primary-50);font-weight:900;color:var(--primary)">
+          </div>
+          <div class="form-group">
+            <label class="form-label">طريقة تواريخ الدخول والخروج والإصدار</label>
+            <select class="form-select" id="dateMode" name="date_mode">
+              <option value="same_day">الدخول والخروج والإصدار = تاريخ البداية</option>
+              <option value="discharge_end">الدخول = البداية، الخروج والإصدار = النهاية</option>
+            </select>
           </div>
           <div class="form-group">
             <label class="form-label">وقت الإصدار</label>
