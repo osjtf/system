@@ -7981,7 +7981,7 @@ if (!in_array($uiDataViewMode, ['table','compact','cards','zebra','glass','minim
             </div>
           <div class="modal-footer">
                 <button type="button" class="btn btn-outline-success d-none me-auto" id="copyAcctMsgBtn">
-                    <i class="bi bi-whatsapp"></i> نسخ رسالة الواتساب
+                    <i class="bi bi-whatsapp"></i> نسخ رسالة الواتساب مع شرح النظام
                 </button>
                 <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">إلغاء</button>
                 <button type="button" class="btn btn-gradient" id="acctNewUserSave"><i class="bi bi-plus"></i> إنشاء الحساب</button>
@@ -10663,17 +10663,24 @@ setupSelectQuickSearch('batch_hospital_search', 'batch_hospital_id');
                 return;
             }
 
-            const whatsappMsg = `🎉 *تم تفعيل حساب ${ptName} بنجاح* 🎉\n\n` +
+            const whatsappMsg = `🎉 *مرحباً ${ptName || 'بك'}.. تم تفعيل حسابك في بوابة المرضى بنجاح* 🎉\n\n` +
+                                `━━━━━━━━━━━━━━\n` +
+                                `🔐 *بيانات الدخول الخاصة بك*\n` +
                                 `👤 *اسم المستخدم:* ${user}\n` +
                                 `🔑 *كلمة المرور:* ${pass}\n\n` +
                                 `🌐 *رابط تسجيل الدخول إلى بوابة المريض:*\n` +
                                 `${portalUrl}\n\n` +
                                 `🎥 *شرح استخدام النظام خطوة بخطوة:*\n` +
                                 `${tutorialUrl}\n\n` +
+                                `📌 *طريقة الاستخدام باختصار:*\n` +
+                                `1️⃣ افتح رابط بوابة المريض وسجّل الدخول بالبيانات أعلاه.\n` +
+                                `2️⃣ شاهد شرح استخدام النظام قبل إصدار أول إجازة.\n` +
+                                `3️⃣ اختر المستشفى والطبيب ثم حدّد تاريخ بداية ونهاية الإجازة.\n` +
+                                `4️⃣ اضغط إنشاء الإجازة ثم حمّل التقرير من سجل الإجازات.\n\n` +
                                 `✅ *ملاحظات مهمة:*\n` +
                                 `• احفظ بيانات الدخول ولا تشاركها مع أي شخص.\n` +
-                                `• شاهد شرح استخدام النظام قبل إصدار أول إجازة.\n` +
-                                `• عند انتهاء رصيد الأيام أو احتياجك للدعم، تواصل معنا هنا مباشرة.\n\n` +
+                                `• عند انتهاء رصيد الأيام أو احتياجك للدعم، تواصل معنا هنا مباشرة.\n` +
+                                `• رابط شرح استخدام النظام موجود داخل بوابتك دائماً.\n\n` +
                                 `✨ نتمنى لك تجربة سهلة وسريعة لإصدار الإجازات فورياً 💬🤝`;
 
             try {
