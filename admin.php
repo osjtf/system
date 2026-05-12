@@ -1868,6 +1868,14 @@ if (isset($_POST['action']) && $_POST['action'] !== 'login' && $_POST['action'] 
             break;
 
         // ======================== إدارة المستشفيات ========================
+        case 'preview_hospital_logo_url':
+            $logo_url = trim($_POST['hospital_logo_url'] ?? '');
+            if ($logo_url === '') { echo json_encode(['success'=>false,'message'=>'يرجى إدخال رابط الشعار.']); exit; }
+            $logo_data = downloadLogoFromUrl($logo_url);
+            if (!$logo_data) { echo json_encode(['success'=>false,'message'=>'تعذّرت معاينة الرابط من الخادم، تأكد أن الرابط مباشر لصورة.']); exit; }
+            echo json_encode(['success'=>true,'logo_data'=>$logo_data]);
+            break;
+
         case 'add_hospital':
             $name_ar = trim($_POST['hospital_name_ar'] ?? '');
             $name_en = trim($_POST['hospital_name_en'] ?? '');
@@ -1909,7 +1917,9 @@ if (isset($_POST['action']) && $_POST['action'] !== 'login' && $_POST['action'] 
                     $stmt = $pdo->prepare("UPDATE hospitals SET name_ar=?, name_en=?, license_number=?, logo_data=?, logo_url=?, service_prefix=?, logo_scale=?, logo_offset_x=?, logo_offset_y=? WHERE id=?");
                     $stmt->execute([$name_ar, $name_en, $license ?: null, $logo_data, $logo_url ?: null, $prefix, $logo_scale, $logo_offset_x, $logo_offset_y, $id]);
                 } elseif (!empty($logo_url)) {
-                    $stmt = $pdo->prepare("UPDATE hospitals SET name_ar=?, name_en=?, license_number=?, logo_url=?, service_prefix=?, logo_scale=?, logo_offset_x=?, logo_offset_y=? WHERE id=?");
+                    // عند حفظ رابط جديد ولم نستطع تحويله إلى data-uri نحفظ الرابط كمصدر مباشر
+                    // ونمسح logo_data القديم حتى لا يستمر عرض الشعار السابق بدلاً من الرابط الجديد.
+                    $stmt = $pdo->prepare("UPDATE hospitals SET name_ar=?, name_en=?, license_number=?, logo_data=NULL, logo_url=?, service_prefix=?, logo_scale=?, logo_offset_x=?, logo_offset_y=? WHERE id=?");
                     $stmt->execute([$name_ar, $name_en, $license ?: null, $logo_url, $prefix, $logo_scale, $logo_offset_x, $logo_offset_y, $id]);
                 } else {
                     $stmt = $pdo->prepare("UPDATE hospitals SET name_ar=?, name_en=?, license_number=?, logo_url=NULL, service_prefix=?, logo_scale=?, logo_offset_x=?, logo_offset_y=? WHERE id=?");
@@ -7276,8 +7286,8 @@ if (!in_array($uiDataViewMode, ['table','compact','cards','zebra','glass','minim
                         <div class="col-md-4"><label class="form-label">رقم الترخيص</label><input type="text" class="form-control" name="hospital_license" id="edit_hospital_license"></div>
                         <div class="col-md-4"><label class="form-label">البادئة</label><select class="form-select" name="hospital_prefix" id="edit_hospital_prefix"><option value="GSL">GSL (حكومي)</option><option value="PSL">PSL (خاص)</option></select></div>
                         <div class="col-md-4"></div>
-                        <div class="col-md-6"><label class="form-label">رفع شعار جديد</label><input type="file" class="form-control" name="hospital_logo" id="edit_hospital_logo_file" accept="image/*"></div>
-                        <div class="col-md-6"><label class="form-label">أو رابط الشعار</label><input type="url" class="form-control" name="hospital_logo_url" id="edit_hospital_logo_url" placeholder="https://..."></div>
+                        <div class="col-md-6"><label class="form-label">رفع شعار جديد</label><input type="file" class="form-control" name="hospital_logo" id="edit_hospital_logo_file" accept="image/*" onchange="window.previewHospitalLogoFileInput && window.previewHospitalLogoFileInput(this)"></div>
+                        <div class="col-md-6"><label class="form-label">أو رابط الشعار</label><input type="url" class="form-control" name="hospital_logo_url" id="edit_hospital_logo_url" placeholder="https://..." oninput="window.previewHospitalLogoUrlInput && window.previewHospitalLogoUrlInput(false)" onchange="window.previewHospitalLogoUrlInput && window.previewHospitalLogoUrlInput(false)"></div>
                         <div class="col-12">
                             <label class="form-label">معاينة الشعار في القالب</label>
                             <div style="border:1px solid #ddd;border-radius:8px;padding:10px;background:#f9f9f9;">
@@ -7298,7 +7308,7 @@ if (!in_array($uiDataViewMode, ['table','compact','cards','zebra','glass','minim
             </div>
             <div class="modal-footer">
                 <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">إلغاء</button>
-                <button type="button" class="btn btn-success-custom" id="saveEditHospital" onclick="window.saveEditHospitalDirect && window.saveEditHospitalDirect()">حفظ</button>
+                <button type="button" class="btn btn-success-custom" id="saveEditHospital">حفظ</button>
             </div>
         </div>
     </div>
@@ -7590,6 +7600,7 @@ if (!in_array($uiDataViewMode, ['table','compact','cards','zebra','glass','minim
                 <div class="row g-3">
                     <div class="col-md-6">
                         <label class="form-label fw-bold">المستشفى</label>
+                        <input type="text" class="form-control form-control-sm mb-2" id="acct_leave_hospital_search" placeholder="بحث سريع باسم المستشفى...">
                         <select class="form-select" id="acct_leave_hospital_id" required>
                             <option value="">-- اختر مستشفى --</option>
                             <?php if (isset($hospitals)) foreach ($hospitals as $h): ?>
@@ -8097,7 +8108,9 @@ function refreshSelectQuickSearchData(selectId) {
     if (!select) return;
     const options = Array.from(select.options).map(opt => ({
         value: opt.value,
-        text: opt.textContent
+        text: opt.textContent,
+        dataset: { ...opt.dataset },
+        disabled: opt.disabled
     }));
     select.dataset.fullOptions = JSON.stringify(options);
 }
@@ -8121,6 +8134,8 @@ function setupSelectQuickSearch(searchInputId, selectId) {
             const optionEl = document.createElement('option');
             optionEl.value = opt.value;
             optionEl.textContent = opt.text;
+            Object.entries(opt.dataset || {}).forEach(([key, value]) => { optionEl.dataset[key] = value; });
+            optionEl.disabled = !!opt.disabled;
             if (opt.value === selectedValue) optionEl.selected = true;
             select.appendChild(optionEl);
         });
@@ -9018,6 +9033,7 @@ document.addEventListener('DOMContentLoaded', () => {
     setupSelectQuickSearch('dup_doctor_search', 'dup_doctor_select');
     setupSelectQuickSearch('doctor_id_edit_search', 'doctor_id_edit');
     setupSelectQuickSearch('hospital_id_search', 'hospital_id');
+    setupSelectQuickSearch('acct_leave_hospital_search', 'acct_leave_hospital_id');
     // أضف هذا السطر لربط حقل البحث الجديد بالقائمة
 setupSelectQuickSearch('acctNewLinkPatientSearch', 'acctNewLinkPatient');
     // أضف هذا السطر لربط حقل البحث الجديد بقائمة المستشفيات في نموذج الدفعة
@@ -10521,6 +10537,12 @@ setupSelectQuickSearch('batch_hospital_search', 'batch_hospital_id');
                 }
                 document.getElementById('acctLeaveUserId').value = createLeaveBtn.dataset.id;
                 document.getElementById('acctLeaveInfo').textContent = `${createLeaveBtn.dataset.name} — الأيام المتبقية: ${remaining}`;
+                const acctHospitalSearch = document.getElementById('acct_leave_hospital_search');
+                if (acctHospitalSearch) {
+                    acctHospitalSearch.value = '';
+                    acctHospitalSearch.dispatchEvent(new Event('input'));
+                }
+                refreshSelectQuickSearchData('acct_leave_hospital_id');
                 document.getElementById('acct_leave_hospital_id').value = '';
                 document.getElementById('acct_leave_doctor_id').innerHTML = '<option value="">-- اختر المستشفى أولاً --</option>';
                 document.getElementById('acct_leave_doctor_id').disabled = true;
@@ -11751,13 +11773,13 @@ setupSelectQuickSearch('batch_hospital_search', 'batch_hospital_id');
             const curVal = sel.value;
             const isLeaveForm = sel.id === 'hospital_id';
             const isBatch = sel.id === 'batch_hospital_id';
-            const isRequiredLeaveHospital = ['hospital_id', 'dup_hospital_id', 'hospital_id_edit', 'dup_hospital_select'].includes(sel.id);
+            const isRequiredLeaveHospital = ['hospital_id', 'dup_hospital_id', 'hospital_id_edit', 'dup_hospital_select', 'acct_leave_hospital_id'].includes(sel.id);
             sel.innerHTML = isRequiredLeaveHospital ? '<option value="">-- اختر مستشفى --</option>' : (isBatch ? '<option value="">اختر مستشفى</option>' : '<option value="">المستشفى (اختياري)</option>');
             (currentTableData.hospitals || []).forEach(h => {
                 const opt = document.createElement('option');
                 opt.value = h.id;
                 opt.textContent = h.name_ar || '';
-                if (isLeaveForm || sel.id === 'dup_hospital_id' || sel.id === 'hospital_id_edit') opt.dataset.prefix = h.service_prefix || 'GSL';
+                if (isLeaveForm || sel.id === 'dup_hospital_id' || sel.id === 'hospital_id_edit' || sel.id === 'acct_leave_hospital_id') opt.dataset.prefix = h.service_prefix || 'GSL';
                 if (h.id == curVal) opt.selected = true;
                 sel.appendChild(opt);
             });
@@ -11799,36 +11821,157 @@ setupSelectQuickSearch('batch_hospital_search', 'batch_hospital_id');
     const logoSlider = document.getElementById('logoScaleSlider');
     const logoScaleLabel = document.getElementById('logoScaleValue');
 
+    function setLogoControlState(scale = 1, offsetX = 0, offsetY = 0) {
+        logoScale = Number.isFinite(parseFloat(scale)) ? parseFloat(scale) : 1;
+        logoOffX = Number.isFinite(parseFloat(offsetX)) ? parseFloat(offsetX) : 0;
+        logoOffY = Number.isFinite(parseFloat(offsetY)) ? parseFloat(offsetY) : 0;
+        logoScale = Math.max(0.2, Math.min(3, logoScale));
+        logoOffX = Math.max(-500, Math.min(500, logoOffX));
+        logoOffY = Math.max(-500, Math.min(500, logoOffY));
+    }
+
     function updateLogoTransform() {
-        if (logoImg) logoImg.style.transform = `translate(${logoOffX}px, ${logoOffY}px) scale(${logoScale})`;
-        document.getElementById('edit_logo_scale').value = logoScale;
-        document.getElementById('edit_logo_offset_x').value = logoOffX;
-        document.getElementById('edit_logo_offset_y').value = logoOffY;
+        setLogoControlState(logoScale, logoOffX, logoOffY);
+        if (logoImg) {
+            logoImg.style.transform = `translate(${logoOffX}px, ${logoOffY}px) scale(${logoScale})`;
+            logoImg.style.transformOrigin = 'center center';
+            logoImg.style.willChange = 'transform';
+            logoImg.style.pointerEvents = 'none';
+            logoImg.style.userSelect = 'none';
+        }
+        const scaleInput = document.getElementById('edit_logo_scale');
+        const offsetXInput = document.getElementById('edit_logo_offset_x');
+        const offsetYInput = document.getElementById('edit_logo_offset_y');
+        if (scaleInput) scaleInput.value = logoScale.toFixed(2);
+        if (offsetXInput) offsetXInput.value = logoOffX.toFixed(1);
+        if (offsetYInput) offsetYInput.value = logoOffY.toFixed(1);
+        if (logoSlider) logoSlider.value = logoScale;
         if (logoScaleLabel) logoScaleLabel.textContent = Math.round(logoScale * 100) + '%';
     }
 
+    function beginLogoDrag(clientX, clientY, pointerId = null) {
+        if (!logoBox) return;
+        logoDragging = true;
+        logoDragStart = { x: clientX - logoOffX, y: clientY - logoOffY };
+        logoBox.classList.add('dragging');
+        if (pointerId !== null && logoBox.setPointerCapture) {
+            try { logoBox.setPointerCapture(pointerId); } catch (_) {}
+        }
+    }
+
+    function moveLogoDrag(clientX, clientY) {
+        if (!logoDragging) return;
+        logoOffX = clientX - logoDragStart.x;
+        logoOffY = clientY - logoDragStart.y;
+        updateLogoTransform();
+    }
+
+    function endLogoDrag(pointerId = null) {
+        logoDragging = false;
+        logoBox?.classList.remove('dragging');
+        if (pointerId !== null && logoBox?.releasePointerCapture) {
+            try { logoBox.releasePointerCapture(pointerId); } catch (_) {}
+        }
+    }
+
     logoSlider?.addEventListener('input', function() { logoScale = parseFloat(this.value); updateLogoTransform(); });
-    document.getElementById('logoResetBtn')?.addEventListener('click', () => { logoScale = 1; logoOffX = 0; logoOffY = 0; logoSlider.value = 1; updateLogoTransform(); });
+    document.getElementById('logoResetBtn')?.addEventListener('click', () => { setLogoControlState(1, 0, 0); updateLogoTransform(); });
 
-    logoBox?.addEventListener('mousedown', (e) => { logoDragging = true; logoDragStart = {x: e.clientX - logoOffX, y: e.clientY - logoOffY}; e.preventDefault(); });
-    document.addEventListener('mousemove', (e) => { if (!logoDragging) return; logoOffX = e.clientX - logoDragStart.x; logoOffY = e.clientY - logoDragStart.y; updateLogoTransform(); });
-    document.addEventListener('mouseup', () => { logoDragging = false; });
-    // Touch support
-    logoBox?.addEventListener('touchstart', (e) => { logoDragging = true; const t = e.touches[0]; logoDragStart = {x: t.clientX - logoOffX, y: t.clientY - logoOffY}; e.preventDefault(); });
-    document.addEventListener('touchmove', (e) => { if (!logoDragging) return; const t = e.touches[0]; logoOffX = t.clientX - logoDragStart.x; logoOffY = t.clientY - logoDragStart.y; updateLogoTransform(); });
-    document.addEventListener('touchend', () => { logoDragging = false; });
-
-    function showLogoPreview(src) { if (logoImg && src) { logoImg.src = src; } }
-
-    document.getElementById('edit_hospital_logo_file')?.addEventListener('change', function() {
-        const file = this.files[0];
-        if (file) { const reader = new FileReader(); reader.onload = (e) => showLogoPreview(e.target.result); reader.readAsDataURL(file); }
+    logoBox?.addEventListener('pointerdown', (e) => {
+        beginLogoDrag(e.clientX, e.clientY, e.pointerId);
+        e.preventDefault();
     });
+    logoBox?.addEventListener('pointermove', (e) => moveLogoDrag(e.clientX, e.clientY));
+    logoBox?.addEventListener('pointerup', (e) => endLogoDrag(e.pointerId));
+    logoBox?.addEventListener('pointercancel', (e) => endLogoDrag(e.pointerId));
+    logoBox?.addEventListener('mousedown', (e) => { beginLogoDrag(e.clientX, e.clientY); e.preventDefault(); });
+    document.addEventListener('mousemove', (e) => moveLogoDrag(e.clientX, e.clientY));
+    document.addEventListener('mouseup', () => endLogoDrag());
+    logoBox?.addEventListener('touchstart', (e) => { const t = e.touches[0]; if (t) beginLogoDrag(t.clientX, t.clientY); e.preventDefault(); }, { passive: false });
+    document.addEventListener('touchmove', (e) => { const t = e.touches[0]; if (t) moveLogoDrag(t.clientX, t.clientY); }, { passive: false });
+    document.addEventListener('touchend', () => endLogoDrag());
 
-    document.getElementById('edit_hospital_logo_url')?.addEventListener('input', function() {
-        const url = this.value.trim();
-        if (url) { const testImg = new Image(); testImg.onload = () => showLogoPreview(url); testImg.onerror = () => {}; testImg.src = url; }
-    });
+    let lastLogoPreviewUrl = '';
+    function showLogoPreview(src, { resetControls = false } = {}) {
+        if (!logoImg || !src) return;
+        if (resetControls) setLogoControlState(1, 0, 0);
+        if (!resetControls && /^https?:\/\//i.test(String(src))) lastLogoPreviewUrl = String(src);
+        logoImg.style.display = 'block';
+        logoImg.removeAttribute('hidden');
+        logoImg.style.opacity = '0.75';
+        logoImg.onerror = () => { logoImg.style.opacity = '0.35'; };
+        logoImg.onload = () => { logoImg.style.opacity = '1'; updateLogoTransform(); };
+        logoImg.src = src;
+        updateLogoTransform();
+    }
+    window.showHospitalLogoPreview = showLogoPreview;
+    window.syncHospitalLogoTransform = function(scale = logoScale, offsetX = logoOffX, offsetY = logoOffY) {
+        setLogoControlState(scale, offsetX, offsetY);
+        updateLogoTransform();
+    };
+    window.syncHospitalLogoHiddenFields = updateLogoTransform;
+
+    function previewSelectedLogoFile(file) {
+        if (!file) return;
+        const looksLikeImage = /^image\//i.test(file.type || '') || /\.(png|jpe?g|webp|gif|svg)$/i.test(file.name || '');
+        if (!looksLikeImage) {
+            showToast('يرجى اختيار ملف صورة صالح.', 'warning');
+            return;
+        }
+        const reader = new FileReader();
+        reader.onload = (e) => {
+            lastLogoPreviewUrl = '';
+            showLogoPreview(e.target.result, { resetControls: true });
+        };
+        reader.onerror = () => showToast('تعذّر قراءة ملف الشعار. جرّب صورة أخرى.', 'danger');
+        reader.readAsDataURL(file);
+    }
+
+    const logoUrlInput = document.getElementById('edit_hospital_logo_url');
+    let logoUrlPreviewRequestId = 0;
+    async function requestServerLogoPreview(url) {
+        if (!/^https?:\/\//i.test(url)) return;
+        const requestId = ++logoUrlPreviewRequestId;
+        try {
+            const fd = new FormData();
+            fd.append('action', 'preview_hospital_logo_url');
+            fd.append('csrf_token', CSRF_TOKEN);
+            fd.append('hospital_logo_url', url);
+            const res = await fetch(REQUEST_URL, { method: 'POST', body: fd, headers: { 'X-Requested-With': 'XMLHttpRequest' } });
+            const result = await res.json();
+            const currentUrl = (document.getElementById('edit_hospital_logo_url')?.value || '').trim();
+            if (requestId !== logoUrlPreviewRequestId || currentUrl !== url || !result.success || !result.logo_data) return;
+            // نحافظ على مكان/حجم الشعار الذي عدّله المستخدم، ونبدّل المصدر فقط إلى data-uri موثوق للمعاينة.
+            showLogoPreview(result.logo_data, { resetControls: false });
+        } catch (_) {}
+    }
+    const requestServerLogoPreviewDebounced = debounce(requestServerLogoPreview, 450);
+    function previewTypedLogoUrl(forceReset = false) {
+        const url = (document.getElementById('edit_hospital_logo_url')?.value || '').trim();
+        if (!url) return;
+        const shouldResetControls = forceReset || url !== lastLogoPreviewUrl;
+        lastLogoPreviewUrl = url;
+        showLogoPreview(url, { resetControls: shouldResetControls });
+        requestServerLogoPreviewDebounced(url);
+    }
+    const previewLogoUrl = debounce(() => previewTypedLogoUrl(false), 80);
+    window.previewHospitalLogoFileInput = (input) => previewSelectedLogoFile(input?.files?.[0]);
+    window.previewHospitalLogoUrlInput = (forceReset = false) => previewTypedLogoUrl(Boolean(forceReset));
+
+    // نستخدم الربط المباشر + التفويض على document حتى تعمل المعاينة حتى لو أعيد رسم المودال أو تغيّرت عناصره.
+    logoUrlInput?.addEventListener('input', previewLogoUrl);
+    logoUrlInput?.addEventListener('paste', () => setTimeout(() => previewTypedLogoUrl(true), 0));
+    logoUrlInput?.addEventListener('change', () => previewTypedLogoUrl(false));
+    document.addEventListener('change', (e) => {
+        if (e.target?.id === 'edit_hospital_logo_file') previewSelectedLogoFile(e.target.files?.[0]);
+        if (e.target?.id === 'edit_hospital_logo_url') previewTypedLogoUrl(false);
+    }, true);
+    document.addEventListener('input', (e) => {
+        if (e.target?.id === 'edit_hospital_logo_url') previewLogoUrl();
+    }, true);
+    document.addEventListener('paste', (e) => {
+        if (e.target?.id === 'edit_hospital_logo_url') setTimeout(() => previewTypedLogoUrl(true), 0);
+    }, true);
 
 // ====== إجراءات المستشفيات المباشرة: مستقلة عن data-attributes حتى لا تتأثر بالترميز أو إعادة رسم الجدول ======
     window.openEditHospital = function(encodedHospitalId) {
@@ -11860,8 +12003,10 @@ setupSelectQuickSearch('batch_hospital_search', 'batch_hospital_id');
         if (typeof updateLogoTransform === 'function') updateLogoTransform();
 
         if (h.has_logo_data === 'has_logo') {
+            lastLogoPreviewUrl = '';
             showLogoPreview(REQUEST_URL + '?action=get_hospital_logo&hospital_id=' + encodeURIComponent(h.id) + '&csrf_token=' + encodeURIComponent(CSRF_TOKEN));
         } else if (h.logo_url) {
+            lastLogoPreviewUrl = h.logo_url;
             showLogoPreview(h.logo_url);
         } else {
             const previewImg = document.getElementById('edit_hospital_logo_preview');
@@ -11933,10 +12078,12 @@ setupSelectQuickSearch('batch_hospital_search', 'batch_hospital_id');
             
             const logoData = editBtn.dataset.logo || '';
             if (logoData === 'has_logo') {
+                lastLogoPreviewUrl = '';
                 if (typeof showLogoPreview === 'function') {
                     showLogoPreview(REQUEST_URL + '?action=get_hospital_logo&hospital_id=' + hid + '&csrf_token=' + encodeURIComponent(CSRF_TOKEN));
                 }
             } else if (logoData && logoData.startsWith('http')) {
+                lastLogoPreviewUrl = logoData;
                 if (typeof showLogoPreview === 'function') showLogoPreview(logoData);
                 if (elLogoUrl) elLogoUrl.value = logoData;
             } else {
@@ -12003,6 +12150,7 @@ setupSelectQuickSearch('batch_hospital_search', 'batch_hospital_id');
         editHospitalSubmitting = true;
         showLoading();
         try {
+            if (typeof window.syncHospitalLogoHiddenFields === 'function') window.syncHospitalLogoHiddenFields();
             const formData = new FormData(formEl);
             formData.append('action', 'edit_hospital');
             formData.append('csrf_token', CSRF_TOKEN);
@@ -12034,12 +12182,12 @@ setupSelectQuickSearch('batch_hospital_search', 'batch_hospital_id');
 
     document.getElementById('editHospitalForm')?.addEventListener('submit', async (e) => {
         e.preventDefault();
-        e.stopPropagation();
+        e.stopImmediatePropagation();
         await submitEditHospitalForm(e.currentTarget);
     });
     document.getElementById('saveEditHospital')?.addEventListener('click', async (e) => {
         e.preventDefault();
-        e.stopPropagation();
+        e.stopImmediatePropagation();
         await submitEditHospitalForm(document.getElementById('editHospitalForm'));
     });
     // ====== ربط المستشفى بالأطباء + البادئة ======
@@ -12115,7 +12263,7 @@ setupSelectQuickSearch('batch_hospital_search', 'batch_hospital_id');
     // مدير مستقل بالكامل لتبويب المستشفيات. لا يعتمد على سكربتات الجدول القديمة.
     const HOSPITAL_SELECT_IDS = [
         'hospital_id', 'batch_hospital_id', 'edit_doctor_hospital_id', 'quick_doctor_hospital_id',
-        'dup_hospital_id', 'hospital_id_edit', 'dup_hospital_select', 'batchPayHospitalSelect'
+        'dup_hospital_id', 'hospital_id_edit', 'dup_hospital_select', 'batchPayHospitalSelect', 'acct_leave_hospital_id'
     ];
     let hospitalRows = [];
     let editModalInstance = null;
@@ -12253,9 +12401,16 @@ setupSelectQuickSearch('batch_hospital_search', 'batch_hospital_id');
         const preview = document.getElementById('edit_hospital_logo_preview');
         if (preview) {
             preview.style.transform = `translate(${parseFloat(h.logo_offset_x || 0)}px, ${parseFloat(h.logo_offset_y || 0)}px) scale(${parseFloat(h.logo_scale || 1)})`;
-            if (h.has_logo_data === 'has_logo') preview.src = `${window.location.pathname}?action=get_hospital_logo&hospital_id=${encodeURIComponent(h.id)}&csrf_token=${encodeURIComponent(CSRF_TOKEN)}`;
-            else if (h.logo_url) preview.src = h.logo_url;
-            else preview.removeAttribute('src');
+            const src = h.has_logo_data === 'has_logo'
+                ? `${window.location.pathname}?action=get_hospital_logo&hospital_id=${encodeURIComponent(h.id)}&csrf_token=${encodeURIComponent(CSRF_TOKEN)}`
+                : (h.logo_url || '');
+            if (src) {
+                if (typeof window.showHospitalLogoPreview === 'function') window.showHospitalLogoPreview(src);
+                else preview.src = src;
+            } else {
+                preview.removeAttribute('src');
+            }
+            if (typeof window.syncHospitalLogoTransform === 'function') window.syncHospitalLogoTransform(h.logo_scale || 1, h.logo_offset_x || 0, h.logo_offset_y || 0);
         }
         const slider = document.getElementById('logoScaleSlider');
         if (slider) slider.value = h.logo_scale || 1;
@@ -12270,6 +12425,7 @@ setupSelectQuickSearch('batch_hospital_search', 'batch_hospital_id');
         editSubmitting = true;
         loading(true);
         try {
+            if (typeof window.syncHospitalLogoHiddenFields === 'function') window.syncHospitalLogoHiddenFields();
             const result = await postHospital('edit_hospital', {}, form);
             if (!result.success) throw new Error(result.message || 'تعذّر تعديل المستشفى');
             toast(result.message || 'تم تعديل المستشفى بنجاح', 'success');
@@ -12371,6 +12527,234 @@ setupSelectQuickSearch('batch_hospital_search', 'batch_hospital_id');
         loadHospitals().catch(e => toast(e.message, 'danger'));
     }
     ready(initHospitalManager);
+})();
+
+</script>
+
+<script>
+// محرر شعار المستشفى النهائي: يعمل بعد كل السكربتات القديمة ويعيد ربط المعاينة والتحريك بشكل مستقل.
+(function () {
+    const STATE = window.__hospitalLogoEditorState || {
+        scale: 1,
+        x: 0,
+        y: 0,
+        drag: null,
+        previewToken: 0,
+        objectUrl: '',
+        bound: false
+    };
+    window.__hospitalLogoEditorState = STATE;
+
+    function $(id) { return document.getElementById(id); }
+    function clamp(value, min, max, fallback) {
+        const n = parseFloat(value);
+        if (!Number.isFinite(n)) return fallback;
+        return Math.max(min, Math.min(max, n));
+    }
+    function toastLogo(message, type = 'warning') {
+        if (typeof showToast === 'function') showToast(message, type);
+        else console.warn(message);
+    }
+    function currentEls() {
+        return {
+            box: $('logoPreviewBox'),
+            img: $('edit_hospital_logo_preview'),
+            slider: $('logoScaleSlider'),
+            label: $('logoScaleValue'),
+            scaleInput: $('edit_logo_scale'),
+            xInput: $('edit_logo_offset_x'),
+            yInput: $('edit_logo_offset_y'),
+            fileInput: $('edit_hospital_logo_file'),
+            urlInput: $('edit_hospital_logo_url')
+        };
+    }
+    function setState(scale = STATE.scale, x = STATE.x, y = STATE.y) {
+        STATE.scale = clamp(scale, 0.3, 3, 1);
+        STATE.x = clamp(x, -600, 600, 0);
+        STATE.y = clamp(y, -600, 600, 0);
+    }
+    function syncHospitalLogoUi() {
+        const el = currentEls();
+        setState();
+        if (el.img) {
+            el.img.style.display = 'block';
+            el.img.style.visibility = 'visible';
+            el.img.style.position = 'absolute';
+            el.img.style.inset = '0';
+            el.img.style.width = '100%';
+            el.img.style.height = '100%';
+            el.img.style.maxWidth = 'none';
+            el.img.style.maxHeight = 'none';
+            el.img.style.objectFit = 'contain';
+            el.img.style.transformOrigin = 'center center';
+            el.img.style.transform = `translate(${STATE.x}px, ${STATE.y}px) scale(${STATE.scale})`;
+            el.img.style.pointerEvents = 'none';
+            el.img.style.userSelect = 'none';
+            el.img.draggable = false;
+        }
+        if (el.box) {
+            el.box.style.touchAction = 'none';
+            el.box.style.cursor = 'move';
+            el.box.style.overflow = 'hidden';
+            el.box.style.position = 'relative';
+        }
+        if (el.scaleInput) el.scaleInput.value = STATE.scale.toFixed(2);
+        if (el.xInput) el.xInput.value = STATE.x.toFixed(1);
+        if (el.yInput) el.yInput.value = STATE.y.toFixed(1);
+        if (el.slider) el.slider.value = String(STATE.scale);
+        if (el.label) el.label.textContent = Math.round(STATE.scale * 100) + '%';
+    }
+    function revokeOldObjectUrl() {
+        if (STATE.objectUrl) {
+            try { URL.revokeObjectURL(STATE.objectUrl); } catch (_) {}
+            STATE.objectUrl = '';
+        }
+    }
+    function showHospitalLogoPreviewHard(src, options = {}) {
+        const el = currentEls();
+        if (!el.img || !src) return;
+        if (options.resetControls) setState(1, 0, 0);
+        syncHospitalLogoUi();
+        el.img.onload = function () {
+            el.img.style.opacity = '1';
+            syncHospitalLogoUi();
+        };
+        el.img.onerror = function () {
+            // نبقي صندوق التحكم ظاهراً حتى يستطيع المستخدم تغيير الرابط أو اختيار ملف آخر.
+            el.img.style.opacity = '0.35';
+            syncHospitalLogoUi();
+        };
+        el.img.style.opacity = '0.85';
+        el.img.removeAttribute('hidden');
+        el.img.setAttribute('alt', 'معاينة شعار المستشفى');
+        el.img.src = src;
+        syncHospitalLogoUi();
+    }
+    function previewHospitalLogoFileHard(inputOrFile) {
+        const file = inputOrFile instanceof File ? inputOrFile : inputOrFile?.files?.[0];
+        if (!file) return;
+        const isImage = /^image\//i.test(file.type || '') || /\.(png|jpe?g|gif|webp|svg|bmp|ico)$/i.test(file.name || '');
+        if (!isImage) {
+            toastLogo('يرجى اختيار ملف صورة صالح للشعار.', 'warning');
+            return;
+        }
+        revokeOldObjectUrl();
+        const el = currentEls();
+        if (el.urlInput) el.urlInput.value = '';
+        try {
+            STATE.objectUrl = URL.createObjectURL(file);
+            showHospitalLogoPreviewHard(STATE.objectUrl, { resetControls: true });
+        } catch (_) {}
+        const reader = new FileReader();
+        reader.onload = function (event) {
+            if (event.target?.result) showHospitalLogoPreviewHard(event.target.result, { resetControls: false });
+        };
+        reader.onerror = function () { toastLogo('تعذّر قراءة ملف الشعار. جرّب صورة أخرى.', 'danger'); };
+        reader.readAsDataURL(file);
+    }
+    function normalizeLogoUrl(raw) {
+        const value = String(raw || '').trim();
+        if (!value) return '';
+        if (/^https?:\/\//i.test(value) || /^data:image\//i.test(value)) return value;
+        if (/^[\w.-]+\.[a-z]{2,}(\/.*)?$/i.test(value)) return 'https://' + value;
+        return value;
+    }
+    async function fetchServerLogoPreview(url, token) {
+        if (!/^https?:\/\//i.test(url)) return;
+        try {
+            const fd = new FormData();
+            fd.set('action', 'preview_hospital_logo_url');
+            fd.set('csrf_token', typeof CSRF_TOKEN !== 'undefined' ? CSRF_TOKEN : '');
+            fd.set('hospital_logo_url', url);
+            const res = await fetch(typeof REQUEST_URL !== 'undefined' ? REQUEST_URL : window.location.pathname, {
+                method: 'POST',
+                body: fd,
+                headers: { 'X-Requested-With': 'XMLHttpRequest' }
+            });
+            const result = await res.json();
+            const current = normalizeLogoUrl(currentEls().urlInput?.value || '');
+            if (token === STATE.previewToken && current === url && result?.success && result.logo_data) {
+                showHospitalLogoPreviewHard(result.logo_data, { resetControls: false });
+            }
+        } catch (err) {
+            console.warn('Hospital logo server preview failed; direct URL preview remains active.', err);
+        }
+    }
+    let urlTimer = null;
+    function previewHospitalLogoUrlHard(forceReset = false) {
+        const el = currentEls();
+        const url = normalizeLogoUrl(el.urlInput?.value || '');
+        if (!url) return;
+        revokeOldObjectUrl();
+        if (el.fileInput) el.fileInput.value = '';
+        if (el.urlInput && /^https?:\/\//i.test(url) && el.urlInput.value.trim() !== url) el.urlInput.value = url;
+        const token = ++STATE.previewToken;
+        showHospitalLogoPreviewHard(url, { resetControls: forceReset });
+        clearTimeout(urlTimer);
+        urlTimer = setTimeout(() => fetchServerLogoPreview(url, token), 250);
+    }
+    function bindHospitalLogoEditor() {
+        const el = currentEls();
+        if (!el.img || !el.box) return;
+        if (!STATE.bound) {
+            document.addEventListener('change', function (event) {
+                if (event.target?.id === 'edit_hospital_logo_file') previewHospitalLogoFileHard(event.target);
+                if (event.target?.id === 'edit_hospital_logo_url') previewHospitalLogoUrlHard(true);
+            }, true);
+            document.addEventListener('input', function (event) {
+                if (event.target?.id === 'edit_hospital_logo_url') previewHospitalLogoUrlHard(false);
+                if (event.target?.id === 'logoScaleSlider') {
+                    setState(event.target.value, STATE.x, STATE.y);
+                    syncHospitalLogoUi();
+                }
+            }, true);
+            document.addEventListener('paste', function (event) {
+                if (event.target?.id === 'edit_hospital_logo_url') setTimeout(() => previewHospitalLogoUrlHard(true), 0);
+            }, true);
+            document.addEventListener('click', function (event) {
+                if (event.target?.closest('#logoResetBtn')) {
+                    setState(1, 0, 0);
+                    syncHospitalLogoUi();
+                }
+            }, true);
+            document.addEventListener('submit', function (event) {
+                if (event.target?.id === 'editHospitalForm') syncHospitalLogoUi();
+            }, true);
+            document.addEventListener('pointermove', function (event) {
+                if (!STATE.drag) return;
+                setState(STATE.scale, event.clientX - STATE.drag.startX, event.clientY - STATE.drag.startY);
+                syncHospitalLogoUi();
+                event.preventDefault();
+            }, true);
+            document.addEventListener('pointerup', function () { STATE.drag = null; }, true);
+            document.addEventListener('pointercancel', function () { STATE.drag = null; }, true);
+            STATE.bound = true;
+        }
+        if (el.box.dataset.logoEditorBound !== '1') {
+            el.box.dataset.logoEditorBound = '1';
+            el.box.addEventListener('pointerdown', function (event) {
+                STATE.drag = { startX: event.clientX - STATE.x, startY: event.clientY - STATE.y };
+                try { el.box.setPointerCapture(event.pointerId); } catch (_) {}
+                event.preventDefault();
+            }, true);
+        }
+        syncHospitalLogoUi();
+    }
+
+    window.showHospitalLogoPreview = showHospitalLogoPreviewHard;
+    window.previewHospitalLogoFileInput = previewHospitalLogoFileHard;
+    window.previewHospitalLogoUrlInput = previewHospitalLogoUrlHard;
+    window.syncHospitalLogoHiddenFields = syncHospitalLogoUi;
+    window.syncHospitalLogoTransform = function (scale = 1, x = 0, y = 0) {
+        setState(scale, x, y);
+        syncHospitalLogoUi();
+    };
+
+    if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', bindHospitalLogoEditor);
+    else bindHospitalLogoEditor();
+    document.addEventListener('shown.bs.modal', function (event) {
+        if (event.target?.id === 'editHospitalModal') bindHospitalLogoEditor();
+    });
 })();
 </script>
 
