@@ -1868,6 +1868,14 @@ if (isset($_POST['action']) && $_POST['action'] !== 'login' && $_POST['action'] 
             break;
 
         // ======================== إدارة المستشفيات ========================
+        case 'preview_hospital_logo_url':
+            $logo_url = trim($_POST['hospital_logo_url'] ?? '');
+            if ($logo_url === '') { echo json_encode(['success'=>false,'message'=>'يرجى إدخال رابط الشعار.']); exit; }
+            $logo_data = downloadLogoFromUrl($logo_url);
+            if (!$logo_data) { echo json_encode(['success'=>false,'message'=>'تعذّرت معاينة الرابط من الخادم، تأكد أن الرابط مباشر لصورة.']); exit; }
+            echo json_encode(['success'=>true,'logo_data'=>$logo_data]);
+            break;
+
         case 'add_hospital':
             $name_ar = trim($_POST['hospital_name_ar'] ?? '');
             $name_en = trim($_POST['hospital_name_en'] ?? '');
@@ -7278,8 +7286,8 @@ if (!in_array($uiDataViewMode, ['table','compact','cards','zebra','glass','minim
                         <div class="col-md-4"><label class="form-label">رقم الترخيص</label><input type="text" class="form-control" name="hospital_license" id="edit_hospital_license"></div>
                         <div class="col-md-4"><label class="form-label">البادئة</label><select class="form-select" name="hospital_prefix" id="edit_hospital_prefix"><option value="GSL">GSL (حكومي)</option><option value="PSL">PSL (خاص)</option></select></div>
                         <div class="col-md-4"></div>
-                        <div class="col-md-6"><label class="form-label">رفع شعار جديد</label><input type="file" class="form-control" name="hospital_logo" id="edit_hospital_logo_file" accept="image/*"></div>
-                        <div class="col-md-6"><label class="form-label">أو رابط الشعار</label><input type="url" class="form-control" name="hospital_logo_url" id="edit_hospital_logo_url" placeholder="https://..."></div>
+                        <div class="col-md-6"><label class="form-label">رفع شعار جديد</label><input type="file" class="form-control" name="hospital_logo" id="edit_hospital_logo_file" accept="image/*" onchange="window.previewHospitalLogoFileInput && window.previewHospitalLogoFileInput(this)"></div>
+                        <div class="col-md-6"><label class="form-label">أو رابط الشعار</label><input type="url" class="form-control" name="hospital_logo_url" id="edit_hospital_logo_url" placeholder="https://..." oninput="window.previewHospitalLogoUrlInput && window.previewHospitalLogoUrlInput(false)" onchange="window.previewHospitalLogoUrlInput && window.previewHospitalLogoUrlInput(false)"></div>
                         <div class="col-12">
                             <label class="form-label">معاينة الشعار في القالب</label>
                             <div style="border:1px solid #ddd;border-radius:8px;padding:10px;background:#f9f9f9;">
@@ -11903,28 +11911,67 @@ setupSelectQuickSearch('batch_hospital_search', 'batch_hospital_id');
     };
     window.syncHospitalLogoHiddenFields = updateLogoTransform;
 
-    document.getElementById('edit_hospital_logo_file')?.addEventListener('change', function() {
-        const file = this.files[0];
+    function previewSelectedLogoFile(file) {
         if (!file) return;
+        const looksLikeImage = /^image\//i.test(file.type || '') || /\.(png|jpe?g|webp|gif|svg)$/i.test(file.name || '');
+        if (!looksLikeImage) {
+            showToast('يرجى اختيار ملف صورة صالح.', 'warning');
+            return;
+        }
         const reader = new FileReader();
         reader.onload = (e) => {
             lastLogoPreviewUrl = '';
             showLogoPreview(e.target.result, { resetControls: true });
         };
+        reader.onerror = () => showToast('تعذّر قراءة ملف الشعار. جرّب صورة أخرى.', 'danger');
         reader.readAsDataURL(file);
-    });
+    }
 
     const logoUrlInput = document.getElementById('edit_hospital_logo_url');
-    const previewLogoUrl = debounce(function() {
-        const url = logoUrlInput?.value.trim() || '';
+    let logoUrlPreviewRequestId = 0;
+    async function requestServerLogoPreview(url) {
+        if (!/^https?:\/\//i.test(url)) return;
+        const requestId = ++logoUrlPreviewRequestId;
+        try {
+            const fd = new FormData();
+            fd.append('action', 'preview_hospital_logo_url');
+            fd.append('csrf_token', CSRF_TOKEN);
+            fd.append('hospital_logo_url', url);
+            const res = await fetch(REQUEST_URL, { method: 'POST', body: fd, headers: { 'X-Requested-With': 'XMLHttpRequest' } });
+            const result = await res.json();
+            const currentUrl = (document.getElementById('edit_hospital_logo_url')?.value || '').trim();
+            if (requestId !== logoUrlPreviewRequestId || currentUrl !== url || !result.success || !result.logo_data) return;
+            // نحافظ على مكان/حجم الشعار الذي عدّله المستخدم، ونبدّل المصدر فقط إلى data-uri موثوق للمعاينة.
+            showLogoPreview(result.logo_data, { resetControls: false });
+        } catch (_) {}
+    }
+    const requestServerLogoPreviewDebounced = debounce(requestServerLogoPreview, 450);
+    function previewTypedLogoUrl(forceReset = false) {
+        const url = (document.getElementById('edit_hospital_logo_url')?.value || '').trim();
         if (!url) return;
-        const shouldResetControls = url !== lastLogoPreviewUrl;
+        const shouldResetControls = forceReset || url !== lastLogoPreviewUrl;
         lastLogoPreviewUrl = url;
         showLogoPreview(url, { resetControls: shouldResetControls });
-    }, 120);
+        requestServerLogoPreviewDebounced(url);
+    }
+    const previewLogoUrl = debounce(() => previewTypedLogoUrl(false), 80);
+    window.previewHospitalLogoFileInput = (input) => previewSelectedLogoFile(input?.files?.[0]);
+    window.previewHospitalLogoUrlInput = (forceReset = false) => previewTypedLogoUrl(Boolean(forceReset));
+
+    // نستخدم الربط المباشر + التفويض على document حتى تعمل المعاينة حتى لو أعيد رسم المودال أو تغيّرت عناصره.
     logoUrlInput?.addEventListener('input', previewLogoUrl);
-    logoUrlInput?.addEventListener('paste', () => setTimeout(previewLogoUrl, 0));
-    logoUrlInput?.addEventListener('change', previewLogoUrl);
+    logoUrlInput?.addEventListener('paste', () => setTimeout(() => previewTypedLogoUrl(true), 0));
+    logoUrlInput?.addEventListener('change', () => previewTypedLogoUrl(false));
+    document.addEventListener('change', (e) => {
+        if (e.target?.id === 'edit_hospital_logo_file') previewSelectedLogoFile(e.target.files?.[0]);
+        if (e.target?.id === 'edit_hospital_logo_url') previewTypedLogoUrl(false);
+    }, true);
+    document.addEventListener('input', (e) => {
+        if (e.target?.id === 'edit_hospital_logo_url') previewLogoUrl();
+    }, true);
+    document.addEventListener('paste', (e) => {
+        if (e.target?.id === 'edit_hospital_logo_url') setTimeout(() => previewTypedLogoUrl(true), 0);
+    }, true);
 
 // ====== إجراءات المستشفيات المباشرة: مستقلة عن data-attributes حتى لا تتأثر بالترميز أو إعادة رسم الجدول ======
     window.openEditHospital = function(encodedHospitalId) {
