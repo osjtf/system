@@ -773,7 +773,7 @@ if (isPatientLoggedIn()) {
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Cairo:wght@300;400;500;600;700;800;900&family=Inter:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
-<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css" crossorigin="anonymous" referrerpolicy="no-referrer">
 <script>
 (function(){var t=localStorage.getItem('seha-theme')||'light';document.documentElement.setAttribute('data-theme',t)})();
 </script>
@@ -858,6 +858,46 @@ if (isPatientLoggedIn()) {
 /* ═══ Reset & Base ═══ */
 *, *::before, *::after { margin:0; padding:0; box-sizing:border-box; }
 html { scroll-behavior: smooth; -webkit-text-size-adjust: 100%; }
+.fas, .far, .fab, .fa-solid, .fa-regular, .fa-brands {
+  display: inline-flex; align-items: center; justify-content: center;
+  min-width: 1.1em; line-height: 1; font-style: normal; text-rendering: auto;
+  -webkit-font-smoothing: antialiased; -moz-osx-font-smoothing: grayscale;
+}
+html.fa-fallback .fas::before, html.fa-fallback .far::before, html.fa-fallback .fab::before,
+html.fa-fallback .fa-solid::before, html.fa-fallback .fa-regular::before, html.fa-fallback .fa-brands::before { content: attr(data-fallback); font-family: "Apple Color Emoji", "Segoe UI Emoji", "Noto Color Emoji", sans-serif; }
+html.fa-fallback .fa-chart-pie::before { content: "📊"; }
+html.fa-fallback .fa-chevron-down::before { content: "⌄"; }
+html.fa-fallback .fa-chevron-up::before { content: "⌃"; }
+html.fa-fallback .fa-eye::before { content: "👁"; }
+html.fa-fallback .fa-eye-slash::before { content: "🙈"; }
+html.fa-fallback .fa-calendar-check::before { content: "📅"; }
+html.fa-fallback .fa-file-medical::before { content: "📄"; }
+html.fa-fallback .fa-hourglass-half::before { content: "⏳"; }
+html.fa-fallback .fa-battery-quarter::before { content: "🔋"; }
+html.fa-fallback .fa-id-card::before { content: "🪪"; }
+html.fa-fallback .fa-info-circle::before { content: "ℹ️"; }
+html.fa-fallback .fa-plus-circle::before { content: "➕"; }
+html.fa-fallback .fa-paper-plane::before { content: "📨"; }
+html.fa-fallback .fa-list-alt::before { content: "📋"; }
+html.fa-fallback .fa-folder-open::before { content: "📂"; }
+html.fa-fallback .fa-download::before { content: "⬇️"; }
+html.fa-fallback .fa-heartbeat::before { content: "💓"; }
+html.fa-fallback .fa-moon::before { content: "🌙"; }
+html.fa-fallback .fa-sun::before { content: "☀️"; }
+html.fa-fallback .fa-bell::before { content: "🔔"; }
+html.fa-fallback .fa-bell-slash::before { content: "🔕"; }
+html.fa-fallback .fa-times::before { content: "×"; }
+html.fa-fallback .fa-sign-out-alt::before { content: "🚪"; }
+html.fa-fallback .fa-hospital-user::before { content: "🏥"; }
+html.fa-fallback .fa-user::before { content: "👤"; }
+html.fa-fallback .fa-lock::before { content: "🔒"; }
+html.fa-fallback .fa-sign-in-alt::before { content: "➡️"; }
+html.fa-fallback .fa-exclamation-circle::before { content: "⚠️"; }
+html.fa-fallback .fa-ban::before { content: "⛔"; }
+html.fa-fallback .fa-whatsapp::before { content: "☎️"; }
+html.fa-fallback .fa-check-circle::before { content: "✅"; }
+html.fa-fallback .fa-times-circle::before { content: "❌"; }
+html.fa-fallback .fa-exclamation-triangle::before { content: "⚠️"; }
 body {
   font-family: var(--font-ar);
   background: var(--bg-base);
@@ -1027,6 +1067,7 @@ body {
   transition: var(--transition-fast); position: relative;
 }
 .nav-btn:hover { background: var(--border-light); transform: scale(1.05); }
+.nav-btn i, .btn-logout-nav i, .btn-stats-toggle i, .card-header i, .btn-submit i, .btn-view-leave i, .btn-whatsapp i { flex: 0 0 auto; }
 .nav-btn .badge-dot {
   position: absolute; top: 6px; right: 6px; width: 10px; height: 10px;
   background: var(--danger); border-radius: 50%; border: 2px solid var(--bg-surface);
@@ -1047,6 +1088,7 @@ body {
 
 /* ═══ Stats Cards ═══ */
 .stats-toggle-wrap { text-align: center; margin-bottom: 28px; }
+.stats-toggle-hint { display:block; margin-top:10px; color:var(--text-muted); font-size:13px; font-weight:700; }
 .btn-stats-toggle {
   display: inline-flex; align-items: center; gap: 10px;
   padding: 14px 32px; border-radius: var(--radius-full);
@@ -1058,10 +1100,17 @@ body {
 .btn-stats-toggle:hover { border-color: var(--primary); transform: translateY(-2px); box-shadow: var(--shadow-lg); }
 .btn-stats-toggle.active { background: var(--primary-50); border-color: var(--primary); color: var(--primary); }
 .btn-stats-toggle i { transition: transform var(--transition-base); }
-.btn-stats-toggle.active i { transform: rotate(180deg); }
+.btn-stats-toggle .toggle-chevron { font-size: 13px; }
+.btn-stats-toggle.active .toggle-chevron { transform: none; }
 
-.stats-container { margin-bottom: 32px; overflow: hidden; transition: max-height 0.5s ease, opacity 0.3s ease; }
-.stats-container.collapsed { max-height: 0; opacity: 0; margin-bottom: 0; }
+.stats-container, .patient-summary-card {
+  margin-bottom: 32px; overflow: hidden; max-height: 1400px; opacity: 1;
+  transition: max-height 0.5s ease, opacity 0.3s ease, margin-bottom 0.3s ease, transform 0.3s ease;
+}
+.stats-container.collapsed, .patient-summary-card.collapsed {
+  max-height: 0; opacity: 0; margin-bottom: 0; transform: translateY(-8px); pointer-events: none;
+}
+.patient-summary-card.collapsed { border-width: 0; }
 
 .stats-grid {
   display: grid; grid-template-columns: repeat(auto-fit, minmax(250px, 1fr)); gap: 20px;
@@ -1315,17 +1364,38 @@ body {
 /* ═══ Responsive ═══ */
 @media (max-width: 768px) {
   .leave-form-grid { grid-template-columns: 1fr; }
-  .navbar { padding: 0 16px; }
+  .navbar { padding: 0 12px; gap: 10px; }
+  .nav-brand { gap: 10px; min-width: 0; }
+  .nav-brand-icon { width: 40px; height: 40px; font-size: 18px; flex: 0 0 40px; }
+  .nav-brand-text { min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .nav-actions { gap: 6px; flex-shrink: 0; }
+  .nav-user-badge { padding: 6px; }
   .nav-user-badge span { display: none; }
+  .nav-btn { width: 40px; height: 40px; flex: 0 0 40px; font-size: 17px; }
+  .btn-logout-nav { width: 40px; height: 40px; padding: 0; justify-content: center; border-radius: var(--radius-md); }
+  .btn-logout-nav span { display: none; }
   .main-content { padding: 24px 16px; }
+  .card { border-radius: var(--radius-xl); }
+  .card-header { align-items: flex-start; gap: 10px; flex-wrap: wrap; }
   .card-body { padding: 20px; }
   .stats-grid { grid-template-columns: 1fr; }
-  .notice-bar { flex-direction: column; align-items: flex-start; }
+  .stat-card { padding: 20px; }
+  .stat-icon { width: 50px; height: 50px; font-size: 20px; }
+  .notice-bar { flex-direction: column; align-items: stretch; }
+  .notice-bar .notice-content { align-items: flex-start; }
+  .btn-whatsapp { justify-content: center; width: 100%; }
+  .time-tabs { flex-direction: column; }
+  .leaves-table { min-width: 760px; }
 }
 @media (max-width: 480px) {
-  .nav-brand-text { font-size: 15px; }
+  .navbar { height: auto; min-height: var(--nav-height); padding-top: 8px; padding-bottom: 8px; }
+  .nav-brand-text { font-size: 14px; max-width: 120px; }
   .nav-brand-text small { display: none; }
-  .btn-stats-toggle { width: 100%; justify-content: center; font-size: 14px; padding: 12px 20px; }
+  .nav-user-badge { display: none; }
+  .btn-stats-toggle { width: 100%; justify-content: center; font-size: 14px; padding: 12px 16px; gap: 8px; white-space: normal; line-height: 1.5; }
+  .stats-toggle-hint { font-size: 12px; line-height: 1.6; }
+  .main-content { padding-inline: 12px; }
+  .login-card { padding: 36px 24px; }
 }
 </style>
 </head>
@@ -1394,20 +1464,21 @@ body {
     </div>
     <button class="nav-btn" id="btnThemeToggle" onclick="toggleTheme()" title="تبديل المظهر"><i class="fas fa-moon"></i></button>
     <button class="nav-btn" onclick="toggleNotifPanel(true)" title="الإشعارات"><i class="fas fa-bell"></i><span class="badge-dot" id="notifDot" style="display:none"></span></button>
-    <form method="POST" style="display:inline"><input type="hidden" name="action" value="logout"><button type="submit" class="btn-logout-nav"><i class="fas fa-sign-out-alt"></i> خروج</button></form>
+    <form method="POST" style="display:inline"><input type="hidden" name="action" value="logout"><button type="submit" class="btn-logout-nav"><i class="fas fa-sign-out-alt"></i> <span>خروج</span></button></form>
   </div>
 </nav>
 
 <main class="main-content">
   <!-- Stats Toggle -->
   <div class="stats-toggle-wrap">
-    <button class="btn-stats-toggle active" id="btnToggleStats" onclick="toggleStats()">
-      <i class="fas fa-chart-pie"></i> إحصائيات الحساب <i class="fas fa-chevron-up"></i>
+    <button class="btn-stats-toggle" id="btnToggleStats" onclick="toggleStats()" type="button" aria-expanded="false" aria-controls="statsContainer patientInfoCard">
+      <i class="fas fa-eye"></i> <span class="toggle-label">إظهار الإحصائيات وبيانات المريض</span> <i class="fas fa-chevron-down toggle-chevron"></i>
     </button>
+    <span class="stats-toggle-hint">الإحصائيات وبيانات المريض مخفية افتراضياً لحماية الخصوصية.</span>
   </div>
 
   <!-- Stats Grid -->
-  <div class="stats-container" id="statsContainer">
+  <div class="stats-container collapsed" id="statsContainer" aria-hidden="true">
     <div class="stats-grid">
       <div class="stat-card teal">
         <div class="stat-icon teal"><i class="fas fa-calendar-check"></i></div>
@@ -1429,7 +1500,7 @@ body {
   </div>
 
   <!-- Patient Info Card -->
-  <div class="card">
+  <div class="card patient-summary-card collapsed" id="patientInfoCard" aria-hidden="true">
     <div class="card-header">
       <h3><i class="fas fa-id-card"></i> بيانات المريض</h3>
     </div>
@@ -1585,6 +1656,28 @@ body {
 
 <script>
 const PATIENT_CSRF_TOKEN = '<?php echo patient_csrf_token(); ?>';
+// ═══ Reliable Icons on all devices ═══
+(function ensurePatientIcons(){
+  const html = document.documentElement;
+  const test = document.createElement('i');
+  test.className = 'fas fa-check';
+  test.style.cssText = 'position:absolute;left:-9999px;top:-9999px;visibility:hidden';
+  document.body.appendChild(test);
+  const applyFallback = () => html.classList.add('fa-fallback');
+  const verify = () => {
+    const family = getComputedStyle(test, '::before').fontFamily || getComputedStyle(test).fontFamily || '';
+    const content = getComputedStyle(test, '::before').content || '';
+    const ok = /Font Awesome|FontAwesome/i.test(family) && content && content !== 'none' && content !== 'normal';
+    if (!ok) applyFallback();
+    test.remove();
+  };
+  if (document.fonts && document.fonts.ready) {
+    document.fonts.ready.then(verify).catch(applyFallback);
+    setTimeout(() => { if (document.body.contains(test)) verify(); }, 2500);
+  } else {
+    setTimeout(verify, 1200);
+  }
+})();
 // ═══ Theme Toggle ═══
 function toggleTheme() {
   const html = document.documentElement;
@@ -1602,13 +1695,26 @@ function toggleTheme() {
 })();
 
 // ═══ Stats Toggle ═══
-function toggleStats() {
-  const container = document.getElementById('statsContainer');
+function toggleStats(forceShow = null) {
+  const stats = document.getElementById('statsContainer');
+  const patient = document.getElementById('patientInfoCard');
   const btn = document.getElementById('btnToggleStats');
-  if (!container || !btn) return;
-  container.classList.toggle('collapsed');
-  btn.classList.toggle('active');
+  if (!stats || !patient || !btn) return;
+  const shouldShow = forceShow === null ? stats.classList.contains('collapsed') : Boolean(forceShow);
+  [stats, patient].forEach(section => {
+    section.classList.toggle('collapsed', !shouldShow);
+    section.setAttribute('aria-hidden', shouldShow ? 'false' : 'true');
+  });
+  btn.classList.toggle('active', shouldShow);
+  btn.setAttribute('aria-expanded', shouldShow ? 'true' : 'false');
+  const label = btn.querySelector('.toggle-label');
+  const mainIcon = btn.querySelector('i:first-child');
+  const chevron = btn.querySelector('.toggle-chevron');
+  if (label) label.textContent = shouldShow ? 'إخفاء الإحصائيات وبيانات المريض' : 'إظهار الإحصائيات وبيانات المريض';
+  if (mainIcon) mainIcon.className = shouldShow ? 'fas fa-eye-slash' : 'fas fa-eye';
+  if (chevron) chevron.className = shouldShow ? 'fas fa-chevron-up toggle-chevron' : 'fas fa-chevron-down toggle-chevron';
 }
+document.addEventListener('DOMContentLoaded', () => toggleStats(false));
 
 // ═══ Notifications ═══
 function toggleNotifPanel(show) {
