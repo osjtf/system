@@ -105,6 +105,20 @@ function normalize_request_value(string $key, string $fallbackKey = ''): string
     return trim((string)$value);
 }
 
+function normalize_lookup_value(string $value, bool $uppercase = false): string
+{
+    $value = trim($value);
+    // Remove normal and invisible separators that users commonly copy with service codes/IDs.
+    $value = preg_replace('/[\s\x{200B}-\x{200D}\x{FEFF}]+/u', '', $value) ?? $value;
+    return $uppercase ? strtoupper($value) : $value;
+}
+
+function compact_lookup_sql(string $expression): string
+{
+    // Keep this compatible with older MySQL versions by avoiding REGEXP_REPLACE.
+    return "UPPER(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(TRIM({$expression}), ' ', ''), CHAR(9), ''), CHAR(10), ''), CHAR(13), ''), '-', ''))";
+}
+
 function h(?string $value): string
 {
     return htmlspecialchars((string)$value, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8');
@@ -204,6 +218,9 @@ function search_leave(PDO $pdo, string $code, string $identity, bool $active): ?
     $companionRelationExpr = has_column($pdo, 'sick_leaves', 'companion_relation') ? 'sl.companion_relation' : "''";
     $isCompanionExpr = has_column($pdo, 'sick_leaves', 'is_companion') ? 'sl.is_companion' : '0';
 
+    $serviceCodeCompactExpr = compact_lookup_sql('sl.service_code');
+    $identityCompactExpr = compact_lookup_sql('p.identity_number');
+
     if (has_column($pdo, 'sick_leaves', 'deleted_at')) {
         $activeCondition = 'sl.deleted_at IS ' . ($active ? 'NULL' : 'NOT NULL');
     } elseif (has_column($pdo, 'sick_leaves', 'is_deleted')) {
@@ -229,17 +246,22 @@ function search_leave(PDO $pdo, string $code, string $identity, bool $active): ?
             {$companionRelationExpr} AS companion_relation
         FROM sick_leaves sl
         INNER JOIN patients p ON p.id = sl.patient_id
-        INNER JOIN doctors d ON d.id = sl.doctor_id
-        WHERE UPPER(sl.service_code) = UPPER(:service_code)
-          AND p.identity_number = :identity_number
+        LEFT JOIN doctors d ON d.id = sl.doctor_id
+        WHERE (UPPER(TRIM(sl.service_code)) = UPPER(:service_code)
+               OR {$serviceCodeCompactExpr} = :service_code_compact)
+          AND (TRIM(p.identity_number) = :identity_number
+               OR {$identityCompactExpr} = :identity_number_compact)
           AND {$activeCondition}
+        ORDER BY sl.id DESC
         LIMIT 1
     ";
 
     $stmt = $pdo->prepare($sql);
     $stmt->execute([
         ':service_code' => $code,
+        ':service_code_compact' => normalize_lookup_value(str_replace('-', '', $code), true),
         ':identity_number' => $identity,
+        ':identity_number_compact' => normalize_lookup_value(str_replace('-', '', $identity), true),
     ]);
     $row = $stmt->fetch();
     return $row ?: null;
@@ -305,8 +327,8 @@ HTML;
 HTML;
 }
 
-$code = normalize_request_value('code', 'service_code');
-$identity = normalize_request_value('id', 'identity_number');
+$code = normalize_lookup_value(normalize_request_value('code', 'service_code'), true);
+$identity = normalize_lookup_value(normalize_request_value('id', 'identity_number'), false);
 
 if ($code === '') {
     json_response(['status' => 'error', 'msg' => 'فضلاً اكتب رمز الخدمة']);
@@ -321,7 +343,6 @@ if (!preg_match('/^[0-9A-Za-z-]{1,50}$/', $identity)) {
     json_response(['status' => 'error', 'msg' => 'رقم الهوية غير صالح']);
 }
 
-$code = strtoupper($code);
 $connected = false;
 
 foreach (DATABASES as $databaseConfig) {
