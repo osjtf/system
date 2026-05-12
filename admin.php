@@ -563,6 +563,27 @@ function makeUniqueUsername(PDO $pdo, string $baseUsername): string {
     }
 }
 
+function findPatientLinkedAccount(PDO $pdo, int $patientId, int $excludeAccountUserId = 0, bool $forUpdate = false): ?array {
+    if ($patientId <= 0) return null;
+    $excludeSql = $excludeAccountUserId > 0 ? ' AND COALESCE(pa.account_user_id, 0) <> :exclude_uid' : '';
+    $lockSql = $forUpdate ? ' FOR UPDATE' : '';
+    $stmt = $pdo->prepare("
+        SELECT pa.id, pa.account_user_id, pa.user_id, pa.patient_id,
+               COALESCE(ppu.username, au.username, '') AS username,
+               COALESCE(ppu.display_name, au.display_name, au.username, 'حساب مريض') AS display_name
+        FROM patient_accounts pa
+        LEFT JOIN patient_portal_users ppu ON ppu.id = pa.account_user_id
+        LEFT JOIN admin_users au ON au.id = pa.user_id
+        WHERE pa.patient_id = :patient_id{$excludeSql}
+        LIMIT 1{$lockSql}
+    ");
+    $params = [':patient_id' => $patientId];
+    if ($excludeAccountUserId > 0) $params[':exclude_uid'] = $excludeAccountUserId;
+    $stmt->execute($params);
+    $row = $stmt->fetch();
+    return $row ?: null;
+}
+
 function nowSaudi(): string {
     return (new DateTime('now', new DateTimeZone('Asia/Riyadh')))->format('Y-m-d H:i:s');
 }
@@ -4014,12 +4035,29 @@ if (isset($_POST['action']) && $_POST['action'] !== 'login' && $_POST['action'] 
             $notes = trim($_POST['notes'] ?? '');
             if ($uid <= 0) { echo json_encode(['success'=>false,'message'=>'معرّف المستخدم غير صالح.']); exit; }
             if ($pid > 0) {
-                $existsStmt = $pdo->prepare("SELECT id FROM patient_accounts WHERE account_user_id = ? LIMIT 1");
-                $existsStmt->execute([$uid]);
-                if ($existsStmt->fetch()) {
-                    $pdo->prepare("UPDATE patient_accounts SET patient_id = ?, allowed_days = ?, expiry_date = ?, notes = ? WHERE account_user_id = ?")->execute([$pid, $allowed, $expiry ?: null, $notes, $uid]);
-                } else {
-                    $pdo->prepare("INSERT INTO patient_accounts (account_user_id, user_id, patient_id, allowed_days, expiry_date, notes) VALUES (?, NULL, ?, ?, ?, ?)")->execute([$uid, $pid, $allowed, $expiry ?: null, $notes]);
+                $pdo->beginTransaction();
+                try {
+                    $lockPatientStmt = $pdo->prepare("SELECT id FROM patients WHERE id = ? LIMIT 1 FOR UPDATE");
+                    $lockPatientStmt->execute([$pid]);
+                    if (!$lockPatientStmt->fetch()) {
+                        throw new RuntimeException('المريض غير موجود.');
+                    }
+                    $linkedAccount = findPatientLinkedAccount($pdo, $pid, $uid, true);
+                    if ($linkedAccount) {
+                        $owner = trim((string)($linkedAccount['display_name'] ?: $linkedAccount['username'] ?: 'حساب آخر'));
+                        throw new RuntimeException("هذا المريض لديه حساب بوابة بالفعل باسم: {$owner}. لا يمكن ربط أكثر من حساب لنفس المريض.");
+                    }
+                    $existsStmt = $pdo->prepare("SELECT id FROM patient_accounts WHERE account_user_id = ? LIMIT 1 FOR UPDATE");
+                    $existsStmt->execute([$uid]);
+                    if ($existsStmt->fetch()) {
+                        $pdo->prepare("UPDATE patient_accounts SET patient_id = ?, allowed_days = ?, expiry_date = ?, notes = ? WHERE account_user_id = ?")->execute([$pid, $allowed, $expiry ?: null, $notes, $uid]);
+                    } else {
+                        $pdo->prepare("INSERT INTO patient_accounts (account_user_id, user_id, patient_id, allowed_days, expiry_date, notes) VALUES (?, NULL, ?, ?, ?, ?)")->execute([$uid, $pid, $allowed, $expiry ?: null, $notes]);
+                    }
+                    $pdo->commit();
+                } catch (Throwable $e) {
+                    if ($pdo->inTransaction()) $pdo->rollBack();
+                    echo json_encode(['success'=>false,'message'=>$e->getMessage() ?: 'تعذّر تحديث ربط الحساب بالمريض.']); exit;
                 }
             } else {
                 $pdo->prepare("DELETE FROM patient_accounts WHERE account_user_id = ?")->execute([$uid]);
@@ -4049,13 +4087,23 @@ if (isset($_POST['action']) && $_POST['action'] !== 'login' && $_POST['action'] 
             if ($check->fetch()) { echo json_encode(['success'=>false,'message'=>'اسم المستخدم موجود مسبقاً في حسابات المرضى.']); exit; }
             $pdo->beginTransaction();
             try {
+                $lockPatientStmt = $pdo->prepare("SELECT id FROM patients WHERE id = ? LIMIT 1 FOR UPDATE");
+                $lockPatientStmt->execute([$link_patient_id]);
+                if (!$lockPatientStmt->fetch()) {
+                    throw new RuntimeException('المريض غير موجود.');
+                }
+                $linkedAccount = findPatientLinkedAccount($pdo, $link_patient_id, 0, true);
+                if ($linkedAccount) {
+                    $owner = trim((string)($linkedAccount['display_name'] ?: $linkedAccount['username'] ?: 'حساب سابق'));
+                    throw new RuntimeException("هذا المريض لديه حساب بوابة بالفعل باسم: {$owner}. لا يمكن إنشاء حساب آخر لنفس المريض.");
+                }
                 $pdo->prepare("INSERT INTO patient_portal_users (username, password_hash, display_name, is_active) VALUES (?,?,?,1)")->execute([$username, password_hash($password, PASSWORD_DEFAULT), $display_name]);
                 $newUserId = intval($pdo->lastInsertId());
                 $pdo->prepare("INSERT INTO patient_accounts (account_user_id, user_id, patient_id, allowed_days) VALUES (?,?,?,?) ON DUPLICATE KEY UPDATE patient_id=VALUES(patient_id), allowed_days=VALUES(allowed_days)")->execute([$newUserId, null, $link_patient_id, $link_allowed_days]);
                 $pdo->commit();
             } catch (Throwable $e) {
                 if ($pdo->inTransaction()) $pdo->rollBack();
-                echo json_encode(['success'=>false,'message'=>'تعذر إنشاء حساب المريض المستقل.']); exit;
+                echo json_encode(['success'=>false,'message'=>$e->getMessage() ?: 'تعذر إنشاء حساب المريض المستقل.']); exit;
             }
             echo json_encode(['success'=>true,'message'=>'تمت إضافة حساب المريض المستقل بنجاح.','username'=>$username]);
             break;
@@ -7981,7 +8029,7 @@ if (!in_array($uiDataViewMode, ['table','compact','cards','zebra','glass','minim
             </div>
           <div class="modal-footer">
                 <button type="button" class="btn btn-outline-success d-none me-auto" id="copyAcctMsgBtn">
-                    <i class="bi bi-whatsapp"></i> نسخ رسالة الواتساب
+                    <i class="bi bi-whatsapp"></i> نسخ رسالة الواتساب مع شرح النظام
                 </button>
                 <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">إلغاء</button>
                 <button type="button" class="btn btn-gradient" id="acctNewUserSave"><i class="bi bi-plus"></i> إنشاء الحساب</button>
@@ -8324,8 +8372,10 @@ function setupSelectQuickSearch(searchInputId, selectId) {
 
         const selectableOptions = Array.from(select.options).filter(opt => opt.value && opt.value !== 'manual' && !opt.disabled);
         const hasCurrentVisible = selectableOptions.some(opt => opt.value === select.value);
-        if (q && selectableOptions.length === 1 && (!select.value || !hasCurrentVisible)) {
+        if (q && selectableOptions.length === 1) {
             select.value = selectableOptions[0].value;
+            select.dispatchEvent(new Event('change', { bubbles: true }));
+        } else if (select.value !== selectedValue || (q && !hasCurrentVisible && selectableOptions.length > 0)) {
             select.dispatchEvent(new Event('change', { bubbles: true }));
         }
     };
@@ -10622,12 +10672,34 @@ setupSelectQuickSearch('batch_hospital_search', 'batch_hospital_id');
     document.getElementById('copyAcctMsgBtn')?.classList.add('d-none');
     acctNewUserModal.show();
 });
+        function getExistingPatientPortalAccount(patientId) {
+            if (!patientId || patientId === '0') return null;
+            return (Array.isArray(acctAllData) ? acctAllData : []).find(acc => String(acc.linked_patient_id || '') === String(patientId)) || null;
+        }
+
+        function clearNewPatientAccountCredentials() {
+            document.getElementById('acctNewUsername').value = '';
+            document.getElementById('acctNewPassword').value = '';
+            document.getElementById('acctNewDisplayName').value = '';
+            document.getElementById('acctNewPassword').type = 'password';
+            document.getElementById('copyAcctMsgBtn')?.classList.add('d-none');
+        }
+
         // 3. التعبئة التلقائية وإظهار زر النسخ عند اختيار المريض
         document.getElementById('acctNewLinkPatient')?.addEventListener('change', function() {
             const ptId = this.value;
             const copyBtn = document.getElementById('copyAcctMsgBtn');
 
             if (ptId && ptId !== '0') {
+                const existingAccount = getExistingPatientPortalAccount(ptId);
+                if (existingAccount) {
+                    clearNewPatientAccountCredentials();
+                    this.value = '0';
+                    const owner = existingAccount.display_name || existingAccount.username || 'حساب سابق';
+                    showToast(`هذا المريض لديه حساب بوابة بالفعل باسم: ${owner}. لا يمكن إنشاء حساب آخر لنفس المريض.`, 'warning');
+                    return;
+                }
+
                 const pt = (currentTableData.patients || []).find(x => x.id == ptId);
                 if (pt) {
                     document.getElementById('acctNewDisplayName').value = pt.name_ar || pt.name || '';
@@ -10644,8 +10716,7 @@ setupSelectQuickSearch('batch_hospital_search', 'batch_hospital_id');
                     copyBtn?.classList.remove('d-none');
                 }
             } else {
-                document.getElementById('acctNewPassword').type = 'password';
-                copyBtn?.classList.add('d-none');
+                clearNewPatientAccountCredentials();
             }
         });
 
@@ -10663,17 +10734,24 @@ setupSelectQuickSearch('batch_hospital_search', 'batch_hospital_id');
                 return;
             }
 
-            const whatsappMsg = `🎉 *تم تفعيل حساب ${ptName} بنجاح* 🎉\n\n` +
+            const whatsappMsg = `🎉 *مرحباً ${ptName || 'بك'}.. تم تفعيل حسابك في بوابة المرضى بنجاح* 🎉\n\n` +
+                                `━━━━━━━━━━━━━━\n` +
+                                `🔐 *بيانات الدخول الخاصة بك*\n` +
                                 `👤 *اسم المستخدم:* ${user}\n` +
                                 `🔑 *كلمة المرور:* ${pass}\n\n` +
                                 `🌐 *رابط تسجيل الدخول إلى بوابة المريض:*\n` +
                                 `${portalUrl}\n\n` +
                                 `🎥 *شرح استخدام النظام خطوة بخطوة:*\n` +
                                 `${tutorialUrl}\n\n` +
+                                `📌 *طريقة الاستخدام باختصار:*\n` +
+                                `1️⃣ افتح رابط بوابة المريض وسجّل الدخول بالبيانات أعلاه.\n` +
+                                `2️⃣ شاهد شرح استخدام النظام قبل إصدار أول إجازة.\n` +
+                                `3️⃣ اختر المستشفى والطبيب ثم حدّد تاريخ بداية ونهاية الإجازة.\n` +
+                                `4️⃣ اضغط إنشاء الإجازة ثم حمّل التقرير من سجل الإجازات.\n\n` +
                                 `✅ *ملاحظات مهمة:*\n` +
                                 `• احفظ بيانات الدخول ولا تشاركها مع أي شخص.\n` +
-                                `• شاهد شرح استخدام النظام قبل إصدار أول إجازة.\n` +
-                                `• عند انتهاء رصيد الأيام أو احتياجك للدعم، تواصل معنا هنا مباشرة.\n\n` +
+                                `• عند انتهاء رصيد الأيام أو احتياجك للدعم، تواصل معنا هنا مباشرة.\n` +
+                                `• رابط شرح استخدام النظام موجود داخل بوابتك دائماً.\n\n` +
                                 `✨ نتمنى لك تجربة سهلة وسريعة لإصدار الإجازات فورياً 💬🤝`;
 
             try {
@@ -10704,6 +10782,13 @@ setupSelectQuickSearch('batch_hospital_search', 'batch_hospital_id');
             const role = 'user';
             const linkPatientId = document.getElementById('acctNewLinkPatient')?.value || '0';
             const allowedDays = document.getElementById('acctNewAllowedDays')?.value || '0';
+            if (!linkPatientId || linkPatientId === '0') { showToast('يجب اختيار مريض لفتح حساب بوابة المرضى.', 'warning'); return; }
+            const existingAccount = getExistingPatientPortalAccount(linkPatientId);
+            if (existingAccount) {
+                const owner = existingAccount.display_name || existingAccount.username || 'حساب سابق';
+                showToast(`هذا المريض لديه حساب بوابة بالفعل باسم: ${owner}. لا يمكن إنشاء حساب آخر لنفس المريض.`, 'warning');
+                return;
+            }
             if (!username || !password || !displayName) { showToast('يرجى تعبئة جميع الحقول المطلوبة.', 'warning'); return; }
             showLoading();
             const fd = new FormData();

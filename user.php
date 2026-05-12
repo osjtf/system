@@ -17,6 +17,9 @@ header_remove('X-Powered-By');
 header_remove('Server');
 
 date_default_timezone_set('Asia/Riyadh');
+
+const PATIENT_TUTORIAL_URL = 'https://2u.pw/LPfDTy';
+
 header('X-Frame-Options: DENY');
 header('X-Content-Type-Options: nosniff');
 header('Referrer-Policy: strict-origin-when-cross-origin');
@@ -1475,6 +1478,7 @@ body {
 .notice-bar .notice-icon { font-size: 22px; color: var(--warning); }
 .notice-bar .notice-text .title { font-size: 14px; font-weight: 800; color: var(--text-primary); }
 .notice-bar .notice-text .desc { font-size: 13px; font-weight: 600; color: var(--text-muted); margin-top: 2px; }
+.notice-actions { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
 .btn-whatsapp {
   display: inline-flex; align-items: center; gap: 8px; padding: 10px 20px;
   background: #25d366; color: white; border-radius: var(--radius-md);
@@ -1494,7 +1498,15 @@ body {
 .btn-tutorial:hover { color:#fff; transform: translateY(-2px); box-shadow: 0 18px 42px rgba(6,182,212,0.28); }
 .btn-tutorial:hover::before { transform: translateX(120%); }
 .patient-hero-actions { display:flex; align-items:center; justify-content:center; gap:12px; flex-wrap:wrap; margin: 18px 0 26px; }
-.patient-hero-actions .btn-whatsapp, .patient-hero-actions .btn-tutorial { min-height: 46px; }
+.patient-hero-actions .btn-whatsapp, .patient-hero-actions .btn-tutorial, .notice-actions .btn-whatsapp, .notice-actions .btn-tutorial { min-height: 46px; }
+.leave-index-badge {
+  width: 38px; height: 38px; margin: 0 auto; border-radius: 14px;
+  display: inline-flex; align-items: center; justify-content: center;
+  background: linear-gradient(135deg, var(--primary-600), var(--secondary)); color: #fff;
+  font-family: var(--font-en); font-size: 14px; font-weight: 900;
+  box-shadow: 0 10px 22px rgba(13,148,136,0.22);
+}
+.leaves-table th:first-child, .leaves-table td:first-child { width: 72px; text-align: center; }
 
 /* ═══ Responsive ═══ */
 @media (max-width: 768px) {
@@ -1518,6 +1530,7 @@ body {
   .stat-icon { width: 50px; height: 50px; font-size: 20px; }
   .notice-bar { flex-direction: column; align-items: stretch; }
   .notice-bar .notice-content { align-items: flex-start; }
+  .notice-actions { width: 100%; flex-direction: column; align-items: stretch; }
   .btn-whatsapp, .btn-tutorial { justify-content: center; width: 100%; }
   .patient-hero-actions { align-items: stretch; }
   .time-tabs { flex-direction: column; }
@@ -1614,7 +1627,7 @@ body {
   </div>
 
   <div class="patient-hero-actions" aria-label="روابط مساعدة">
-    <a href="https://2u.pw/LPfDTy" target="_blank" rel="noopener noreferrer" class="btn-tutorial">
+    <a href="<?= PATIENT_TUTORIAL_URL ?>" target="_blank" rel="noopener noreferrer" class="btn-tutorial">
       <i class="fas fa-circle-play"></i> شرح استخدام النظام
     </a>
     <a href="https://wa.me/966573436223" target="_blank" rel="noopener noreferrer" class="btn-whatsapp">
@@ -1658,7 +1671,10 @@ body {
             <span class="desc">لتعديل البيانات يرجى التواصل مع الإدارة</span>
           </div>
         </div>
-        <a href="https://wa.me/966573436223" target="_blank" class="btn-whatsapp"><i class="fab fa-whatsapp"></i> تواصل معنا</a>
+        <div class="notice-actions" aria-label="روابط مساعدة للمريض">
+          <a href="<?= PATIENT_TUTORIAL_URL ?>" target="_blank" rel="noopener noreferrer" class="btn-tutorial"><i class="fas fa-circle-play"></i> شرح استخدام النظام</a>
+          <a href="https://wa.me/966573436223" target="_blank" rel="noopener noreferrer" class="btn-whatsapp"><i class="fab fa-whatsapp"></i> تواصل معنا</a>
+        </div>
       </div>
       <?php if ($patientData): ?>
       <div class="patient-info-grid">
@@ -1784,12 +1800,12 @@ body {
         <div class="table-responsive">
           <table class="leaves-table">
             <thead><tr>
-              <th>#</th><th>رمز الإجازة</th><th>المستشفى</th><th>الطبيب</th><th>المدة</th><th>تاريخ البداية</th><th>الإجراء</th>
+              <th>رقم</th><th>رمز الإجازة</th><th>المستشفى</th><th>الطبيب</th><th>المدة</th><th>تاريخ البداية</th><th>الإجراء</th>
             </tr></thead>
             <tbody>
             <?php foreach ($myLeaves as $idx => $lv): ?>
               <tr>
-                <td style="font-family:var(--font-en);font-weight:900;color:var(--text-muted)"><?= $idx + 1 ?></td>
+                <td data-label="رقم الإجازة"><span class="leave-index-badge" title="رقم الإجازة في السجل"><?= $idx + 1 ?></span></td>
                 <td style="font-family:var(--font-en);font-weight:800;color:var(--primary)"><?= htmlspecialchars($lv['service_code'] ?? '') ?></td>
                 <td><?= htmlspecialchars($lv['h_name_ar'] ?? '') ?></td>
                 <td><?= htmlspecialchars($lv['d_name_ar'] ?? '') ?></td>
