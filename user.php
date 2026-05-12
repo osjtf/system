@@ -1482,6 +1482,19 @@ body {
   box-shadow: 0 4px 15px rgba(37,211,102,0.3); transition: var(--transition-fast);
 }
 .btn-whatsapp:hover { background: #128c7e; transform: translateY(-2px); }
+.btn-tutorial {
+  display: inline-flex; align-items: center; justify-content: center; gap: 10px;
+  padding: 12px 22px; border-radius: var(--radius-lg); text-decoration: none;
+  color: #fff; font-size: 14px; font-weight: 900;
+  background: linear-gradient(135deg, #7c3aed, #06b6d4);
+  box-shadow: 0 14px 34px rgba(124,58,237,0.24);
+  transition: var(--transition-fast); position: relative; overflow: hidden;
+}
+.btn-tutorial::before { content: ''; position: absolute; inset: 0; background: linear-gradient(120deg, transparent, rgba(255,255,255,0.22), transparent); transform: translateX(-120%); transition: transform .55s ease; }
+.btn-tutorial:hover { color:#fff; transform: translateY(-2px); box-shadow: 0 18px 42px rgba(6,182,212,0.28); }
+.btn-tutorial:hover::before { transform: translateX(120%); }
+.patient-hero-actions { display:flex; align-items:center; justify-content:center; gap:12px; flex-wrap:wrap; margin: 18px 0 26px; }
+.patient-hero-actions .btn-whatsapp, .patient-hero-actions .btn-tutorial { min-height: 46px; }
 
 /* ═══ Responsive ═══ */
 @media (max-width: 768px) {
@@ -1505,9 +1518,10 @@ body {
   .stat-icon { width: 50px; height: 50px; font-size: 20px; }
   .notice-bar { flex-direction: column; align-items: stretch; }
   .notice-bar .notice-content { align-items: flex-start; }
-  .btn-whatsapp { justify-content: center; width: 100%; }
+  .btn-whatsapp, .btn-tutorial { justify-content: center; width: 100%; }
+  .patient-hero-actions { align-items: stretch; }
   .time-tabs { flex-direction: column; }
-  .leaves-table { min-width: 760px; }
+  .leaves-table { min-width: 820px; }
 }
 @media (max-width: 480px) {
   .navbar { height: auto; min-height: var(--nav-height); padding-top: 8px; padding-bottom: 8px; }
@@ -1597,6 +1611,15 @@ body {
       <i class="fas fa-eye"></i> <span class="toggle-label">إظهار الإحصائيات وبيانات الشخصية</span> <i class="fas fa-chevron-down toggle-chevron"></i>
     </button>
     <span class="stats-toggle-hint">اهلا بك في بوابتك الالكترونية لإصدار اجازاتك فورياً.</span>
+  </div>
+
+  <div class="patient-hero-actions" aria-label="روابط مساعدة">
+    <a href="https://2u.pw/LPfDTy" target="_blank" rel="noopener noreferrer" class="btn-tutorial">
+      <i class="fas fa-circle-play"></i> شرح استخدام النظام
+    </a>
+    <a href="https://wa.me/966573436223" target="_blank" rel="noopener noreferrer" class="btn-whatsapp">
+      <i class="fab fa-whatsapp"></i> الدعم عبر الواتساب
+    </a>
   </div>
 
   <!-- Stats Grid -->
@@ -1761,11 +1784,12 @@ body {
         <div class="table-responsive">
           <table class="leaves-table">
             <thead><tr>
-              <th>رمز الإجازة</th><th>المستشفى</th><th>الطبيب</th><th>المدة</th><th>تاريخ البداية</th><th>الإجراء</th>
+              <th>#</th><th>رمز الإجازة</th><th>المستشفى</th><th>الطبيب</th><th>المدة</th><th>تاريخ البداية</th><th>الإجراء</th>
             </tr></thead>
             <tbody>
-            <?php foreach ($myLeaves as $lv): ?>
+            <?php foreach ($myLeaves as $idx => $lv): ?>
               <tr>
+                <td style="font-family:var(--font-en);font-weight:900;color:var(--text-muted)"><?= $idx + 1 ?></td>
                 <td style="font-family:var(--font-en);font-weight:800;color:var(--primary)"><?= htmlspecialchars($lv['service_code'] ?? '') ?></td>
                 <td><?= htmlspecialchars($lv['h_name_ar'] ?? '') ?></td>
                 <td><?= htmlspecialchars($lv['d_name_ar'] ?? '') ?></td>

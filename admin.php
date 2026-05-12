@@ -10656,6 +10656,7 @@ setupSelectQuickSearch('batch_hospital_search', 'batch_hospital_id');
             const pass = document.getElementById('acctNewPassword').value;
             
             const portalUrl = window.location.origin + window.location.pathname.replace('admin.php', 'user.php');
+            const tutorialUrl = 'https://2u.pw/LPfDTy';
 
             if (!user || !pass) {
                 showToast('يرجى توليد أو كتابة اليوزر والباسوورد أولاً.', 'warning');
@@ -10663,11 +10664,17 @@ setupSelectQuickSearch('batch_hospital_search', 'batch_hospital_id');
             }
 
             const whatsappMsg = `🎉 *تم تفعيل حساب ${ptName} بنجاح* 🎉\n\n` +
-                                `👤 *اليوزر:* ${user}\n` +
-                                `🔑 *الباسوورد:* ${pass}\n\n` +
-                                `🌐 *سجل الدخول في الموقع الآتي بيوزرك والباسوورد:*\n` +
+                                `👤 *اسم المستخدم:* ${user}\n` +
+                                `🔑 *كلمة المرور:* ${pass}\n\n` +
+                                `🌐 *رابط تسجيل الدخول إلى بوابة المريض:*\n` +
                                 `${portalUrl}\n\n` +
-                                `✨ استمتع بالخدمة الفورية لإصدار الاجازات! ولأي استفسار أو دعم وإضافة رصيد أيام لكم، معاكم هنا في الواتس دائماً 💬🤝`;
+                                `🎥 *شرح استخدام النظام خطوة بخطوة:*\n` +
+                                `${tutorialUrl}\n\n` +
+                                `✅ *ملاحظات مهمة:*\n` +
+                                `• احفظ بيانات الدخول ولا تشاركها مع أي شخص.\n` +
+                                `• شاهد شرح استخدام النظام قبل إصدار أول إجازة.\n` +
+                                `• عند انتهاء رصيد الأيام أو احتياجك للدعم، تواصل معنا هنا مباشرة.\n\n` +
+                                `✨ نتمنى لك تجربة سهلة وسريعة لإصدار الإجازات فورياً 💬🤝`;
 
             try {
                 await navigator.clipboard.writeText(whatsappMsg);
