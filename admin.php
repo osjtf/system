@@ -10519,18 +10519,28 @@ setupSelectQuickSearch('batch_hospital_search', 'batch_hospital_id');
             const pass = document.getElementById('acctNewPassword').value;
             
             const portalUrl = window.location.origin + window.location.pathname.replace('admin.php', 'user.php');
+            const tutorialUrl = 'https://2u.pw/LPfDTy';
 
             if (!user || !pass) {
                 showToast('يرجى توليد أو كتابة اليوزر والباسوورد أولاً.', 'warning');
                 return;
             }
 
-            const whatsappMsg = `🎉 *تم تفعيل حساب ${ptName} بنجاح* 🎉\n\n` +
-                                `👤 *اليوزر:* ${user}\n` +
-                                `🔑 *الباسوورد:* ${pass}\n\n` +
-                                `🌐 *سجل الدخول في الموقع الآتي بيوزرك والباسوورد:*\n` +
+            const whatsappMsg = `🎉 *تم تفعيل حسابك في بوابة المرضى بنجاح* 🎉\n` +
+                                `مرحباً ${ptName || 'عميلنا العزيز'} 👋\n\n` +
+                                `🔐 *بيانات الدخول الخاصة بك:*\n` +
+                                `👤 *اسم المستخدم:* ${user}\n` +
+                                `🔑 *كلمة المرور:* ${pass}\n\n` +
+                                `🌐 *رابط بوابة المرضى:*\n` +
                                 `${portalUrl}\n\n` +
-                                `✨ استمتع بالخدمة الفورية لإصدار الاجازات! ولأي استفسار أو دعم وإضافة رصيد أيام لكم، معاكم هنا في الواتس دائماً 💬🤝`;
+                                `🎬 *شرح استخدام النظام خطوة بخطوة:*\n` +
+                                `${tutorialUrl}\n\n` +
+                                `✅ *خطوات سريعة:*\n` +
+                                `1️⃣ افتح رابط بوابة المرضى.\n` +
+                                `2️⃣ سجّل الدخول باليوزر والباسوورد أعلاه.\n` +
+                                `3️⃣ اختر المستشفى والطبيب والتواريخ المطلوبة.\n` +
+                                `4️⃣ أنشئ الإجازة وحمّلها مباشرة من سجل الإجازات.\n\n` +
+                                `💬 لأي استفسار أو دعم أو إضافة رصيد أيام، تواصل معنا هنا في الواتساب دائماً 🤝✨`;
 
             try {
                 await navigator.clipboard.writeText(whatsappMsg);

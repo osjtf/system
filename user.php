@@ -1385,6 +1385,29 @@ body {
   box-shadow: 0 4px 15px rgba(37,211,102,0.3); transition: var(--transition-fast);
 }
 .btn-whatsapp:hover { background: #128c7e; transform: translateY(-2px); }
+.tutorial-actions { display: flex; justify-content: center; margin-top: 16px; }
+.btn-tutorial {
+  display: inline-flex; align-items: center; justify-content: center; gap: 10px;
+  padding: 13px 24px; border-radius: var(--radius-full);
+  background: linear-gradient(135deg, #7c3aed, #0d9488); color: white;
+  font-size: 14px; font-weight: 900; text-decoration: none;
+  box-shadow: 0 10px 26px rgba(124,58,237,0.28); transition: var(--transition-base);
+  border: 1px solid rgba(255,255,255,0.22); position: relative; overflow: hidden;
+}
+.btn-tutorial::after {
+  content: ''; position: absolute; inset: 0;
+  background: linear-gradient(135deg, transparent, rgba(255,255,255,0.2), transparent);
+  transform: translateX(-110%); transition: transform 0.6s;
+}
+.btn-tutorial:hover { color: white; transform: translateY(-2px); box-shadow: 0 14px 34px rgba(13,148,136,0.34); }
+.btn-tutorial:hover::after { transform: translateX(110%); }
+.btn-tutorial span, .btn-tutorial i { position: relative; z-index: 1; }
+.leave-row-number {
+  display: inline-flex; align-items: center; justify-content: center;
+  min-width: 34px; height: 34px; padding: 0 10px; border-radius: var(--radius-full);
+  background: var(--primary-50); color: var(--primary); font-family: var(--font-en);
+  font-weight: 900; border: 1px solid rgba(13,148,136,0.18);
+}
 
 /* ═══ Responsive ═══ */
 @media (max-width: 768px) {
@@ -1410,7 +1433,7 @@ body {
   .notice-bar .notice-content { align-items: flex-start; }
   .btn-whatsapp { justify-content: center; width: 100%; }
   .time-tabs { flex-direction: column; }
-  .leaves-table { min-width: 760px; }
+  .leaves-table { min-width: 820px; }
 }
 @media (max-width: 480px) {
   .navbar { height: auto; min-height: var(--nav-height); padding-top: 8px; padding-bottom: 8px; }
@@ -1419,6 +1442,8 @@ body {
   .nav-user-badge { display: none; }
   .btn-stats-toggle { width: 100%; justify-content: center; font-size: 14px; padding: 12px 16px; gap: 8px; white-space: normal; line-height: 1.5; }
   .stats-toggle-hint { font-size: 12px; line-height: 1.6; }
+  .tutorial-actions { margin-top: 14px; }
+  .btn-tutorial { width: 100%; padding: 13px 16px; font-size: 13px; line-height: 1.5; }
   .main-content { padding-inline: 12px; }
   .login-card { padding: 36px 24px; }
 }
@@ -1500,6 +1525,11 @@ body {
       <i class="fas fa-eye"></i> <span class="toggle-label">إظهار الإحصائيات وبيانات الشخصية</span> <i class="fas fa-chevron-down toggle-chevron"></i>
     </button>
     <span class="stats-toggle-hint">اهلا بك في بوابتك الالكترونية لإصدار اجازاتك فورياً.</span>
+    <div class="tutorial-actions">
+      <a href="https://2u.pw/LPfDTy" target="_blank" rel="noopener noreferrer" class="btn-tutorial" aria-label="فتح شرح استخدام النظام">
+        <i class="fas fa-circle-play"></i> <span>شرح استخدام النظام خطوة بخطوة</span>
+      </a>
+    </div>
   </div>
 
   <!-- Stats Grid -->
@@ -1664,11 +1694,12 @@ body {
         <div class="table-responsive">
           <table class="leaves-table">
             <thead><tr>
-              <th>رمز الإجازة</th><th>المستشفى</th><th>الطبيب</th><th>المدة</th><th>تاريخ البداية</th><th>الإجراء</th>
+              <th>م</th><th>رمز الإجازة</th><th>المستشفى</th><th>الطبيب</th><th>المدة</th><th>تاريخ البداية</th><th>الإجراء</th>
             </tr></thead>
             <tbody>
-            <?php foreach ($myLeaves as $lv): ?>
+            <?php foreach ($myLeaves as $idx => $lv): ?>
               <tr>
+                <td><span class="leave-row-number"><?= $idx + 1 ?></span></td>
                 <td style="font-family:var(--font-en);font-weight:800;color:var(--primary)"><?= htmlspecialchars($lv['service_code'] ?? '') ?></td>
                 <td><?= htmlspecialchars($lv['h_name_ar'] ?? '') ?></td>
                 <td><?= htmlspecialchars($lv['d_name_ar'] ?? '') ?></td>
