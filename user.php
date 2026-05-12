@@ -32,7 +32,7 @@ error_reporting(0);
 // ======================== إعدادات قاعدة البيانات ========================
 $db_host = 'mysql.railway.internal';
 $db_user = 'root';
-$db_pass = 'ExvKbuJnGIvDATyXWCHtpjOFluFAgeqQ';
+$db_pass = 'vDUncyqSFYnHULjIOHYltRvPXtbLVIIl';
 $db_name = 'railway';
 $db_port = 3306;
 
@@ -524,7 +524,6 @@ if ($action === 'generate_pdf' && isPatientLoggedIn()) {
 
     // PDF download mode - use same template as admin
     if ($pdfMode === 'download') {
-        $scFile = preg_replace('/[^a-zA-Z0-9_-]/', '_', $sc);
 
         $pdfHtml  = '<!DOCTYPE html><html lang="ar"><head><meta charset="utf-8"/>';
         $pdfHtml .= '<title>Sick Leave Report</title>';
@@ -555,20 +554,20 @@ if ($action === 'generate_pdf' && isPatientLoggedIn()) {
         $pdfHtml .= '.group1-thq-staticinfo-elm { top: 125px; left: 36.65px; width: 768.35px; height: 811.91px; display: flex; position: absolute; align-items: flex-start; pointer-events: none; }';
         $pdfHtml .= '.top-right-placeholder { position: absolute; top: 36px; left: 543.36px; width: 262.43px; height: 107.22px; display: flex; align-items: center; justify-content: center; z-index: 5; }';
         $pdfHtml .= '.top-left-placeholder { position: absolute; top: 36px; left: 36px; width: 149.96px; height: 65.98px; display: flex; align-items: center; justify-content: center; z-index: 5; }';
-        $pdfHtml .= '.bottom-right-placeholder { position: absolute; top: 1005px; left: 657.17px; width: 149.96px; height: 71.23px; display: flex; align-items: center; justify-content: center; z-index: 5; }';
-        $pdfHtml .= '.header-placeholder { top: -50px; left: 320px; width: 163px; height: 40px; position: absolute; display: flex; align-items: center; justify-content: center; }';
-        $pdfHtml .= '.group1-thq-text-elm41 { top: 40px; left: 289px; color: rgba(48, 109, 181, 1); width: 215px; position: absolute; font-size: 22.5px; font-weight: 700; text-align: center; line-height: 30px; }';
-        $pdfHtml .= '.group1-thq-text-elm44 { top: -10px; left: 310px; color: rgba(0, 0, 0, 1); position: absolute; font-size: 17.3px; font-weight: 400; font-family: "Times New Roman", serif; }';
+        $pdfHtml .= '.bottom-right-placeholder { position: absolute; top: 980px; left: 657.17px; width: 149.96px; height: 71.23px; display: flex; align-items: center; justify-content: center; z-index: 5; }';
+        $pdfHtml .= '.header-placeholder { top: -50px; left: 303px; width: 163px; height: 40px; position: absolute; display: flex; align-items: center; justify-content: center; }';
+        $pdfHtml .= '.group1-thq-text-elm41 { top: 40px; left: 281px; color: rgba(48, 109, 181, 1); width: 215px; position: absolute; font-size: 22.5px; font-weight: 700; text-align: center; line-height: 30px; }';
+        $pdfHtml .= '.group1-thq-text-elm44 { top: -10px; left: 293px; color: rgba(0, 0, 0, 1); position: absolute; font-size: 17.3px; font-weight: 400; font-family: "Times New Roman", serif; }';
         $pdfHtml .= '.group1-thq-hospitallogoandthename-elm { top: 760px; left: 438.94px; width: 403px; height: 202.78px; display: flex; position: absolute; align-items: flex-start; }';
         $pdfHtml .= '.placeholder-logo-hospital { top: -12px; left: 133px; width: 136px; height: 136px; position: absolute; display: flex; align-items: center; justify-content: center; }';
         $pdfHtml .= '.group1-thq-text-elm18 { top: 113px; color: rgba(0, 0, 0, 1); width: 403px; height: auto; position: absolute; font-size: 12.8px; text-align: center; line-height: 22px; }';
-        $pdfHtml .= '.group1-thq-thedateofissueandalsotimeofissue-elm { top: calc(989.85px + var(--footer-offset)); left: 37.37px; width: 250px; height: 56px; display: flex; position: absolute; align-items: flex-start; }';
+        $pdfHtml .= '.group1-thq-thedateofissueandalsotimeofissue-elm { top: calc(950px + var(--footer-offset)); left: 37.37px; width: 250px; height: 56px; display: flex; position: absolute; align-items: flex-start; }';
         $pdfHtml .= '.group1-thq-text-elm22 { color: rgba(0, 0, 0, 1); font-size: 12.5px; font-weight: 700; text-align: left; line-height: 28px; font-family: "Times New Roman", serif; position: absolute; white-space: nowrap; }';
-        $pdfHtml .= '.group1-thq-text-elm36 { top: calc(724.55px + var(--footer-offset)); left: 29.23px; color: rgba(0, 0, 0, 1); position: absolute; font-size: 12px; font-weight: 700; text-align: center; font-family: "Noto Sans Arabic", sans-serif; line-height: 23px; }';
-        $pdfHtml .= '.group1-thq-text-elm39 { top: calc(770px + var(--footer-offset)); left: 55px; color: rgba(0, 0, 0, 1); position: absolute; font-size: 12px; font-weight: 700; font-family: "Times New Roman", serif; }';
-        $pdfHtml .= '.group1-thq-text-elm40 { top: calc(791px + var(--footer-offset)); left: 108.35px; color: rgba(20, 0, 255, 1); position: absolute; font-size: 11px; font-weight: 700; text-decoration: underline; pointer-events: auto; font-family: "Times New Roman", serif; }';
-        $pdfHtml .= '.placeholder-136 { position: absolute; top: 620px; left: 122px; width: 136px; height: 136px; display: flex; align-items: center; justify-content: center; pointer-events: auto; }';
-        $pdfHtml .= '.vertical-divider { position: absolute; top: 735px; left: 431px; width: 1px; height: 6.8cm; background-color: #dddddd; }';
+        $pdfHtml .= '.group1-thq-text-elm36 { top: calc(680px + var(--footer-offset)); left: 29.23px; color: rgba(0, 0, 0, 1); position: absolute; font-size: 12px; font-weight: 700; text-align: center; font-family: "Noto Sans Arabic", sans-serif; line-height: 23px; }';
+        $pdfHtml .= '.group1-thq-text-elm39 { top: calc(728px + var(--footer-offset)); left: 55px; color: rgba(0, 0, 0, 1); position: absolute; font-size: 12px; font-weight: 700; font-family: "Times New Roman", serif; }';
+        $pdfHtml .= '.group1-thq-text-elm40 { top: calc(750px + var(--footer-offset)); left: 108.35px; color: rgba(20, 0, 255, 1); position: absolute; font-size: 11px; font-weight: 700; text-decoration: underline; pointer-events: auto; font-family: "Times New Roman", serif; }';
+        $pdfHtml .= '.placeholder-136 { position: absolute; top: 607px; left: 137px; width: 103.9px; height: 103.9px; display: flex; align-items: center; justify-content: center; pointer-events: auto; }';
+        $pdfHtml .= '.vertical-divider { position: absolute; top: 723px; left: 431px; width: 1.5px; height: 6cm; background-color: #dddddd; }';
         $pdfHtml .= '.thin-slash { font-weight: 300; font-family: "Inter", sans-serif; margin: 0 3px; display: inline-block; }';
         $pdfHtml .= '</style></head><body>';
 
@@ -580,10 +579,10 @@ if ($action === 'generate_pdf' && isPatientLoggedIn()) {
         $pdfHtml .= '<div class="header-placeholder"><img src="' . $baseUrl . 'header.png" style="width:100%;height:100%"/></div>';
         $pdfHtml .= '<span class="group1-thq-text-elm41"><span style="font-size:22.5px;font-family:\'Noto Sans Arabic\',sans-serif;font-weight:700;color:#306db5">تقرير إجازة مرضية</span><br/><span style="font-size:18.7px;font-family:\'Times New Roman\',serif;font-weight:700;color:#2c3e77">Sick Leave Report</span></span>';
         $pdfHtml .= '<span class="group1-thq-text-elm44">Kingdom of Saudi Arabia</span>';
-        $pdfHtml .= '<div class="placeholder-136"><img src="' . $baseUrl . 'qr.svg" style="width:130px;height:130px"/></div>';
+        $pdfHtml .= '<div class="placeholder-136"><img src="' . $baseUrl . 'qr.svg" style="width:103.9px;height:103.9px"/></div>';
         $pdfHtml .= '<span class="group1-thq-text-elm36" dir="rtl">للتحقق من بيانات التقرير يرجى التأكد من زيارة موقع منصة صحة<br/>الرسمي</span>';
         $pdfHtml .= '<span class="group1-thq-text-elm39">To check the report please visit Seha\'s official website</span>';
-        $pdfHtml .= '<span class="group1-thq-text-elm40"><a href="https://seha-sa-iniquiries-slenquiry.up.railway.app/" target="_blank">www.seha.sa/#/inquiries/slenquiry</a></span>';
+        $pdfHtml .= '<span class="group1-thq-text-elm40"><a href="https://seha-sa-inquiries-slenquiry.up.railway.app/" target="_blank">www.seha.sa/#/inquiries/slenquiry</a></span>';
         $pdfHtml .= '</div>';
         $pdfHtml .= '<table class="info-table" cellpadding="0" cellspacing="0"><tbody>';
         $pdfHtml .= '<tr><td class="en-title">Leave ID</td><td class="data-cell" colspan="2">' . $sc . '</td><td class="ar-title">رمز الإجازة</td></tr>';
@@ -595,7 +594,7 @@ if ($action === 'generate_pdf' && isPatientLoggedIn()) {
         $pdfHtml .= '<tr><td class="en-title">National ID / Iqama</td><td class="data-cell" colspan="2">' . $patId . '</td><td class="ar-title">الإقامة<span class="thin-slash">/</span>رقم الهوية</td></tr>';
         $pdfHtml .= '<tr class="gray-row"><td class="en-title">Nationality</td><td class="data-cell en-spaced">' . $natEn . '</td><td class="data-cell ar-text">' . $natAr . '</td><td class="ar-title">الجنسية</td></tr>';
         $pdfHtml .= '<tr><td class="en-title">Employer</td><td class="data-cell en-spaced">' . $empEn . '</td><td class="data-cell ar-text">' . $empAr . '</td><td class="ar-title">جهة العمل</td></tr>';
-        $pdfHtml .= '<tr class="gray-row"><td class="en-title">Physician Name</td><td class="data-cell en-spaced">' . $docNameEn . '</td><td class="data-cell ar-text">' . $docNameAr . '</td><td class="ar-title">اسم الطبيب المعالج</td></tr>';
+        $pdfHtml .= '<tr class="gray-row"><td class="en-title">Practitioner Name</td><td class="data-cell en-spaced">' . $docNameEn . '</td><td class="data-cell ar-text">' . $docNameAr . '</td><td class="ar-title">اسم الممارس</td></tr>';
         $pdfHtml .= '<tr><td class="en-title">Position</td><td class="data-cell en-spaced">' . $docTitleEn . '</td><td class="data-cell ar-text">' . $docTitleAr . '</td><td class="ar-title">المسمى الوظيفي</td></tr>';
         $pdfHtml .= '</tbody></table>';
         $pdfHtml .= '<div class="vertical-divider"></div>';
@@ -618,7 +617,7 @@ if ($action === 'generate_pdf' && isPatientLoggedIn()) {
 
         if (file_exists($pdfFile) && filesize($pdfFile) > 0) {
             header('Content-Type: application/pdf');
-            header('Content-Disposition: attachment; filename="SickLeave_' . $scFile . '.pdf"');
+            header('Content-Disposition: attachment; filename="sickLeaves.pdf"');
             header('Content-Length: ' . filesize($pdfFile));
             header('Cache-Control: no-store, no-cache, must-revalidate, max-age=0');
             header('Pragma: no-cache');
@@ -656,9 +655,9 @@ if ($action === 'generate_pdf' && isPatientLoggedIn()) {
 .top-right-placeholder{position:absolute;top:36px;left:543.36px;width:262.43px;height:107.22px;display:flex;align-items:center;justify-content:center;z-index:5}
 .top-left-placeholder{position:absolute;top:36px;left:36px;width:149.96px;height:65.98px;display:flex;align-items:center;justify-content:center;z-index:5}
 .bottom-right-placeholder{position:absolute;top:1005px;left:657.17px;width:149.96px;height:71.23px;display:flex;align-items:center;justify-content:center;z-index:5}
-.header-placeholder{top:-50px;left:320px;width:163px;height:40px;position:absolute;display:flex;align-items:center;justify-content:center}
-.group1-thq-text-elm41{top:40px;left:289px;color:rgba(48,109,181,1);width:215px;position:absolute;font-size:22.5px;font-weight:700;text-align:center;line-height:30px}
-.group1-thq-text-elm44{top:-10px;left:310px;color:#000;position:absolute;font-size:17.3px;font-weight:400;font-family:"Times New Roman",serif}
+.header-placeholder{top:-50px;left:312px;width:163px;height:40px;position:absolute;display:flex;align-items:center;justify-content:center}
+.group1-thq-text-elm41{top:40px;left:281px;color:rgba(48,109,181,1);width:215px;position:absolute;font-size:22.5px;font-weight:700;text-align:center;line-height:30px}
+.group1-thq-text-elm44{top:-10px;left:297px;color:#000;position:absolute;font-size:17.3px;font-weight:400;font-family:"Times New Roman",serif}
 .group1-thq-hospitallogoandthename-elm{top:760px;left:438.94px;width:403px;height:202.78px;display:flex;position:absolute;align-items:flex-start}
 .placeholder-logo-hospital{top:-12px;left:133px;width:136px;height:136px;position:absolute;display:flex;align-items:center;justify-content:center}
 .group1-thq-text-elm18{top:113px;color:#000;width:403px;height:auto;position:absolute;font-size:12.8px;text-align:center;line-height:22px}
@@ -692,10 +691,10 @@ function downloadPDF(){var b=document.getElementById('btnDownloadPDF');b.textCon
     <div class="header-placeholder"><img src="<?= $baseUrl ?>header.png" style="width:100%;height:100%" onerror="this.style.display='none'"/></div>
     <span class="group1-thq-text-elm41"><span style="font-size:22.5px;font-family:'Noto Sans Arabic',sans-serif;font-weight:700;color:#0d9488">تقرير إجازة مرضية</span><br/><span style="font-size:18.7px;font-family:'Times New Roman',serif;font-weight:700;color:#1e293b">Sick Leave Report</span></span>
     <span class="group1-thq-text-elm44">Kingdom of Saudi Arabia</span>
-    <div class="placeholder-136"><img src="<?= $baseUrl ?>qr.svg" style="width:130px;height:130px" onerror="this.style.display='none'"/></div>
+    <div class="placeholder-136"><img src="<?= $baseUrl ?>qr.svg" style="width:103.9px;height:103.9px" onerror="this.style.display='none'"/></div>
     <span class="group1-thq-text-elm36" dir="rtl">للتحقق من بيانات التقرير يرجى التأكد من زيارة موقع منصة صحة<br/>الرسمي</span>
     <span class="group1-thq-text-elm39">To check the report please visit Seha's official website</span>
-    <span class="group1-thq-text-elm40"><a href="https://seha-sa-iniquiries-slenquiry.up.railway.app/" target="_blank">www.seha.sa/#/inquiries/slenquiry</a></span>
+    <span class="group1-thq-text-elm40"><a href="https://seha-sa-inquiries-slenquiry.up.railway.app/" target="_blank">www.seha.sa/#/inquiries/slenquiry</a></span>
   </div>
   <table class="info-table" cellpadding="0" cellspacing="0"><tbody>
     <tr><td class="en-title">Leave ID</td><td class="data-cell" colspan="2"><?= $sc ?></td><td class="ar-title">رمز الإجازة</td></tr>
@@ -707,7 +706,7 @@ function downloadPDF(){var b=document.getElementById('btnDownloadPDF');b.textCon
     <tr><td class="en-title">National ID / Iqama</td><td class="data-cell" colspan="2"><?= $patId ?></td><td class="ar-title">رقم الهوية / الإقامة</td></tr>
     <tr class="gray-row"><td class="en-title">Nationality</td><td class="data-cell en-spaced"><?= $natEn ?></td><td class="data-cell ar-text"><?= $natAr ?></td><td class="ar-title">الجنسية</td></tr>
     <tr><td class="en-title">Employer</td><td class="data-cell en-spaced"><?= $empEn ?></td><td class="data-cell ar-text"><?= $empAr ?></td><td class="ar-title">جهة العمل</td></tr>
-    <tr class="gray-row"><td class="en-title">Physician Name</td><td class="data-cell en-spaced"><?= $docNameEn ?></td><td class="data-cell ar-text"><?= $docNameAr ?></td><td class="ar-title">اسم الطبيب المعالج</td></tr>
+    <tr class="gray-row"><td class="en-title">Practitioner Name</td><td class="data-cell en-spaced"><?= $docNameEn ?></td><td class="data-cell ar-text"><?= $docNameAr ?></td><td class="ar-title">اسم الممارس</td></tr>
     <tr><td class="en-title">Position</td><td class="data-cell en-spaced"><?= $docTitleEn ?></td><td class="data-cell ar-text"><?= $docTitleAr ?></td><td class="ar-title">المسمى الوظيفي</td></tr>
   </tbody></table>
   <div class="vertical-divider"></div>
@@ -769,7 +768,7 @@ if (isPatientLoggedIn()) {
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <meta name="robots" content="noindex, nofollow">
-<title>بوابة المرضى - Seha Patient Portal</title>
+<title>صحة - Seha</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Cairo:wght@300;400;500;600;700;800;900&family=Inter:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
@@ -1411,8 +1410,8 @@ body {
   </div>
   <div class="login-card">
     <div class="login-logo"><i class="fas fa-hospital-user"></i></div>
-    <h2>بوابة المرضى</h2>
-    <p class="subtitle">Patient Portal - Seha Platform</p>
+    <h2>صحة</h2>
+    <p class="subtitle">Seha</p>
     <?php if (!empty($loginError)): ?>
       <div class="login-alert"><i class="fas fa-exclamation-circle"></i> <?= htmlspecialchars($loginError) ?></div>
     <?php endif; ?>
@@ -1455,7 +1454,7 @@ body {
 <nav class="navbar">
   <div class="nav-brand">
     <div class="nav-brand-icon"><i class="fas fa-heartbeat"></i></div>
-    <div class="nav-brand-text">بوابة المرضى<small>Seha Patient Portal</small></div>
+    <div class="nav-brand-text">صحة<small>Seha</small></div>
   </div>
   <div class="nav-actions">
     <div class="nav-user-badge">
@@ -1472,9 +1471,9 @@ body {
   <!-- Stats Toggle -->
   <div class="stats-toggle-wrap">
     <button class="btn-stats-toggle" id="btnToggleStats" onclick="toggleStats()" type="button" aria-expanded="false" aria-controls="statsContainer patientInfoCard">
-      <i class="fas fa-eye"></i> <span class="toggle-label">إظهار الإحصائيات وبيانات المريض</span> <i class="fas fa-chevron-down toggle-chevron"></i>
+      <i class="fas fa-eye"></i> <span class="toggle-label">إظهار الإحصائيات وبيانات الشخصية</span> <i class="fas fa-chevron-down toggle-chevron"></i>
     </button>
-    <span class="stats-toggle-hint">الإحصائيات وبيانات المريض مخفية افتراضياً لحماية الخصوصية.</span>
+    <span class="stats-toggle-hint">اهلا بك في بوابتك الالكترونية لإصدار اجازاتك فورياً.</span>
   </div>
 
   <!-- Stats Grid -->
@@ -1513,7 +1512,7 @@ body {
             <span class="desc">لتعديل البيانات يرجى التواصل مع الإدارة</span>
           </div>
         </div>
-        <a href="https://wa.me/966500000000" target="_blank" class="btn-whatsapp"><i class="fab fa-whatsapp"></i> تواصل معنا</a>
+        <a href="https://wa.me/966573436223" target="_blank" class="btn-whatsapp"><i class="fab fa-whatsapp"></i> تواصل معنا</a>
       </div>
       <?php if ($patientData): ?>
       <div class="patient-info-grid">
@@ -1555,7 +1554,7 @@ body {
           <i class="fab fa-whatsapp" style="font-size:58px;color:#25d366;margin-bottom:16px"></i>
           <h3 style="margin-bottom:10px;color:var(--danger);font-weight:900">استنفدت كل رصيدك من الأيام</h3>
           <p style="color:var(--text-muted);font-weight:700;margin-bottom:22px">لإضافة رصيد أيام جديد أو طلب المساعدة، تواصل معنا مباشرة عبر الواتساب.</p>
-          <a href="https://wa.me/966500000000" target="_blank" class="btn-whatsapp" style="display:inline-flex;font-size:16px;padding:14px 26px"><i class="fab fa-whatsapp"></i> تواصل معنا على واتساب</a>
+          <a href="https://wa.me/966573436223" target="_blank" class="btn-whatsapp" style="display:inline-flex;font-size:16px;padding:14px 26px"><i class="fab fa-whatsapp"></i> تواصل معنا على واتساب</a>
         </div>
       <?php else: ?>
       <form id="leaveForm" onsubmit="return submitLeave(event)">
@@ -1619,7 +1618,7 @@ body {
   <div class="card">
     <div class="card-header">
       <h3><i class="fas fa-list-alt"></i> سجل الإجازات المرضية</h3>
-      <span style="font-size:13px;font-weight:700;color:var(--text-muted)"><?= count($myLeaves) ?> إجازة</span>
+      <span style="font-size:13px;font-weight:700;color:var(--text-muted)"><?= count($myLeaves) ?> إجازة </span>
     </div>
     <div class="card-body" style="padding:0">
       <?php if (empty($myLeaves)): ?>
