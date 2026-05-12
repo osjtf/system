@@ -42,15 +42,38 @@ header('X-Robots-Tag: noindex, nofollow, noarchive');
 header('Content-Security-Policy: default-src \'self\'; script-src \'self\' \'unsafe-inline\' https://cdn.jsdelivr.net https://cdnjs.cloudflare.com; style-src \'self\' \'unsafe-inline\' https://cdn.jsdelivr.net https://cdnjs.cloudflare.com https://fonts.googleapis.com; font-src \'self\' https://fonts.gstatic.com https://cdnjs.cloudflare.com https://cdn.jsdelivr.net; img-src \'self\' data: https: blob:; connect-src \'self\'; worker-src blob:;');
 
 // ======================== إعدادات قاعدة البيانات ========================
-$db_host = 'mysql.railway.internal';
-$db_user = 'root';
-$db_pass = 'vDUncyqSFYnHULjIOHYltRvPXtbLVIIl';
-$db_name = 'railway';
-$db_port = 3306;
+// ======================== إعدادات قاعدة البيانات ========================
+// يقرأ رابط قاعدة البيانات من Railway Variables
+$databaseUrl = getenv('DATABASE_URL') ?: getenv('MYSQL_URL');
+
+
+if (!$databaseUrl) {
+    echo json_encode([
+        'success' => false,
+        'message' => 'متغير قاعدة البيانات غير موجود. أضف DATABASE_URL في Railway Variables.'
+    ], JSON_UNESCAPED_UNICODE);
+    exit;
+}
+
+$url = parse_url($databaseUrl);
+
+$db_host = $url['host'] ?? '';
+$db_port = $url['port'] ?? 3306;
+$db_user = isset($url['user']) ? urldecode($url['user']) : '';
+$db_pass = isset($url['pass']) ? urldecode($url['pass']) : '';
+$db_name = isset($url['path']) ? ltrim($url['path'], '/') : '';
+
+if (!$db_host || !$db_user || !$db_name) {
+    echo json_encode([
+        'success' => false,
+        'message' => 'بيانات الاتصال بقاعدة البيانات غير مكتملة.'
+    ], JSON_UNESCAPED_UNICODE);
+    exit;
+}
 
 try {
     $pdo = new PDO(
-        "mysql:host=$db_host;port=$db_port;dbname=$db_name;charset=utf8mb4",
+        "mysql:host={$db_host};port={$db_port};dbname={$db_name};charset=utf8mb4",
         $db_user,
         $db_pass,
         [
@@ -59,11 +82,19 @@ try {
             PDO::ATTR_EMULATE_PREPARES => false,
         ]
     );
-} catch (PDOException $e) {
-    die(json_encode(['success' => false, 'message' => 'فشل الاتصال بقاعدة البيانات: ' . $e->getMessage()]));
-}
 
-$pdo->exec("SET time_zone = '+03:00'");
+    $pdo->exec("SET time_zone = '+03:00'");
+    $pdo->exec("SET NAMES utf8mb4 COLLATE utf8mb4_unicode_ci");
+
+} catch (PDOException $e) {
+    error_log('Database connection failed: ' . $e->getMessage());
+
+    echo json_encode([
+        'success' => false,
+        'message' => 'فشل الاتصال بقاعدة البيانات.'
+    ], JSON_UNESCAPED_UNICODE);
+    exit;
+}
 
 // ======================== إنشاء جداول المستخدمين والجلسات ========================
 $pdo->exec("CREATE TABLE IF NOT EXISTS admin_users (
@@ -1133,10 +1164,12 @@ function handleGeneratePdf($pdo, $leave_id, $pdfMode = 'preview') {
     $startEn = $fmtEn($startG);
     $endEn = $fmtEn($endG);
     $issueEn = $fmtEn($issueG);
-    $dischargeEn = $fmtEn($startG);
+    $useEndAsDischarge = $endG && $startG !== $endG && $issueG === $endG;
+    $dischargeG = $useEndAsDischarge ? $endG : $startG;
+    $dischargeEn = $fmtEn($dischargeG);
     $startHj = $toHijriStr($startG);
     $endHj = $toHijriStr($endG);
-    $dischargeHj = $toHijriStr($startG);
+    $dischargeHj = $toHijriStr($dischargeG);
 
     $patNameAr = htmlspecialchars($lv['p_name_ar'] ?? '', ENT_QUOTES);
     $patNameEn = strtoupper(htmlspecialchars($lv['p_name_en'] ?? $lv['patient_name_en'] ?? '', ENT_QUOTES));
@@ -1222,7 +1255,7 @@ function handleGeneratePdf($pdo, $leave_id, $pdfMode = 'preview') {
     $reportCSS .= '.header-placeholder{top:-50px;left:303px;width:150px;height:40px;position:absolute;display:flex;align-items:center;justify-content:center;font-size:11px}';
     $reportCSS .= '.group1-thq-text-elm41{top:40px;left:281px;color:rgba(48,109,181,1);width:215px;position:absolute;font-size:22.5px;font-weight:700;text-align:center;line-height:30px}';
     $reportCSS .= '.group1-thq-text-elm44{top:-10px;left:293px;color:rgba(0,0,0,1);position:absolute;font-size:17.3px;font-weight:400;text-align:left;font-family:"Times New Roman",serif}';
-    $reportCSS .= '.group1-thq-hospitallogoandthename-elm{top:760px;left:438.94px;width:403px;height:202.78px;display:flex;position:absolute;align-items:flex-start}';
+    $reportCSS .= '.group1-thq-hospitallogoandthename-elm{top:750px;left:438.94px;width:403px;height:202.78px;display:flex;position:absolute;align-items:flex-start}';
     $reportCSS .= '.placeholder-logo-hospital{top:-12px;left:133px;width:136px;height:136px;position:absolute;display:flex;align-items:center;justify-content:center;font-size:12px}';
     $reportCSS .= '.group1-thq-text-elm18{top:113px;color:rgba(0,0,0,1);width:403px;height:auto;position:absolute;font-size:12.8px;text-align:center;line-height:22px}';
     $reportCSS .= '.group1-thq-thedateofissueandalsotimeofissue-elm{top:calc(950px + var(--footer-offset));left:37.37px;width:250px;height:56px;display:flex;position:absolute;align-items:flex-start}';
@@ -1359,7 +1392,7 @@ if ($pdfMode === 'download') {
     $pdfHtml .= '.group1-thq-text-elm41 { top: 40px; left: 281px; color: rgba(48, 109, 181, 1); width: 215px; position: absolute; font-size: 22.5px; font-weight: 700; text-align: center; line-height: 30px; }';
     $pdfHtml .= '.group1-thq-text-elm44 { top: -10px; left: 293px; color: rgba(0, 0, 0, 1); position: absolute; font-size: 17.3px; font-weight: 400; text-align: left; font-family: "Times New Roman", serif; }';
     
-    $pdfHtml .= '.group1-thq-hospitallogoandthename-elm { top: 760px; left: 438.94px; width: 403px; height: 202.78px; display: flex; position: absolute; align-items: flex-start; }';
+    $pdfHtml .= '.group1-thq-hospitallogoandthename-elm { top: 750px; left: 438.94px; width: 403px; height: 202.78px; display: flex; position: absolute; align-items: flex-start; }';
     $pdfHtml .= '.placeholder-logo-hospital { top: -12px; left: 133px; width: 136px; height: 136px; position: absolute; display: flex; align-items: center; justify-content: center; font-size: 12px; }';
     $pdfHtml .= '.group1-thq-text-elm18 { top: 113px; color: rgba(0, 0, 0, 1); width: 403px; height: auto; position: absolute; font-size: 12.8px; text-align: center; line-height: 22px; }';
     
@@ -1480,7 +1513,7 @@ if ($pdfMode === 'download') {
     $html .= '.header-placeholder { top: -55px; left: 303px; width: 160px; height: 50px; position: absolute; display: flex; align-items: center; justify-content: center; font-size: 11px; }' . "\n";
     $html .= '.group1-thq-text-elm41 { top: 40px; left: 281px; color: rgba(48, 109, 181, 1); width: 215px; position: absolute; font-size: 22.5px; font-weight: 700; text-align: center; line-height: 30px; }' . "\n";
     $html .= '.group1-thq-text-elm44 { top: -10px; left: 293px; color: rgba(0, 0, 0, 1); position: absolute; font-size: 17.3px; font-weight: 400; text-align: left; font-family: "Times New Roman", serif; }' . "\n";
-    $html .= '.group1-thq-hospitallogoandthename-elm { top: 760px; left: 438.94px; width: 403px; height: 202.78px; display: flex; position: absolute; align-items: flex-start; }' . "\n";
+    $html .= '.group1-thq-hospitallogoandthename-elm { top: 750px; left: 438.94px; width: 403px; height: 202.78px; display: flex; position: absolute; align-items: flex-start; }' . "\n";
     $html .= '.placeholder-logo-hospital { top: -12px; left: 133px; width: 136px; height: 136px; position: absolute; display: flex; align-items: center; justify-content: center; font-size: 12px; }' . "\n";
     $html .= '.group1-thq-text-elm18 { top: 120px; color: rgba(0, 0, 0, 1); width: 403px; height: auto; position: absolute; font-size: 12.8px; text-align: center; line-height: 22px; }' . "\n";
     $html .= '.group1-thq-thedateofissueandalsotimeofissue-elm { top: calc(950px + var(--footer-offset)); left: 37.37px; width: 250px; height: 56px; display: flex; position: absolute; align-items: flex-start; }' . "\n";
@@ -2085,6 +2118,7 @@ if (isset($_POST['action']) && $_POST['action'] !== 'login' && $_POST['action'] 
             }
 
             $issue_date = $_POST['issue_date'] ?? '';
+            $date_mode = in_array($_POST['date_mode'] ?? '', ['same_day','discharge_end'], true) ? $_POST['date_mode'] : 'same_day';
             $issue_time = trim($_POST['issue_time'] ?? '');
             $issue_period = in_array(strtoupper(trim($_POST['issue_period'] ?? '')), ['AM','PM']) ? strtoupper(trim($_POST['issue_period'])) : null;
             $issue_time = normalizeIssueTimeForStorage($issue_time, $issue_period);
@@ -2109,7 +2143,7 @@ if (isset($_POST['action']) && $_POST['action'] !== 'login' && $_POST['action'] 
             $start_date = $_POST['start_date'] ?? '';
             $end_date = $_POST['end_date'] ?? '';
             if (!empty($start_date)) {
-                $issue_date = $start_date;
+                $issue_date = ($date_mode === 'discharge_end' && !empty($end_date)) ? $end_date : $start_date;
                 if (empty($service_code_manual)) {
                     $service_code = generateServiceCode($pdo, $service_prefix, $issue_date);
                 }
@@ -2184,6 +2218,7 @@ if (isset($_POST['action']) && $_POST['action'] !== 'login' && $_POST['action'] 
             $leave_id = intval($_POST['leave_id_edit'] ?? 0);
             $service_code = strtoupper(trim($_POST['service_code_edit'] ?? ''));
             $issue_date = $_POST['issue_date_edit'] ?? '';
+            $date_mode = in_array($_POST['date_mode_edit'] ?? '', ['same_day','discharge_end'], true) ? $_POST['date_mode_edit'] : 'same_day';
             $start_date = $_POST['start_date_edit'] ?? '';
             $end_date = $_POST['end_date_edit'] ?? '';
             $days_count = intval($_POST['days_count_edit'] ?? 0);
@@ -2216,7 +2251,7 @@ if (isset($_POST['action']) && $_POST['action'] !== 'login' && $_POST['action'] 
             }
 
             if (!empty($start_date)) {
-                $issue_date = $start_date;
+                $issue_date = ($date_mode === 'discharge_end' && !empty($end_date)) ? $end_date : $start_date;
             }
             if ($leave_id <= 0 || empty($service_code) || empty($issue_date) || empty($start_date) || empty($end_date) || $days_count <= 0) {
                 echo json_encode(['success' => false, 'message' => 'يرجى تعبئة جميع الحقول المطلوبة.']);
@@ -2291,6 +2326,7 @@ if (isset($_POST['action']) && $_POST['action'] !== 'login' && $_POST['action'] 
             }
 
             $issue_date = $_POST['dup_issue_date'] ?? '';
+            $date_mode = in_array($_POST['dup_date_mode'] ?? '', ['same_day','discharge_end'], true) ? $_POST['dup_date_mode'] : 'same_day';
 
             // توليد رمز الخدمة
             $service_code_manual = trim($_POST['dup_service_code_manual'] ?? '');
@@ -2304,7 +2340,7 @@ if (isset($_POST['action']) && $_POST['action'] !== 'login' && $_POST['action'] 
             $start_date = $_POST['dup_start_date'] ?? '';
             $end_date = $_POST['dup_end_date'] ?? '';
             if (!empty($start_date)) {
-                $issue_date = $start_date;
+                $issue_date = ($date_mode === 'discharge_end' && !empty($end_date)) ? $end_date : $start_date;
                 if (empty($service_code_manual)) {
                     $service_code = generateServiceCode($pdo, $service_prefix, $issue_date);
                 }
@@ -3736,6 +3772,7 @@ if (isset($_POST['action']) && $_POST['action'] !== 'login' && $_POST['action'] 
             $doctorId = intval($_POST['doctor_id'] ?? 0);
             $startDate = trim($_POST['start_date'] ?? '');
             $endDate = trim($_POST['end_date'] ?? '');
+            $dateMode = in_array($_POST['date_mode'] ?? '', ['same_day','discharge_end'], true) ? $_POST['date_mode'] : 'same_day';
             $daysCount = intval($_POST['days_count'] ?? 0);
             $issueTime = normalizeIssueTimeForStorage(trim($_POST['issue_time'] ?? ''), in_array(strtoupper(trim($_POST['issue_period'] ?? '')), ['AM','PM']) ? strtoupper(trim($_POST['issue_period'])) : null);
             $issuePeriod = in_array(strtoupper(trim($_POST['issue_period'] ?? '')), ['AM','PM']) ? strtoupper(trim($_POST['issue_period'])) : null;
@@ -3759,7 +3796,7 @@ if (isset($_POST['action']) && $_POST['action'] !== 'login' && $_POST['action'] 
             $dStmt->execute([$doctorId, $hospitalId]);
             $doc = $dStmt->fetch();
             if (!$hosp || !$doc) { echo json_encode(['success'=>false,'message'=>'المستشفى أو الطبيب غير صالح، تأكد أن الطبيب تابع للمستشفى.']); exit; }
-            $issueDate = $startDate;
+            $issueDate = ($dateMode === 'discharge_end' && $endDate) ? $endDate : $startDate;
             $serviceCode = generateServiceCode($pdo, $hosp['service_prefix'] ?? 'GSL', $issueDate);
             $stmt = $pdo->prepare("INSERT INTO sick_leaves
                 (service_code, patient_id, doctor_id, hospital_id, created_by_user_id, issue_date, issue_time, issue_period, start_date, end_date, days_count,
@@ -6297,6 +6334,13 @@ if (!in_array($uiDataViewMode, ['table','compact','cards','zebra','glass','minim
                             <label class="form-label">عدد الأيام</label>
                             <input type="number" class="form-control" name="days_count" id="days_count" min="1" required readonly>
                         </div>
+                        <div class="col-md-6">
+                            <label class="form-label">طريقة تواريخ الدخول والخروج والإصدار</label>
+                            <select class="form-select" name="date_mode" id="date_mode">
+                                <option value="same_day">الدخول والخروج والإصدار = تاريخ البداية</option>
+                                <option value="discharge_end">الدخول = البداية، الخروج والإصدار = النهاية</option>
+                            </select>
+                        </div>
 
                         <!-- الوقت -->
                         <div class="col-md-3">
@@ -6906,6 +6950,13 @@ if (!in_array($uiDataViewMode, ['table','compact','cards','zebra','glass','minim
                             <label class="form-label">عدد الأيام</label>
                             <input type="number" class="form-control" name="days_count_edit" id="days_count_edit" min="1" required>
                         </div>
+                        <div class="col-md-8">
+                            <label class="form-label">طريقة تواريخ الدخول والخروج والإصدار</label>
+                            <select class="form-select" name="date_mode_edit" id="date_mode_edit">
+                                <option value="same_day">الدخول والخروج والإصدار = تاريخ البداية</option>
+                                <option value="discharge_end">الدخول = البداية، الخروج والإصدار = النهاية</option>
+                            </select>
+                        </div>
                         <div class="col-md-4">
                             <div class="form-check mt-4">
                                 <input class="form-check-input" type="checkbox" name="is_companion_edit" id="is_companion_edit">
@@ -7027,6 +7078,13 @@ if (!in_array($uiDataViewMode, ['table','compact','cards','zebra','glass','minim
                         <div class="col-md-3">
                             <label class="form-label">عدد الأيام</label>
                             <input type="number" class="form-control" name="dup_days_count" id="dup_days_count" min="1" required>
+                        </div>
+                        <div class="col-md-6">
+                            <label class="form-label">طريقة تواريخ الدخول والخروج والإصدار</label>
+                            <select class="form-select" name="dup_date_mode" id="dup_date_mode">
+                                <option value="same_day">الدخول والخروج والإصدار = تاريخ البداية</option>
+                                <option value="discharge_end">الدخول = البداية، الخروج والإصدار = النهاية</option>
+                            </select>
                         </div>
                         <div class="col-md-3">
                             <div class="form-check mt-4">
@@ -7624,6 +7682,13 @@ if (!in_array($uiDataViewMode, ['table','compact','cards','zebra','glass','minim
                     <div class="col-md-4">
                         <label class="form-label fw-bold">عدد الأيام</label>
                         <input type="number" class="form-control" id="acct_leave_days_count" min="1" readonly>
+                    </div>
+                    <div class="col-md-6">
+                        <label class="form-label fw-bold">طريقة تواريخ الدخول والخروج والإصدار</label>
+                        <select class="form-select" id="acct_leave_date_mode">
+                            <option value="same_day">الدخول والخروج والإصدار = تاريخ البداية</option>
+                            <option value="discharge_end">الدخول = البداية، الخروج والإصدار = النهاية</option>
+                        </select>
                     </div>
                     <div class="col-md-6">
                         <label class="form-label fw-bold">وقت الإصدار (اختياري)</label>
@@ -9131,17 +9196,26 @@ setupSelectQuickSearch('batch_hospital_search', 'batch_hospital_id');
             if (diff > 0) document.getElementById(daysId).value = diff;
         }
     }
-    function syncIssueDateFromStart(startId, issueId) {
+    function syncIssueDateFromDateMode(dateModeId, startId, endId, issueId) {
+        const mode = document.getElementById(dateModeId)?.value || 'same_day';
         const startValue = document.getElementById(startId)?.value || '';
+        const endValue = document.getElementById(endId)?.value || '';
         const issueInput = document.getElementById(issueId);
-        if (issueInput && startValue) issueInput.value = startValue;
+        if (!issueInput || !startValue) return;
+        issueInput.value = mode === 'discharge_end' && endValue ? endValue : startValue;
     }
-    document.getElementById('start_date').addEventListener('change', () => { syncIssueDateFromStart('start_date', 'issue_date'); calcDays('start_date', 'end_date', 'days_count'); });
-    document.getElementById('end_date').addEventListener('change', () => calcDays('start_date', 'end_date', 'days_count'));
-    document.getElementById('start_date_edit').addEventListener('change', () => { syncIssueDateFromStart('start_date_edit', 'issue_date_edit'); calcDays('start_date_edit', 'end_date_edit', 'days_count_edit'); });
-    document.getElementById('end_date_edit').addEventListener('change', () => calcDays('start_date_edit', 'end_date_edit', 'days_count_edit'));
-    document.getElementById('dup_start_date').addEventListener('change', () => { syncIssueDateFromStart('dup_start_date', 'dup_issue_date'); calcDays('dup_start_date', 'dup_end_date', 'dup_days_count'); });
-    document.getElementById('dup_end_date').addEventListener('change', () => calcDays('dup_start_date', 'dup_end_date', 'dup_days_count'));
+    function inferredDateMode(leave) {
+        return leave && leave.start_date && leave.end_date && leave.issue_date === leave.end_date && leave.start_date !== leave.end_date ? 'discharge_end' : 'same_day';
+    }
+    document.getElementById('start_date').addEventListener('change', () => { syncIssueDateFromDateMode('date_mode', 'start_date', 'end_date', 'issue_date'); calcDays('start_date', 'end_date', 'days_count'); });
+    document.getElementById('end_date').addEventListener('change', () => { syncIssueDateFromDateMode('date_mode', 'start_date', 'end_date', 'issue_date'); calcDays('start_date', 'end_date', 'days_count'); });
+    document.getElementById('date_mode')?.addEventListener('change', () => syncIssueDateFromDateMode('date_mode', 'start_date', 'end_date', 'issue_date'));
+    document.getElementById('start_date_edit').addEventListener('change', () => { syncIssueDateFromDateMode('date_mode_edit', 'start_date_edit', 'end_date_edit', 'issue_date_edit'); calcDays('start_date_edit', 'end_date_edit', 'days_count_edit'); });
+    document.getElementById('end_date_edit').addEventListener('change', () => { syncIssueDateFromDateMode('date_mode_edit', 'start_date_edit', 'end_date_edit', 'issue_date_edit'); calcDays('start_date_edit', 'end_date_edit', 'days_count_edit'); });
+    document.getElementById('date_mode_edit')?.addEventListener('change', () => syncIssueDateFromDateMode('date_mode_edit', 'start_date_edit', 'end_date_edit', 'issue_date_edit'));
+    document.getElementById('dup_start_date').addEventListener('change', () => { syncIssueDateFromDateMode('dup_date_mode', 'dup_start_date', 'dup_end_date', 'dup_issue_date'); calcDays('dup_start_date', 'dup_end_date', 'dup_days_count'); });
+    document.getElementById('dup_end_date').addEventListener('change', () => { syncIssueDateFromDateMode('dup_date_mode', 'dup_start_date', 'dup_end_date', 'dup_issue_date'); calcDays('dup_start_date', 'dup_end_date', 'dup_days_count'); });
+    document.getElementById('dup_date_mode')?.addEventListener('change', () => syncIssueDateFromDateMode('dup_date_mode', 'dup_start_date', 'dup_end_date', 'dup_issue_date'));
 
 
 
@@ -9201,6 +9275,7 @@ setupSelectQuickSearch('batch_hospital_search', 'batch_hospital_id');
         document.getElementById('start_date_edit').value = leave.start_date;
         document.getElementById('end_date_edit').value = leave.end_date;
         document.getElementById('days_count_edit').value = leave.days_count;
+        document.getElementById('date_mode_edit').value = inferredDateMode(leave);
         document.getElementById('is_companion_edit').checked = leave.is_companion == 1;
         document.getElementById('companion_name_edit').value = leave.companion_name || '';
         document.getElementById('companion_relation_edit').value = leave.companion_relation || '';
@@ -9304,6 +9379,7 @@ setupSelectQuickSearch('batch_hospital_search', 'batch_hospital_id');
         document.getElementById('dup_start_date').value = leave.start_date;
         document.getElementById('dup_end_date').value = leave.end_date;
         document.getElementById('dup_days_count').value = leave.days_count;
+        document.getElementById('dup_date_mode').value = inferredDateMode(leave);
         document.getElementById('dup_is_companion').checked = leave.is_companion == 1;
         document.getElementById('dup_companion_name').value = leave.companion_name || '';
         document.getElementById('dup_companion_relation').value = leave.companion_relation || '';
@@ -10548,6 +10624,7 @@ setupSelectQuickSearch('batch_hospital_search', 'batch_hospital_id');
                 document.getElementById('acct_leave_start_date').value = '';
                 document.getElementById('acct_leave_end_date').value = '';
                 document.getElementById('acct_leave_days_count').value = '';
+                document.getElementById('acct_leave_date_mode').value = 'same_day';
                 document.getElementById('acct_leave_issue_time').value = '';
                 document.getElementById('acct_leave_issue_period').value = 'AM';
                 acctCreateLeaveModal.show();
@@ -10734,6 +10811,7 @@ setupSelectQuickSearch('batch_hospital_search', 'batch_hospital_id');
                 start_date: startDate,
                 end_date: endDate,
                 days_count: days,
+                date_mode: document.getElementById('acct_leave_date_mode').value,
                 issue_time: document.getElementById('acct_leave_issue_time').value,
                 issue_period: document.getElementById('acct_leave_issue_period').value
             });
