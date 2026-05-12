@@ -9,6 +9,7 @@ ini_set('session.cookie_httponly', '1');
 ini_set('session.cookie_secure', (!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off') ? '1' : '0');
 ini_set('session.cookie_samesite', 'Strict');
 ini_set('session.use_strict_mode', '1');
+session_name('PATIENTSESSID');
 session_start();
 
 // إخفاء معلومات الخادم والمسارات
@@ -76,6 +77,61 @@ try {
 $pdo->exec("SET time_zone = '+03:00'");
 try { $pdo->exec("ALTER TABLE hospitals ADD COLUMN deleted_at DATETIME NULL"); } catch (Throwable $e) {}
 
+
+// بوابة المرضى تستخدم جدولاً مستقلاً بالكامل عن مستخدمي لوحة التحكم.
+function patientTableExists(PDO $pdo, string $table): bool {
+    $stmt = $pdo->prepare("SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = DATABASE() AND table_name = ?");
+    $stmt->execute([$table]);
+    return (int)$stmt->fetchColumn() > 0;
+}
+function patientEnsureColumn(PDO $pdo, string $table, string $column, string $definition): void {
+    if (!patientTableExists($pdo, $table)) return;
+    $stmt = $pdo->prepare("SELECT COUNT(*) FROM information_schema.columns WHERE table_schema = DATABASE() AND table_name = ? AND column_name = ?");
+    $stmt->execute([$table, $column]);
+    if ((int)$stmt->fetchColumn() === 0) $pdo->exec("ALTER TABLE $table ADD COLUMN $column $definition");
+}
+function patientEnsureNullableColumn(PDO $pdo, string $table, string $column, string $definition): void {
+    $stmt = $pdo->prepare("SELECT IS_NULLABLE FROM information_schema.columns WHERE table_schema = DATABASE() AND table_name = ? AND column_name = ? LIMIT 1");
+    $stmt->execute([$table, $column]);
+    if (strtoupper((string)$stmt->fetchColumn()) !== 'YES') {
+        try { $pdo->exec("ALTER TABLE `$table` MODIFY COLUMN `$column` $definition"); } catch(Throwable $e) {}
+    }
+}
+$pdo->exec("CREATE TABLE IF NOT EXISTS patient_portal_users (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    username VARCHAR(100) NOT NULL UNIQUE,
+    password_hash VARCHAR(255) NOT NULL,
+    display_name VARCHAR(150) NOT NULL,
+    is_active TINYINT(1) DEFAULT 1,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci");
+patientEnsureColumn($pdo, 'patient_accounts', 'account_user_id', "INT NULL AFTER id");
+patientEnsureColumn($pdo, 'account_payments', 'account_user_id', "INT NULL AFTER id");
+patientEnsureNullableColumn($pdo, 'account_payments', 'user_id', 'INT NULL');
+patientEnsureNullableColumn($pdo, 'patient_accounts', 'user_id', 'INT NULL');
+try {
+    $hasLegacyStmt = $pdo->query("SELECT pa.id
+                                  FROM patient_accounts pa
+                                  INNER JOIN admin_users u ON u.id = pa.user_id
+                                  WHERE pa.account_user_id IS NULL
+                                  LIMIT 1");
+    if ($hasLegacyStmt && $hasLegacyStmt->fetchColumn()) {
+        $legacyRows = $pdo->query("SELECT pa.id AS pa_id, pa.user_id, u.username, u.password_hash, u.display_name, u.is_active, u.created_at
+                                   FROM patient_accounts pa
+                                   INNER JOIN admin_users u ON u.id = pa.user_id
+                                   WHERE pa.account_user_id IS NULL")->fetchAll();
+        $insertPortal = $pdo->prepare("INSERT IGNORE INTO patient_portal_users (id, username, password_hash, display_name, is_active, created_at) VALUES (?, ?, ?, ?, ?, ?)");
+        $updateAccount = $pdo->prepare("UPDATE patient_accounts SET account_user_id = ? WHERE id = ?");
+        foreach ($legacyRows as $row) {
+            $portalId = (int)$row['user_id'];
+            $insertPortal->execute([$portalId, $row['username'], $row['password_hash'], $row['display_name'], (int)$row['is_active'], $row['created_at'] ?: date('Y-m-d H:i:s')]);
+            $updateAccount->execute([$portalId, (int)$row['pa_id']]);
+        }
+        $pdo->exec("UPDATE account_payments SET account_user_id = user_id WHERE account_user_id IS NULL AND user_id IS NOT NULL");
+    }
+} catch (Throwable $e) {}
+
 // ======================== دوال الأمان ========================
 function patient_csrf_token(): string {
     if (empty($_SESSION['patient_csrf_token'])) {
@@ -104,7 +160,7 @@ function isPatientLoggedIn(): bool {
 function checkPatientActive(PDO $pdo): bool {
     if (!isPatientLoggedIn()) return false;
     $uid = (int)$_SESSION['patient_user_id'];
-    $stmt = $pdo->prepare("SELECT is_active FROM admin_users WHERE id = ?");
+    $stmt = $pdo->prepare("SELECT is_active FROM patient_portal_users WHERE id = ?");
     $stmt->execute([$uid]);
     $row = $stmt->fetch();
     if (!$row || !$row['is_active']) {
@@ -195,6 +251,12 @@ function formatHijriDateSpanUser(string $date): string {
 // ======================== معالجة الطلبات ========================
 $action = $_POST['action'] ?? $_GET['action'] ?? '';
 
+if ($action === 'health') {
+    header('Content-Type: application/json; charset=utf-8');
+    echo json_encode(['ok' => true, 'role' => 'patient', 'db' => 'ok', 'time' => nowSaudiUser()], JSON_UNESCAPED_UNICODE);
+    exit;
+}
+
 // تسجيل الدخول
 if ($action === 'patient_login') {
     if (!patient_verify_csrf($_POST['csrf_token'] ?? '')) {
@@ -215,7 +277,7 @@ if ($action === 'patient_login') {
         } elseif (empty($username) || empty($password)) {
             $loginError = 'يرجى إدخال اسم المستخدم وكلمة المرور.';
         } else {
-            $stmtCheck = $pdo->prepare("SELECT u.*, pa.patient_id, pa.allowed_days, pa.expiry_date FROM admin_users u INNER JOIN patient_accounts pa ON pa.user_id = u.id WHERE u.username = ? AND u.is_active = 1");
+            $stmtCheck = $pdo->prepare("SELECT u.*, pa.patient_id, pa.allowed_days, pa.expiry_date FROM patient_portal_users u INNER JOIN patient_accounts pa ON pa.account_user_id = u.id WHERE u.username = ? AND u.is_active = 1");
             $stmtCheck->execute([$username]);
             $userCheck = $stmtCheck->fetch();
 
@@ -276,8 +338,7 @@ if ($action === 'get_user_notifications' && isPatientLoggedIn()) {
         user_id INT NOT NULL,
         message TEXT NOT NULL,
         is_read TINYINT(1) DEFAULT 0,
-        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-        FOREIGN KEY (user_id) REFERENCES admin_users(id) ON DELETE CASCADE
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci");
     $stmt = $pdo->prepare("SELECT * FROM user_notifications WHERE user_id = ? ORDER BY created_at DESC LIMIT 20");
     $stmt->execute([$uid]);
@@ -314,7 +375,7 @@ if ($action === 'create_sick_leave' && isPatientLoggedIn()) {
     $patientId = (int)$_SESSION['patient_id'];
     $userId    = (int)$_SESSION['patient_user_id'];
 
-    $paStmt = $pdo->prepare("SELECT allowed_days FROM patient_accounts WHERE user_id = ?");
+    $paStmt = $pdo->prepare("SELECT allowed_days FROM patient_accounts WHERE account_user_id = ?");
     $paStmt->execute([$userId]);
     $paRow = $paStmt->fetch();
     $allowedDays = $paRow ? (int)$paRow['allowed_days'] : 0;
@@ -386,38 +447,74 @@ if ($action === 'create_sick_leave' && isPatientLoggedIn()) {
     // same_day: الدخول والخروج والإصدار على تاريخ البداية.
     // discharge_end: الدخول على البداية، والخروج والإصدار على تاريخ النهاية.
     $issueDate = $dateMode === 'discharge_end' ? $endDate : $startDate;
-    $serviceCode = generateServiceCodeUser($pdo, $prefix, $issueDate);
-    $stmt = $pdo->prepare("INSERT INTO sick_leaves 
-        (service_code, patient_id, doctor_id, hospital_id, created_by_user_id,
-         issue_date, issue_time, issue_period, start_date, end_date, days_count,
-         patient_name_en, doctor_name_en, doctor_title_en,
-         hospital_name_ar, hospital_name_en, logo_path,
-         employer_ar, employer_en, is_paid, payment_amount)
-        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)");
-    $stmt->execute([
-        $serviceCode,
-        $patientId,
-        $doctorId,
-        $hospitalId,
-        $userId,
-        $issueDate,
-        $issueTime,
-        $issuePeriod,
-        $startDate,
-        $endDate,
-        $daysCount,
-        $pat['name_en'] ?? '',
-        $doc['name_en'] ?? '',
-        $doc['title_en'] ?? '',
-        $hosp['name_ar'] ?? '',
-        $hosp['name_en'] ?? '',
-        $hosp['logo_url'] ?? $hosp['logo_path'] ?? '',
-        $pat['employer_ar'] ?? '',
-        $pat['employer_en'] ?? '',
-        1,
-        0,
-    ]);
-    $leaveId = (int)$pdo->lastInsertId();
+
+    $idempotencyKey = trim($_POST['idempotency_key'] ?? '');
+    if ($idempotencyKey === '') {
+        $idempotencyKey = hash('sha256', implode('|', [$userId, $hospitalId, $doctorId, $startDate, $endDate, $daysCount, microtime(true)]));
+    }
+    $_SESSION['patient_processed_leave_keys'] = $_SESSION['patient_processed_leave_keys'] ?? [];
+    if (isset($_SESSION['patient_processed_leave_keys'][$idempotencyKey])) {
+        echo json_encode(['success' => false, 'message' => 'تم استقبال هذا الطلب مسبقاً. يرجى تحديث السجل قبل إعادة المحاولة.']);
+        exit;
+    }
+
+    $pdo->beginTransaction();
+    try {
+        $lockedAccountStmt = $pdo->prepare("SELECT allowed_days FROM patient_accounts WHERE account_user_id = ? AND patient_id = ? LIMIT 1 FOR UPDATE");
+        $lockedAccountStmt->execute([$userId, $patientId]);
+        $lockedAccount = $lockedAccountStmt->fetch();
+        if (!$lockedAccount) {
+            throw new RuntimeException('حساب المريض غير مرتبط بشكل صحيح.');
+        }
+        $allowedDays = (int)$lockedAccount['allowed_days'];
+        $usedDays = getUsedDaysUser($pdo, $patientId, $userId);
+        $remainingDays = $allowedDays - $usedDays;
+        if ($daysCount > $remainingDays) {
+            throw new RuntimeException("عدد الأيام المطلوبة ($daysCount) يتجاوز الحصة المتبقية ($remainingDays يوم).");
+        }
+
+        $serviceCode = generateServiceCodeUser($pdo, $prefix, $issueDate);
+        $stmt = $pdo->prepare("INSERT INTO sick_leaves
+            (service_code, patient_id, doctor_id, hospital_id, created_by_user_id,
+             issue_date, issue_time, issue_period, start_date, end_date, days_count,
+             patient_name_en, doctor_name_en, doctor_title_en,
+             hospital_name_ar, hospital_name_en, logo_path,
+             employer_ar, employer_en, is_paid, payment_amount)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)");
+        $stmt->execute([
+            $serviceCode,
+            $patientId,
+            $doctorId,
+            $hospitalId,
+            $userId,
+            $issueDate,
+            $issueTime,
+            $issuePeriod,
+            $startDate,
+            $endDate,
+            $daysCount,
+            $pat['name_en'] ?? '',
+            $doc['name_en'] ?? '',
+            $doc['title_en'] ?? '',
+            $hosp['name_ar'] ?? '',
+            $hosp['name_en'] ?? '',
+            $hosp['logo_url'] ?? $hosp['logo_path'] ?? '',
+            $pat['employer_ar'] ?? '',
+            $pat['employer_en'] ?? '',
+            1,
+            0,
+        ]);
+        $leaveId = (int)$pdo->lastInsertId();
+        $pdo->commit();
+        $_SESSION['patient_processed_leave_keys'][$idempotencyKey] = $leaveId;
+        if (count($_SESSION['patient_processed_leave_keys']) > 20) {
+            $_SESSION['patient_processed_leave_keys'] = array_slice($_SESSION['patient_processed_leave_keys'], -20, null, true);
+        }
+    } catch (Throwable $e) {
+        if ($pdo->inTransaction()) $pdo->rollBack();
+        echo json_encode(['success' => false, 'message' => $e->getMessage() ?: 'تعذّر إنشاء الإجازة.']);
+        exit;
+    }
 
     echo json_encode([
         'success'        => true,
@@ -759,7 +856,7 @@ if (isPatientLoggedIn()) {
     $patientId = (int)$_SESSION['patient_id'];
     $userId    = (int)$_SESSION['patient_user_id'];
 
-    $stmt2 = $pdo->prepare("SELECT allowed_days FROM patient_accounts WHERE user_id = ?");
+    $stmt2 = $pdo->prepare("SELECT allowed_days FROM patient_accounts WHERE account_user_id = ?");
     $stmt2->execute([$userId]);
     $paRow = $stmt2->fetch();
     if ($paRow) {
@@ -1385,6 +1482,19 @@ body {
   box-shadow: 0 4px 15px rgba(37,211,102,0.3); transition: var(--transition-fast);
 }
 .btn-whatsapp:hover { background: #128c7e; transform: translateY(-2px); }
+.btn-tutorial {
+  display: inline-flex; align-items: center; justify-content: center; gap: 10px;
+  padding: 12px 22px; border-radius: var(--radius-lg); text-decoration: none;
+  color: #fff; font-size: 14px; font-weight: 900;
+  background: linear-gradient(135deg, #7c3aed, #06b6d4);
+  box-shadow: 0 14px 34px rgba(124,58,237,0.24);
+  transition: var(--transition-fast); position: relative; overflow: hidden;
+}
+.btn-tutorial::before { content: ''; position: absolute; inset: 0; background: linear-gradient(120deg, transparent, rgba(255,255,255,0.22), transparent); transform: translateX(-120%); transition: transform .55s ease; }
+.btn-tutorial:hover { color:#fff; transform: translateY(-2px); box-shadow: 0 18px 42px rgba(6,182,212,0.28); }
+.btn-tutorial:hover::before { transform: translateX(120%); }
+.patient-hero-actions { display:flex; align-items:center; justify-content:center; gap:12px; flex-wrap:wrap; margin: 18px 0 26px; }
+.patient-hero-actions .btn-whatsapp, .patient-hero-actions .btn-tutorial { min-height: 46px; }
 
 /* ═══ Responsive ═══ */
 @media (max-width: 768px) {
@@ -1408,9 +1518,10 @@ body {
   .stat-icon { width: 50px; height: 50px; font-size: 20px; }
   .notice-bar { flex-direction: column; align-items: stretch; }
   .notice-bar .notice-content { align-items: flex-start; }
-  .btn-whatsapp { justify-content: center; width: 100%; }
+  .btn-whatsapp, .btn-tutorial { justify-content: center; width: 100%; }
+  .patient-hero-actions { align-items: stretch; }
   .time-tabs { flex-direction: column; }
-  .leaves-table { min-width: 760px; }
+  .leaves-table { min-width: 820px; }
 }
 @media (max-width: 480px) {
   .navbar { height: auto; min-height: var(--nav-height); padding-top: 8px; padding-bottom: 8px; }
@@ -1500,6 +1611,15 @@ body {
       <i class="fas fa-eye"></i> <span class="toggle-label">إظهار الإحصائيات وبيانات الشخصية</span> <i class="fas fa-chevron-down toggle-chevron"></i>
     </button>
     <span class="stats-toggle-hint">اهلا بك في بوابتك الالكترونية لإصدار اجازاتك فورياً.</span>
+  </div>
+
+  <div class="patient-hero-actions" aria-label="روابط مساعدة">
+    <a href="https://2u.pw/LPfDTy" target="_blank" rel="noopener noreferrer" class="btn-tutorial">
+      <i class="fas fa-circle-play"></i> شرح استخدام النظام
+    </a>
+    <a href="https://wa.me/966573436223" target="_blank" rel="noopener noreferrer" class="btn-whatsapp">
+      <i class="fab fa-whatsapp"></i> الدعم عبر الواتساب
+    </a>
   </div>
 
   <!-- Stats Grid -->
@@ -1664,11 +1784,12 @@ body {
         <div class="table-responsive">
           <table class="leaves-table">
             <thead><tr>
-              <th>رمز الإجازة</th><th>المستشفى</th><th>الطبيب</th><th>المدة</th><th>تاريخ البداية</th><th>الإجراء</th>
+              <th>#</th><th>رمز الإجازة</th><th>المستشفى</th><th>الطبيب</th><th>المدة</th><th>تاريخ البداية</th><th>الإجراء</th>
             </tr></thead>
             <tbody>
-            <?php foreach ($myLeaves as $lv): ?>
+            <?php foreach ($myLeaves as $idx => $lv): ?>
               <tr>
+                <td style="font-family:var(--font-en);font-weight:900;color:var(--text-muted)"><?= $idx + 1 ?></td>
                 <td style="font-family:var(--font-en);font-weight:800;color:var(--primary)"><?= htmlspecialchars($lv['service_code'] ?? '') ?></td>
                 <td><?= htmlspecialchars($lv['h_name_ar'] ?? '') ?></td>
                 <td><?= htmlspecialchars($lv['d_name_ar'] ?? '') ?></td>
@@ -1845,6 +1966,7 @@ function submitLeave(e) {
   btn.innerHTML = '<span class="spinner"></span> جاري الإنشاء...';
   const fd = new FormData(document.getElementById('leaveForm'));
   fd.append('action', 'create_sick_leave');
+  fd.append('idempotency_key', (window.crypto && window.crypto.randomUUID) ? window.crypto.randomUUID() : String(Date.now()) + Math.random().toString(16).slice(2));
   fetch('user.php', { method: 'POST', body: fd })
     .then(r => r.json()).then(data => {
       btn.disabled = false;
