@@ -742,11 +742,21 @@ if ($action === 'generate_pdf' && isPatientLoggedIn()) {
         $output = shell_exec($cmd);
 
         if (file_exists($pdfFile) && filesize($pdfFile) > 0) {
+            $downloadFilename = preg_replace('/[^A-Za-z0-9._-]/', '_', 'sick-leave-' . ($sc ?: $leaveId) . '.pdf');
+            $downloadFilename = $downloadFilename ?: 'sick-leave.pdf';
+
+            while (ob_get_level() > 0) {
+                ob_end_clean();
+            }
+
             header('Content-Type: application/pdf');
-            header('Content-Disposition: attachment; filename="sickLeaves.pdf"');
+            header('Content-Disposition: attachment; filename="' . $downloadFilename . '"; filename*=UTF-8\'\'' . rawurlencode($downloadFilename));
+            header('Content-Transfer-Encoding: binary');
             header('Content-Length: ' . filesize($pdfFile));
-            header('Cache-Control: no-store, no-cache, must-revalidate, max-age=0');
+            header('Cache-Control: private, no-store, no-cache, must-revalidate, max-age=0');
             header('Pragma: no-cache');
+            header('Expires: 0');
+            header('Accept-Ranges: bytes');
             header('X-Content-Type-Options: nosniff');
             readfile($pdfFile);
             @unlink($htmlFile);
@@ -2004,6 +2014,18 @@ function submitLeave(e) {
 // ═══ View Leave ═══
 function viewLeave(id) {
   const url = 'user.php?action=generate_pdf&leave_id=' + encodeURIComponent(id) + '&pdf_mode=download&csrf_token=' + encodeURIComponent(PATIENT_CSRF_TOKEN);
+  const ua = navigator.userAgent || '';
+  const isSafari = /safari/i.test(ua) && !/(chrome|crios|chromium|android|edg|opr|firefox|fxios)/i.test(ua);
+
+  // Safari, especially on iPhone/iPad, regularly ignores file downloads that are
+  // started inside hidden iframes. Use a normal top-level navigation there so the
+  // browser treats the click as a trusted download request.
+  if (isSafari) {
+    showToast('سيتم فتح ملف الإجازة للتحميل عبر سفاري', 'success');
+    window.location.assign(url);
+    return;
+  }
+
   let frame = document.getElementById('pdfDownloadFrame');
   if (!frame) {
     frame = document.createElement('iframe');
