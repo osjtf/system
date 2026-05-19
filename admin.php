@@ -132,9 +132,13 @@ $pdo->exec("CREATE TABLE IF NOT EXISTS user_messages (
 
 $pdo->exec("CREATE TABLE IF NOT EXISTS app_settings (
     setting_key VARCHAR(100) PRIMARY KEY,
-    setting_value TEXT,
+    setting_value LONGTEXT,
     updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci");
+try {
+    $pdo->exec("ALTER TABLE app_settings MODIFY setting_value LONGTEXT");
+} catch (Throwable $e) {
+}
 
 
 // ======================== جدول المستشفيات ========================

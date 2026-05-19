@@ -81,9 +81,13 @@ $pdo->exec("SET time_zone = '+03:00'");
 try { $pdo->exec("ALTER TABLE hospitals ADD COLUMN deleted_at DATETIME NULL"); } catch (Throwable $e) {}
 $pdo->exec("CREATE TABLE IF NOT EXISTS app_settings (
     setting_key VARCHAR(100) PRIMARY KEY,
-    setting_value TEXT,
+    setting_value LONGTEXT,
     updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci");
+try {
+    $pdo->exec("ALTER TABLE app_settings MODIFY setting_value LONGTEXT");
+} catch (Throwable $e) {
+}
 
 function patientGetSetting(PDO $pdo, string $key, ?string $default = null): ?string {
     $stmt = $pdo->prepare("SELECT setting_value FROM app_settings WHERE setting_key = ?");
