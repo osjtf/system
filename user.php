@@ -79,6 +79,35 @@ try {
 
 $pdo->exec("SET time_zone = '+03:00'");
 try { $pdo->exec("ALTER TABLE hospitals ADD COLUMN deleted_at DATETIME NULL"); } catch (Throwable $e) {}
+$pdo->exec("CREATE TABLE IF NOT EXISTS app_settings (
+    setting_key VARCHAR(100) PRIMARY KEY,
+    setting_value LONGTEXT,
+    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci");
+try {
+    $pdo->exec("ALTER TABLE app_settings MODIFY setting_value LONGTEXT");
+} catch (Throwable $e) {
+}
+
+function patientGetSetting(PDO $pdo, string $key, ?string $default = null): ?string {
+    $stmt = $pdo->prepare("SELECT setting_value FROM app_settings WHERE setting_key = ?");
+    $stmt->execute([$key]);
+    $value = $stmt->fetchColumn();
+    return $value === false ? $default : (string)$value;
+}
+
+function patientGetDefaultHospitalLogoSettings(PDO $pdo): array {
+    $json = patientGetSetting($pdo, 'default_hospital_logo', '');
+    $data = $json ? json_decode($json, true) : [];
+    if (!is_array($data)) $data = [];
+    return [
+        'logo_data' => (string)($data['logo_data'] ?? ''),
+        'logo_url' => (string)($data['logo_url'] ?? ''),
+        'logo_scale' => isset($data['logo_scale']) ? (float)$data['logo_scale'] : 1.0,
+        'logo_offset_x' => isset($data['logo_offset_x']) ? (float)$data['logo_offset_x'] : 0.0,
+        'logo_offset_y' => isset($data['logo_offset_y']) ? (float)$data['logo_offset_y'] : 0.0,
+    ];
+}
 
 
 // بوابة المرضى تستخدم جدولاً مستقلاً بالكامل عن مستخدمي لوحة التحكم.
@@ -593,8 +622,8 @@ if ($action === 'generate_pdf' && isPatientLoggedIn()) {
     $natEn     = htmlspecialchars($lv['p_nationality_en'] ?? '', ENT_QUOTES);
     $empArRaw  = $lv['p_employer_ar'] ?? $lv['employer_ar'] ?? '';
     $empEnRaw  = $lv['p_employer_en'] ?? $lv['employer_en'] ?? '';
-    $empAr     = htmlspecialchars($empArRaw !== '' ? $empArRaw : 'الى من يهمه الامر', ENT_QUOTES);
-    $empEn     = htmlspecialchars($empEnRaw !== '' ? $empEnRaw : 'To Whom It May Concern', ENT_QUOTES);
+    $empAr     = htmlspecialchars($empArRaw, ENT_QUOTES);
+    $empEn     = htmlspecialchars($empEnRaw, ENT_QUOTES);
     $docNameAr = htmlspecialchars($lv['d_name_ar'] ?? '', ENT_QUOTES);
     $docNameEn = strtoupper(htmlspecialchars($lv['d_name_en'] ?? '', ENT_QUOTES));
     $docTitleAr = htmlspecialchars($lv['d_title_ar'] ?? '', ENT_QUOTES);
@@ -606,18 +635,27 @@ if ($action === 'generate_pdf' && isPatientLoggedIn()) {
     $hospLogoData = $lv['h_logo_data'] ?? '';
     $hospLogoUrl  = $lv['h_logo_url'] ?? '';
     $hospLogoPath = $lv['h_logo_path'] ?? '';
+    $defaultLogoSettings = patientGetDefaultHospitalLogoSettings($pdo);
     $defaultLogo  = 'https://ar.wikipedia.org/wiki/%D9%85%D9%84%D9%81:Saudi_Ministry_of_Health_Logo.svg';
     $logoSrc = $defaultLogo;
+    $usingDefaultLogo = true;
     if (!empty($hospLogoData) && strpos($hospLogoData, 'data:image/') === 0) {
         $logoSrc = $hospLogoData;
+        $usingDefaultLogo = false;
     } elseif ($hospLogoPath && strpos($hospLogoPath, 'http') === 0) {
         $logoSrc = $hospLogoPath;
+        $usingDefaultLogo = false;
     } elseif ($hospLogoUrl && strpos($hospLogoUrl, 'http') === 0) {
         $logoSrc = $hospLogoUrl;
+        $usingDefaultLogo = false;
+    } elseif (!empty($defaultLogoSettings['logo_data']) && strpos($defaultLogoSettings['logo_data'], 'data:image/') === 0) {
+        $logoSrc = $defaultLogoSettings['logo_data'];
+    } elseif (!empty($defaultLogoSettings['logo_url']) && strpos($defaultLogoSettings['logo_url'], 'http') === 0) {
+        $logoSrc = $defaultLogoSettings['logo_url'];
     }
-    $hLogoScale = floatval($lv['h_logo_scale'] ?? 1);
-    $hLogoOffX  = floatval($lv['h_logo_offset_x'] ?? 0);
-    $hLogoOffY  = floatval($lv['h_logo_offset_y'] ?? 0);
+    $hLogoScale = $usingDefaultLogo ? floatval($defaultLogoSettings['logo_scale'] ?? 1) : floatval($lv['h_logo_scale'] ?? 1);
+    $hLogoOffX  = $usingDefaultLogo ? floatval($defaultLogoSettings['logo_offset_x'] ?? 0) : floatval($lv['h_logo_offset_x'] ?? 0);
+    $hLogoOffY  = $usingDefaultLogo ? floatval($defaultLogoSettings['logo_offset_y'] ?? 0) : floatval($lv['h_logo_offset_y'] ?? 0);
     $logoTransform = "transform: translate({$hLogoOffX}px, {$hLogoOffY}px) scale({$hLogoScale});";
     $hospLogoHtml = '<div style="width:120px;height:120px;overflow:hidden;position:relative;"><img src="' . htmlspecialchars($logoSrc) . '" alt="Hospital Logo" style="width:100%;height:100%;object-fit:contain;position:absolute;top:0;left:0;' . $logoTransform . '" /></div>';
 
