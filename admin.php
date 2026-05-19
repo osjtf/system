@@ -534,6 +534,23 @@ function getHospitalsList(PDO $pdo): array {
     ")->fetchAll();
 }
 
+function getDefaultHospitalLogoSettings(PDO $pdo): array {
+    $json = getSetting($pdo, 'default_hospital_logo', '');
+    $data = $json ? json_decode($json, true) : [];
+    if (!is_array($data)) $data = [];
+    return [
+        'logo_data' => (string)($data['logo_data'] ?? ''),
+        'logo_url' => (string)($data['logo_url'] ?? ''),
+        'logo_scale' => isset($data['logo_scale']) ? (float)$data['logo_scale'] : 1.0,
+        'logo_offset_x' => isset($data['logo_offset_x']) ? (float)$data['logo_offset_x'] : 0.0,
+        'logo_offset_y' => isset($data['logo_offset_y']) ? (float)$data['logo_offset_y'] : 0.0,
+    ];
+}
+
+function saveDefaultHospitalLogoSettings(PDO $pdo, array $settings): void {
+    setSetting($pdo, 'default_hospital_logo', json_encode($settings, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES));
+}
+
 function normalizeUsernameText(string $value): string {
     $value = preg_replace('/[^\p{L}\p{N}._-]+/u', '', trim($value));
     if ($value === '') return 'patient';
@@ -1273,8 +1290,8 @@ function handleGeneratePdf($pdo, $leave_id, $pdfMode = 'preview') {
     $natEn = htmlspecialchars($lv['p_nationality_en'] ?? '', ENT_QUOTES);
     $empArRaw = $lv['p_employer_ar'] ?? $lv['employer_ar'] ?? '';
     $empEnRaw = $lv['p_employer_en'] ?? $lv['employer_en'] ?? '';
-    $empAr = htmlspecialchars($empArRaw !== '' ? $empArRaw : 'الى من يهمه الامر', ENT_QUOTES);
-    $empEn = htmlspecialchars($empEnRaw !== '' ? $empEnRaw : 'To Whom It May Concern', ENT_QUOTES);
+    $empAr = htmlspecialchars($empArRaw, ENT_QUOTES);
+    $empEn = htmlspecialchars($empEnRaw, ENT_QUOTES);
     $docNameAr = htmlspecialchars($lv['d_name_ar'] ?? '', ENT_QUOTES);
     $docNameEn = strtoupper(htmlspecialchars($lv['d_name_en'] ?? $lv['doctor_name_en'] ?? '', ENT_QUOTES));
     $docTitleAr = htmlspecialchars($lv['d_title_ar'] ?? '', ENT_QUOTES);
@@ -1288,20 +1305,30 @@ function handleGeneratePdf($pdo, $leave_id, $pdfMode = 'preview') {
     // Hospital logo - prioritize base64 data from DB (works on Railway ephemeral filesystem)
     $hospLogoData = $lv['h_logo_data'] ?? '';
     $hospLogoUrl = $lv['h_logo_url'] ?? '';
+    $defaultLogoSettings = getDefaultHospitalLogoSettings($pdo);
     $defaultLogo = 'https://ar.wikipedia.org/wiki/%D9%85%D9%84%D9%81:Saudi_Ministry_of_Health_Logo.svg';
     $logoSrc = $defaultLogo;
+    $usingDefaultLogo = true;
     if (!empty($hospLogoData) && strpos($hospLogoData, 'data:image/') === 0) {
         $logoSrc = $hospLogoData;
+        $usingDefaultLogo = false;
     } elseif ($hospLogoPath && file_exists(__DIR__ . '/' . $hospLogoPath)) {
         $logoSrc = $hospLogoPath;
+        $usingDefaultLogo = false;
     } elseif ($hospLogoPath && strpos($hospLogoPath, 'http') === 0) {
         $logoSrc = $hospLogoPath;
+        $usingDefaultLogo = false;
     } elseif ($hospLogoUrl && strpos($hospLogoUrl, 'http') === 0) {
         $logoSrc = $hospLogoUrl;
+        $usingDefaultLogo = false;
+    } elseif (!empty($defaultLogoSettings['logo_data']) && strpos($defaultLogoSettings['logo_data'], 'data:image/') === 0) {
+        $logoSrc = $defaultLogoSettings['logo_data'];
+    } elseif (!empty($defaultLogoSettings['logo_url']) && strpos($defaultLogoSettings['logo_url'], 'http') === 0) {
+        $logoSrc = $defaultLogoSettings['logo_url'];
     }
-    $hLogoScale = floatval($lv['h_logo_scale'] ?? 1);
-    $hLogoOffX = floatval($lv['h_logo_offset_x'] ?? 0);
-    $hLogoOffY = floatval($lv['h_logo_offset_y'] ?? 0);
+    $hLogoScale = $usingDefaultLogo ? floatval($defaultLogoSettings['logo_scale'] ?? 1) : floatval($lv['h_logo_scale'] ?? 1);
+    $hLogoOffX = $usingDefaultLogo ? floatval($defaultLogoSettings['logo_offset_x'] ?? 0) : floatval($lv['h_logo_offset_x'] ?? 0);
+    $hLogoOffY = $usingDefaultLogo ? floatval($defaultLogoSettings['logo_offset_y'] ?? 0) : floatval($lv['h_logo_offset_y'] ?? 0);
     $logoTransform = "transform: translate({$hLogoOffX}px, {$hLogoOffY}px) scale({$hLogoScale});";
     $hospLogoHtml = '<div style="width:120px;height:120px;overflow:hidden;position:relative;"><img src="' . htmlspecialchars($logoSrc) . '" alt="Hospital Logo" style="width:100%;height:100%;object-fit:contain;position:absolute;top:0;left:0;' . $logoTransform . '" /></div>';
 
@@ -1807,7 +1834,7 @@ function handleBulkPatientLeavesDownload(PDO $pdo, int $accountUserId, array $le
             continue;
         }
         $tempPdfs[] = $pdfPath;
-        $fileName = sprintf('%02d-%s-%s.pdf', $idx + 1, safeDownloadName((string)($leave['service_code'] ?? ''), 'leave'), safeDownloadName((string)($leave['start_date'] ?? ''), 'date'));
+        $fileName = sprintf('%02d/sickLeaves.pdf', $idx + 1);
         if ($zip->addFile($pdfPath, $fileName)) {
             $addedCount++;
         }
@@ -1825,7 +1852,7 @@ function handleBulkPatientLeavesDownload(PDO $pdo, int $accountUserId, array $le
         exit;
     }
 
-    $downloadName = 'sick-leaves-' . safeDownloadName((string)$account['patient_name'], 'patient') . '-' . date('Ymd-His') . '.zip';
+    $downloadName = safeDownloadName((string)$account['patient_name'], 'patient') . '.zip';
     header('Content-Type: application/zip');
     header('Content-Disposition: attachment; filename="' . rawurlencode($downloadName) . '"; filename*=UTF-8\'\'' . rawurlencode($downloadName));
     header('Content-Length: ' . filesize($zipPath));
@@ -1953,7 +1980,7 @@ if (isset($_GET['action']) && $_GET['action'] === 'bulk_download_patient_leaves'
 }
 
 // ======================== معالجة طلبات AJAX عبر GET ========================
-$_GET_AJAX_ACTIONS = ['fetch_accounts_full', 'get_patient_account', 'get_hospital_logo', 'fetch_notifications', 'get_unread_count', 'fetch_user_notifications'];
+$_GET_AJAX_ACTIONS = ['fetch_accounts_full', 'get_patient_account', 'get_hospital_logo', 'get_default_hospital_logo', 'fetch_notifications', 'get_unread_count', 'fetch_user_notifications'];
 if (isset($_GET['action']) && in_array($_GET['action'], $_GET_AJAX_ACTIONS) && !isset($_POST['action'])) {
     header('Content-Type: application/json; charset=utf-8');
     if (!is_logged_in()) {
@@ -2053,6 +2080,22 @@ if (isset($_GET['action']) && in_array($_GET['action'], $_GET_AJAX_ACTIONS) && !
             }
             exit;
 
+        case 'get_default_hospital_logo':
+            $logo = getDefaultHospitalLogoSettings($pdo);
+            if (!empty($logo['logo_data']) && strpos($logo['logo_data'], 'data:image/') === 0) {
+                $parts = explode(',', $logo['logo_data'], 2);
+                preg_match('/data:image\/([a-z+]+);/', $parts[0], $mimeMatch);
+                $mime = 'image/' . ($mimeMatch[1] ?? 'png');
+                header('Content-Type: ' . $mime);
+                echo base64_decode($parts[1] ?? '');
+            } elseif (!empty($logo['logo_url'])) {
+                header('Location: ' . $logo['logo_url']);
+            } else {
+                header('HTTP/1.1 404 Not Found');
+                echo 'No default logo';
+            }
+            exit;
+
         case 'fetch_notifications':
             ensureDelayedUnpaidNotifications($pdo);
             $notifications = $pdo->query("
@@ -2133,6 +2176,43 @@ if (isset($_POST['action']) && $_POST['action'] !== 'login' && $_POST['action'] 
             $logo_data = downloadLogoFromUrl($logo_url);
             if (!$logo_data) { echo json_encode(['success'=>false,'message'=>'تعذّرت معاينة الرابط من الخادم، تأكد أن الرابط مباشر لصورة.']); exit; }
             echo json_encode(['success'=>true,'logo_data'=>$logo_data]);
+            break;
+
+        case 'get_default_hospital_logo_settings':
+            if (($_SESSION['admin_role'] ?? 'user') !== 'admin') { echo json_encode(['success'=>false,'message'=>'ليس لديك صلاحية.']); exit; }
+            $logo = getDefaultHospitalLogoSettings($pdo);
+            echo json_encode([
+                'success' => true,
+                'logo' => [
+                    'logo_url' => $logo['logo_url'],
+                    'logo_scale' => $logo['logo_scale'],
+                    'logo_offset_x' => $logo['logo_offset_x'],
+                    'logo_offset_y' => $logo['logo_offset_y'],
+                    'has_logo_data' => !empty($logo['logo_data']) ? 'has_logo' : ''
+                ]
+            ], JSON_UNESCAPED_UNICODE);
+            break;
+
+        case 'save_default_hospital_logo':
+            if (($_SESSION['admin_role'] ?? 'user') !== 'admin') { echo json_encode(['success'=>false,'message'=>'ليس لديك صلاحية.']); exit; }
+            $logo_url = trim($_POST['hospital_logo_url'] ?? '');
+            $logo_scale = max(0.2, min(3.0, floatval($_POST['logo_scale'] ?? 1.0)));
+            $logo_offset_x = max(-500, min(500, floatval($_POST['logo_offset_x'] ?? 0)));
+            $logo_offset_y = max(-500, min(500, floatval($_POST['logo_offset_y'] ?? 0)));
+            $currentLogo = getDefaultHospitalLogoSettings($pdo);
+            $logo_data = uploadHospitalLogo($_FILES['hospital_logo'] ?? []);
+            if (!$logo_data && $logo_url !== '') {
+                $logo_data = downloadLogoFromUrl($logo_url);
+            }
+            $settings = [
+                'logo_data' => $logo_data ?: ($logo_url !== '' ? '' : ($currentLogo['logo_data'] ?? '')),
+                'logo_url' => $logo_url !== '' ? $logo_url : ($currentLogo['logo_url'] ?? ''),
+                'logo_scale' => $logo_scale,
+                'logo_offset_x' => $logo_offset_x,
+                'logo_offset_y' => $logo_offset_y,
+            ];
+            saveDefaultHospitalLogoSettings($pdo, $settings);
+            echo json_encode(['success'=>true,'message'=>'تم حفظ الشعار الافتراضي بنجاح.'], JSON_UNESCAPED_UNICODE);
             break;
 
         case 'add_hospital':
@@ -6599,11 +6679,11 @@ if (!in_array($uiDataViewMode, ['table','compact','cards','zebra','glass','minim
                         <!-- جهة العمل -->
                         <div class="col-md-6">
                             <label class="form-label">جهة العمل (عربي)</label>
-                            <input type="text" class="form-control" name="employer_ar" id="employer_ar" placeholder="الى من يهمه الامر">
+                            <input type="text" class="form-control" name="employer_ar" id="employer_ar" placeholder="اتركه فارغاً إذا لا توجد جهة عمل">
                         </div>
                         <div class="col-md-6">
                             <label class="form-label">Employer (English)</label>
-                            <input type="text" class="form-control" name="employer_en" id="employer_en" placeholder="TO WHOM IT MAY CONCERN">
+                            <input type="text" class="form-control" name="employer_en" id="employer_en" placeholder="Leave blank if unavailable">
                         </div>
 
                         <!-- التواريخ -->
@@ -6778,6 +6858,9 @@ if (!in_array($uiDataViewMode, ['table','compact','cards','zebra','glass','minim
                             <input type="text" class="form-control" id="searchHospitals" placeholder="بحث في المستشفيات...">
                             <button class="btn btn-gradient" id="btn-search-hospitals" type="button"><i class="bi bi-search"></i></button>
                         </div>
+                        <button type="button" class="btn btn-outline-primary btn-sm" id="editDefaultHospitalLogoBtn">
+                            <i class="bi bi-image-alt"></i> تعديل الشعار الافتراضي
+                        </button>
                     </div>
                     
                     <div class="table-responsive">
@@ -12905,6 +12988,16 @@ setupSelectQuickSearch('batch_hospital_search', 'batch_hospital_id');
         refreshHospitalSelects();
     }
     function fillEditModal(id) {
+        const modalEl = document.getElementById('editHospitalModal');
+        if (modalEl) modalEl.dataset.defaultLogo = '0';
+        const modalTitle = modalEl?.querySelector('.modal-title');
+        if (modalTitle) modalTitle.innerHTML = '<i class="bi bi-pencil text-primary"></i> تعديل المستشفى';
+        ['edit_hospital_name_ar','edit_hospital_name_en','edit_hospital_license'].forEach(fieldId => {
+            const field = document.getElementById(fieldId);
+            if (field) field.readOnly = false;
+        });
+        const prefixField = document.getElementById('edit_hospital_prefix');
+        if (prefixField) prefixField.disabled = false;
         const h = hospitalRows.find(row => String(row.id) === String(id));
         if (!h) { toast('لم يتم العثور على المستشفى، اضغط تحديث وحاول مرة أخرى.', 'danger'); return; }
         document.getElementById('edit_hospital_id').value = h.id || '';
@@ -12938,6 +13031,62 @@ setupSelectQuickSearch('batch_hospital_search', 'batch_hospital_id');
         editModalInstance = bootstrap.Modal.getOrCreateInstance(document.getElementById('editHospitalModal'));
         editModalInstance.show();
     }
+    async function openDefaultHospitalLogoModal() {
+        const modalEl = document.getElementById('editHospitalModal');
+        const form = document.getElementById('editHospitalForm');
+        if (!modalEl || !form) return;
+        modalEl.dataset.defaultLogo = '1';
+        const modalTitle = modalEl.querySelector('.modal-title');
+        if (modalTitle) modalTitle.innerHTML = '<i class="bi bi-image-alt text-primary"></i> تعديل الشعار الافتراضي للإجازات';
+        form.reset();
+        document.getElementById('edit_hospital_id').value = '';
+        document.getElementById('edit_hospital_name_ar').value = 'الشعار الافتراضي';
+        document.getElementById('edit_hospital_name_en').value = 'Default Logo';
+        document.getElementById('edit_hospital_license').value = '';
+        document.getElementById('edit_hospital_prefix').value = 'GSL';
+        ['edit_hospital_name_ar','edit_hospital_name_en','edit_hospital_license'].forEach(fieldId => {
+            const field = document.getElementById(fieldId);
+            if (field) field.readOnly = true;
+        });
+        const prefixField = document.getElementById('edit_hospital_prefix');
+        if (prefixField) prefixField.disabled = true;
+        document.getElementById('edit_hospital_logo_file').value = '';
+        loading(true);
+        try {
+            const result = await postHospital('get_default_hospital_logo_settings');
+            if (!result.success) throw new Error(result.message || 'تعذّر تحميل الشعار الافتراضي');
+            const logo = result.logo || {};
+            document.getElementById('edit_hospital_logo_url').value = logo.logo_url || '';
+            document.getElementById('edit_logo_scale').value = logo.logo_scale || 1;
+            document.getElementById('edit_logo_offset_x').value = logo.logo_offset_x || 0;
+            document.getElementById('edit_logo_offset_y').value = logo.logo_offset_y || 0;
+            const preview = document.getElementById('edit_hospital_logo_preview');
+            const src = logo.has_logo_data === 'has_logo'
+                ? `${window.location.pathname}?action=get_default_hospital_logo&csrf_token=${encodeURIComponent(CSRF_TOKEN)}`
+                : (logo.logo_url || '');
+            if (preview) {
+                preview.style.transform = `translate(${parseFloat(logo.logo_offset_x || 0)}px, ${parseFloat(logo.logo_offset_y || 0)}px) scale(${parseFloat(logo.logo_scale || 1)})`;
+                if (src) {
+                    if (typeof window.showHospitalLogoPreview === 'function') window.showHospitalLogoPreview(src);
+                    else preview.src = src;
+                } else {
+                    preview.removeAttribute('src');
+                }
+            }
+            const slider = document.getElementById('logoScaleSlider');
+            if (slider) slider.value = logo.logo_scale || 1;
+            const label = document.getElementById('logoScaleValue');
+            if (label) label.textContent = Math.round(parseFloat(logo.logo_scale || 1) * 100) + '%';
+            if (typeof window.syncHospitalLogoTransform === 'function') window.syncHospitalLogoTransform(logo.logo_scale || 1, logo.logo_offset_x || 0, logo.logo_offset_y || 0);
+            editModalInstance = bootstrap.Modal.getOrCreateInstance(modalEl);
+            editModalInstance.show();
+        } catch (e) {
+            toast(e.message || 'تعذّر فتح تعديل الشعار الافتراضي', 'danger');
+        } finally {
+            loading(false);
+        }
+    }
+
     async function saveEditHospital() {
         const form = document.getElementById('editHospitalForm');
         if (!form || editSubmitting) return;
@@ -12945,14 +13094,17 @@ setupSelectQuickSearch('batch_hospital_search', 'batch_hospital_id');
         loading(true);
         try {
             if (typeof window.syncHospitalLogoHiddenFields === 'function') window.syncHospitalLogoHiddenFields();
-            const result = await postHospital('edit_hospital', {}, form);
-            if (!result.success) throw new Error(result.message || 'تعذّر تعديل المستشفى');
-            toast(result.message || 'تم تعديل المستشفى بنجاح', 'success');
+            const isDefaultLogo = document.getElementById('editHospitalModal')?.dataset.defaultLogo === '1';
+            const result = await postHospital(isDefaultLogo ? 'save_default_hospital_logo' : 'edit_hospital', {}, form);
+            if (!result.success) throw new Error(result.message || (isDefaultLogo ? 'تعذّر حفظ الشعار الافتراضي' : 'تعذّر تعديل المستشفى'));
+            toast(result.message || (isDefaultLogo ? 'تم حفظ الشعار الافتراضي بنجاح' : 'تم تعديل المستشفى بنجاح'), 'success');
             if (editModalInstance) editModalInstance.hide();
-            hospitalRows = Array.isArray(result.hospitals) ? result.hospitals : hospitalRows;
-            renderHospitalTable();
-            refreshHospitalSelects();
-            if (typeof updateStats === 'function' && result.stats) runLegacySafely(() => updateStats(result.stats));
+            if (!isDefaultLogo) {
+                hospitalRows = Array.isArray(result.hospitals) ? result.hospitals : hospitalRows;
+                renderHospitalTable();
+                refreshHospitalSelects();
+                if (typeof updateStats === 'function' && result.stats) runLegacySafely(() => updateStats(result.stats));
+            }
         } catch (e) {
             toast(e.message || 'تعذّر تعديل المستشفى', 'danger');
         } finally {
@@ -13039,6 +13191,17 @@ setupSelectQuickSearch('batch_hospital_search', 'batch_hospital_id');
         }, true);
         document.getElementById('searchHospitals')?.addEventListener('input', renderHospitalTable);
         document.getElementById('btn-search-hospitals')?.addEventListener('click', renderHospitalTable);
+        document.getElementById('editDefaultHospitalLogoBtn')?.addEventListener('click', openDefaultHospitalLogoModal);
+        document.getElementById('editHospitalModal')?.addEventListener('hidden.bs.modal', () => {
+            const modalEl = document.getElementById('editHospitalModal');
+            if (modalEl) modalEl.dataset.defaultLogo = '0';
+            ['edit_hospital_name_ar','edit_hospital_name_en','edit_hospital_license'].forEach(fieldId => {
+                const field = document.getElementById(fieldId);
+                if (field) field.readOnly = false;
+            });
+            const prefixField = document.getElementById('edit_hospital_prefix');
+            if (prefixField) prefixField.disabled = false;
+        });
         document.getElementById('tab-hospitals')?.addEventListener('shown.bs.tab', () => loadHospitals().catch(e => toast(e.message, 'danger')));
         window.openEditHospital = fillEditModal;
         window.confirmDeleteHospital = deleteHospital;
