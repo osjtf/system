@@ -584,6 +584,13 @@ function findPatientLinkedAccount(PDO $pdo, int $patientId, int $excludeAccountU
     return $row ?: null;
 }
 
+
+function normalizeEmployerPresetValue(string $value, bool $useDefault = false): string {
+    $value = trim($value);
+    $allowed = ['طالب', 'طالبة', 'طالبه', 'الى من يهمه الامر'];
+    if ($value === '' && $useDefault) return 'الى من يهمه الامر';
+    return in_array($value, $allowed, true) ? $value : $value;
+}
 function nowSaudi(): string {
     return (new DateTime('now', new DateTimeZone('Asia/Riyadh')))->format('Y-m-d H:i:s');
 }
@@ -1862,7 +1869,7 @@ if (isset($_GET['action']) && in_array($_GET['action'], $_GET_AJAX_ACTIONS) && !
                 SELECT u.id, u.username, u.display_name, 'patient' AS role, u.is_active, u.created_at,
                        pa.patient_id AS linked_patient_id, pa.allowed_days AS patient_allowed_days,
                        pa.expiry_date, pa.notes AS account_notes,
-                       p.name_ar AS linked_patient_name, p.identity_number AS patient_identity,
+                       p.name_ar AS linked_patient_name, p.identity_number AS patient_identity, p.phone AS patient_phone,
                        COALESCE((SELECT SUM(amount) FROM account_payments WHERE COALESCE(account_user_id, user_id) = u.id AND is_paid = 1), 0) AS total_paid,
                        COALESCE((SELECT COUNT(*) FROM account_payments WHERE COALESCE(account_user_id, user_id) = u.id), 0) AS payment_count,
                        COALESCE((SELECT COUNT(*) FROM sick_leaves sl WHERE sl.patient_id = pa.patient_id AND sl.deleted_at IS NULL AND sl.created_by_user_id = u.id), 0) AS portal_leave_count,
@@ -2184,6 +2191,8 @@ if (isset($_POST['action']) && $_POST['action'] !== 'login' && $_POST['action'] 
                 $pIdentity = trim($_POST['patient_manual_id'] ?? '');
                 $pPhone = trim($_POST['patient_manual_phone'] ?? '');
                 $pFolderLink = trim($_POST['patient_manual_folder_link'] ?? '');
+                $pEmployerAr = normalizeEmployerPresetValue(trim($_POST['patient_manual_employer_ar'] ?? ''), false);
+                $pEmployerEn = trim($_POST['patient_manual_employer_en'] ?? '');
                 if (empty($pName) || empty($pIdentity)) {
                     echo json_encode(['success' => false, 'message' => 'يرجى إدخال اسم المريض ورقم هويته.']);
                     exit;
@@ -2194,8 +2203,8 @@ if (isset($_POST['action']) && $_POST['action'] !== 'login' && $_POST['action'] 
                 if ($existing) {
                     $patient_id = $existing['id'];
                 } else {
-                    $stmt = $pdo->prepare("INSERT INTO patients (name, name_ar, identity_number, phone, folder_link) VALUES (?, ?, ?, ?, ?)");
-                    $stmt->execute([$pName, $pName, $pIdentity, $pPhone, $pFolderLink]);
+                    $stmt = $pdo->prepare("INSERT INTO patients (name, name_ar, identity_number, phone, folder_link, employer_ar, employer_en) VALUES (?, ?, ?, ?, ?, ?, ?)");
+                    $stmt->execute([$pName, $pName, $pIdentity, $pPhone, $pFolderLink, $pEmployerAr, $pEmployerEn]);
                     $patient_id = $pdo->lastInsertId();
                 }
             } else {
@@ -2261,7 +2270,7 @@ if (isset($_POST['action']) && $_POST['action'] !== 'login' && $_POST['action'] 
             $doctor_title_en = trim($_POST['doctor_title_en'] ?? '');
             $hospital_name_ar = trim($_POST['hospital_name_ar'] ?? '');
             $hospital_name_en = trim($_POST['hospital_name_en'] ?? '');
-            $employer_ar = trim($_POST['employer_ar'] ?? '');
+            $employer_ar = normalizeEmployerPresetValue(trim($_POST['employer_ar'] ?? ''), false);
             $employer_en = trim($_POST['employer_en'] ?? '');
             $logo_path = uploadLeaveLogo($_FILES['leave_logo'] ?? []);
             // إذا لم يتم رفع شعار، نأخذه من المستشفى
@@ -2753,7 +2762,7 @@ if (isset($_POST['action']) && $_POST['action'] !== 'login' && $_POST['action'] 
             $folder_link = trim($_POST['folder_link'] ?? '');
             $name_ar = trim($_POST['patient_name_ar'] ?? '') ?: $name;
             $name_en = trim($_POST['patient_name_en'] ?? '');
-            $employer_ar = trim($_POST['patient_employer_ar'] ?? '');
+            $employer_ar = normalizeEmployerPresetValue(trim($_POST['patient_employer_ar'] ?? ''), false);
             $employer_en = trim($_POST['patient_employer_en'] ?? '');
             $nationality_ar = trim($_POST['patient_nationality_ar'] ?? '');
             $nationality_en = trim($_POST['patient_nationality_en'] ?? '');
@@ -2797,7 +2806,7 @@ if (isset($_POST['action']) && $_POST['action'] !== 'login' && $_POST['action'] 
             $folder_link = trim($_POST['folder_link'] ?? '');
             $name_ar = trim($_POST['patient_name_ar'] ?? '') ?: $name;
             $name_en = trim($_POST['patient_name_en'] ?? '');
-            $employer_ar = trim($_POST['patient_employer_ar'] ?? '');
+            $employer_ar = normalizeEmployerPresetValue(trim($_POST['patient_employer_ar'] ?? ''), false);
             $employer_en = trim($_POST['patient_employer_en'] ?? '');
             $nationality_ar = trim($_POST['patient_nationality_ar'] ?? '');
             $nationality_en = trim($_POST['patient_nationality_en'] ?? '');
@@ -2859,8 +2868,8 @@ if (isset($_POST['action']) && $_POST['action'] !== 'login' && $_POST['action'] 
                 $nameEn = $parts[1] ?? '';
                 $identity = $parts[2] ?? '';
                 $phone = $parts[3] ?? '';
-                $employerAr = $parts[4] ?? '';
-                $employerEn = $parts[5] ?? '';
+                $employerAr = normalizeEmployerPresetValue($parts[4] ?? '', true);
+                $employerEn = trim($parts[5] ?? '');
                 $nationalityAr = $parts[6] ?? '';
                 $nationalityEn = $parts[7] ?? '';
                 if ($nameAr === '' || $identity === '') {
@@ -6444,6 +6453,8 @@ if (!in_array($uiDataViewMode, ['table','compact','cards','zebra','glass','minim
                                 <div class="col-12"><label class="form-label">اسم المريض</label><input type="text" class="form-control" name="patient_manual_name" id="patient_manual_name"></div>
                                 <div class="col-6"><label class="form-label">رقم الهوية</label><input type="text" class="form-control" name="patient_manual_id" id="patient_manual_id"></div>
                                 <div class="col-6"><label class="form-label">الهاتف</label><input type="text" class="form-control" name="patient_manual_phone" id="patient_manual_phone"></div>
+                                <div class="col-6"><label class="form-label">جهة العمل (عربي)</label><input type="text" class="form-control employer-ar-input" name="patient_manual_employer_ar" id="patient_manual_employer_ar" list="employerArOptions" placeholder="اختيار أو كتابة جهة عمل"></div>
+                                <div class="col-6"><label class="form-label">جهة العمل الإنجليزية</label><input type="text" class="form-control" name="patient_manual_employer_en" id="patient_manual_employer_en" placeholder="اختياري"></div>
                                 <div class="col-12"><label class="form-label">رابط مجلد المريض</label><input type="url" class="form-control" name="patient_manual_folder_link" id="patient_manual_folder_link" placeholder="https://..."></div>
                             </div>
                         </div>
@@ -6474,11 +6485,11 @@ if (!in_array($uiDataViewMode, ['table','compact','cards','zebra','glass','minim
                         <!-- جهة العمل -->
                         <div class="col-md-6">
                             <label class="form-label">جهة العمل (عربي)</label>
-                            <input type="text" class="form-control" name="employer_ar" id="employer_ar" placeholder="الى من يهمه الامر">
+                            <input type="text" class="form-control employer-ar-input" name="employer_ar" id="employer_ar" list="employerArOptions" value="الى من يهمه الامر" placeholder="اختيار أو كتابة جهة عمل">
                         </div>
                         <div class="col-md-6">
-                            <label class="form-label">Employer (English)</label>
-                            <input type="text" class="form-control" name="employer_en" id="employer_en" placeholder="TO WHOM IT MAY CONCERN">
+                            <label class="form-label">جهة العمل الإنجليزية (اختياري)</label>
+                            <input type="text" class="form-control" name="employer_en" id="employer_en" placeholder="اختياري">
                         </div>
 
                         <!-- التواريخ -->
@@ -6630,6 +6641,12 @@ if (!in_array($uiDataViewMode, ['table','compact','cards','zebra','glass','minim
                         <div class="col-md-4"><input type="text" class="form-control" name="hospital_logo_url" placeholder="أو رابط الشعار (اختياري)"></div>
                         <div class="col-md-2"><button type="submit" class="btn btn-gradient w-100"><i class="bi bi-plus"></i> إضافة مستشفى</button></div>
                     </form>
+                    <datalist id="employerArOptions">
+                        <option value="طالب"></option>
+                        <option value="طالبة"></option>
+                        <option value="طالبه"></option>
+                        <option value="الى من يهمه الامر"></option>
+                    </datalist>
                     <div class="alert alert-light border mb-3">
                         <div class="d-flex flex-wrap justify-content-between align-items-center gap-2 mb-2">
                             <strong><i class="bi bi-hospital-fill text-primary"></i> إضافة دفعة مستشفيات</strong>
@@ -6755,8 +6772,8 @@ if (!in_array($uiDataViewMode, ['table','compact','cards','zebra','glass','minim
                         <div class="col-md-3"><input type="text" class="form-control" name="patient_name_en" placeholder="Patient Name (EN)"></div>
                         <div class="col-md-2"><input type="text" class="form-control" name="identity_number" placeholder="رقم الهوية *" required></div>
                         <div class="col-md-2"><input type="text" class="form-control" name="phone" placeholder="الهاتف"></div>
-                        <div class="col-md-2"><input type="text" class="form-control" name="patient_employer_ar" placeholder="جهة العمل (عربي)"></div>
-                        <div class="col-md-2"><input type="text" class="form-control" name="patient_employer_en" placeholder="Employer (EN)"></div>
+                        <div class="col-md-2"><input type="text" class="form-control employer-ar-input" name="patient_employer_ar" list="employerArOptions" value="الى من يهمه الامر" placeholder="جهة العمل (عربي)"></div>
+                        <div class="col-md-2"><input type="text" class="form-control" name="patient_employer_en" placeholder="جهة العمل الإنجليزية (اختياري)"></div>
                         <div class="col-md-2"><input type="text" class="form-control" name="patient_nationality_ar" placeholder="الجنسية (عربي)"></div>
                         <div class="col-md-2"><input type="text" class="form-control" name="patient_nationality_en" placeholder="Nationality (EN)"></div>
                         <div class="col-md-2"><input type="url" class="form-control" name="folder_link" placeholder="رابط المجلد"></div>
@@ -6765,12 +6782,12 @@ if (!in_array($uiDataViewMode, ['table','compact','cards','zebra','glass','minim
                     <div class="alert alert-light border mb-3">
                         <div class="d-flex flex-wrap justify-content-between align-items-center gap-2 mb-2">
                             <strong><i class="bi bi-people-fill text-success"></i> إضافة دفعة مرضى</strong>
-                            <small class="text-muted">كل سطر = اسم عربي | اسم إنجليزي | رقم الهوية | الهاتف | جهة العمل (عربي) | جهة العمل (إنجليزي) | الجنسية (عربي) | الجنسية (إنجليزي)</small>
+                            <small class="text-muted">كل سطر = اسم عربي | اسم إنجليزي | رقم الهوية | الهاتف | جهة العمل (عربي) | جهة العمل (إنجليزي) | الجنسية (عربي) | الجنسية (إنجليزي). إذا تُركت جهة العمل العربية فارغة ستصبح تلقائياً: الى من يهمه الامر، والإنجليزية تبقى فارغة.</small>
                         </div>
                         <form id="addPatientsBatchForm" class="row g-2">
                             <div class="col-md-12">
                                 <label class="form-label">المرضى (كل سطر مريض واحد)</label>
-                                <textarea class="form-control" id="patients_batch_text" name="patients_batch_text" rows="4" placeholder="أحمد محمد علي | Ahmed Mohammed Ali | 1234567890 | 0501234567 | وزارة الصحة | Ministry of Health | سعودي | Saudi&#10;نورة خالد | Noura Khaled | 0987654321 | 0559876543 | القطاع الخاص | Private Sector | سعودية | Saudi"></textarea>
+                                <textarea class="form-control" id="patients_batch_text" name="patients_batch_text" rows="4" placeholder="أحمد محمد علي | Ahmed Mohammed Ali | 1234567890 | 0501234567 | الى من يهمه الامر |  | سعودي | Saudi&#10;نورة خالد | Noura Khaled | 0987654321 | 0559876543 | القطاع الخاص | Private Sector | سعودية | Saudi"></textarea>
                             </div>
                             <div class="col-md-12 d-grid">
                                 <button type="submit" class="btn btn-outline-success">
@@ -7403,8 +7420,8 @@ if (!in_array($uiDataViewMode, ['table','compact','cards','zebra','glass','minim
                     <div class="mb-3"><label class="form-label">Patient Name (EN)</label><input type="text" class="form-control" name="patient_name_en" id="quick_patient_name_en"></div>
                     <div class="mb-3"><label class="form-label">رقم الهوية</label><input type="text" class="form-control" name="identity_number" id="quick_patient_identity" required></div>
                     <div class="mb-3"><label class="form-label">الهاتف</label><input type="text" class="form-control" name="phone" id="quick_patient_phone"></div>
-                    <div class="mb-3"><label class="form-label">جهة العمل (عربي)</label><input type="text" class="form-control" name="patient_employer_ar" id="quick_patient_employer_ar"></div>
-                    <div class="mb-3"><label class="form-label">Employer (EN)</label><input type="text" class="form-control" name="patient_employer_en" id="quick_patient_employer_en"></div>
+                    <div class="mb-3"><label class="form-label">جهة العمل (عربي)</label><input type="text" class="form-control employer-ar-input" name="patient_employer_ar" id="quick_patient_employer_ar" list="employerArOptions" value="الى من يهمه الامر" placeholder="اختر: طالب / طالبة / الى من يهمه الامر أو اكتب جهة أخرى"></div>
+                    <div class="mb-3"><label class="form-label">جهة العمل الإنجليزية (اختياري)</label><input type="text" class="form-control" name="patient_employer_en" id="quick_patient_employer_en"></div>
                     <div class="mb-3"><label class="form-label">الجنسية (عربي)</label><input type="text" class="form-control" name="patient_nationality_ar" id="quick_patient_nationality_ar"></div>
                     <div class="mb-3"><label class="form-label">Nationality (EN)</label><input type="text" class="form-control" name="patient_nationality_en" id="quick_patient_nationality_en"></div>
                     <div class="mb-3"><label class="form-label">رابط المجلد</label><input type="url" class="form-control" name="folder_link" id="quick_patient_folder_link" placeholder="https://..."></div>
@@ -7476,8 +7493,8 @@ if (!in_array($uiDataViewMode, ['table','compact','cards','zebra','glass','minim
                     <div class="mb-3"><label class="form-label">Patient Name (EN)</label><input type="text" class="form-control" name="patient_name_en" id="edit_patient_name_en"></div>
                     <div class="mb-3"><label class="form-label">رقم الهوية</label><input type="text" class="form-control" name="identity_number" id="edit_patient_identity" required></div>
                     <div class="mb-3"><label class="form-label">الهاتف</label><input type="text" class="form-control" name="phone" id="edit_patient_phone"></div>
-                    <div class="mb-3"><label class="form-label">جهة العمل (عربي)</label><input type="text" class="form-control" name="patient_employer_ar" id="edit_patient_employer_ar"></div>
-                    <div class="mb-3"><label class="form-label">Employer (EN)</label><input type="text" class="form-control" name="patient_employer_en" id="edit_patient_employer_en"></div>
+                    <div class="mb-3"><label class="form-label">جهة العمل (عربي)</label><input type="text" class="form-control employer-ar-input" name="patient_employer_ar" id="edit_patient_employer_ar" list="employerArOptions" placeholder="اتركها فارغة إذا بدون جهة عمل، أو اختر/اكتب جهة جديدة"></div>
+                    <div class="mb-3"><label class="form-label">جهة العمل الإنجليزية (اختياري)</label><input type="text" class="form-control" name="patient_employer_en" id="edit_patient_employer_en" placeholder="يمكنك إضافتها أو تركها فارغة"></div>
                     <div class="mb-3"><label class="form-label">الجنسية (عربي)</label><input type="text" class="form-control" name="patient_nationality_ar" id="edit_patient_nationality_ar"></div>
                     <div class="mb-3"><label class="form-label">Nationality (EN)</label><input type="text" class="form-control" name="patient_nationality_en" id="edit_patient_nationality_en"></div>
                     <div class="mb-3"><label class="form-label">رابط المجلد</label><input type="url" class="form-control" name="folder_link" id="edit_patient_folder_link"></div>
@@ -7971,6 +7988,14 @@ if (!in_array($uiDataViewMode, ['table','compact','cards','zebra','glass','minim
                 </ul>
                 <div class="tab-content">
                     <div class="tab-pane fade show active" id="acctLeavesPane">
+                        <div class="d-flex flex-wrap justify-content-between align-items-center gap-2 mb-2">
+                            <div class="text-muted small"><i class="bi bi-check2-square"></i> حدّد الإجازات المطلوبة من الجدول أو حمّل كل الإجازات مرة واحدة.</div>
+                            <div class="btn-group btn-group-sm">
+                                <button type="button" class="btn btn-outline-primary" id="acctSelectAllLeaves"><i class="bi bi-check2-all"></i> تحديد الكل</button>
+                                <button type="button" class="btn btn-success" id="acctDownloadSelectedLeaves"><i class="bi bi-download"></i> تنزيل المحددة</button>
+                                <button type="button" class="btn btn-gradient" id="acctDownloadAllLeaves"><i class="bi bi-cloud-download"></i> تنزيل الكل</button>
+                            </div>
+                        </div>
                         <div id="acctLeavesList"><div class="text-center py-4 text-muted"><div class="spinner-border spinner-border-sm"></div> جارٍ التحميل...</div></div>
                     </div>
                     <div class="tab-pane fade" id="acctPaymentsPane">
@@ -10395,6 +10420,22 @@ setupSelectQuickSearch('batch_hospital_search', 'batch_hospital_id');
             return { cls: 'ok', pct, remaining };
         }
 
+        function normalizeWhatsAppDigits(phone) {
+            let digits = String(phone || '').replace(/\D+/g, '');
+            if (!digits) return '';
+            if (digits.startsWith('00')) digits = digits.slice(2);
+            if (digits.length === 10 && digits.startsWith('0')) digits = '966' + digits.slice(1);
+            if (digits.length === 9 && digits.startsWith('5')) digits = '966' + digits;
+            return digits;
+        }
+
+        function buildWhatsAppLink(phone, name) {
+            const digits = normalizeWhatsAppDigits(phone);
+            if (!digits) return '';
+            const msg = encodeURIComponent(`مرحباً ${name || ''}`.trim());
+            return `https://wa.me/${digits}?text=${msg}`;
+        }
+
         function renderAccountCard(u) {
             const isActive = u.is_active == 1;
             const roleClass = u.role === 'admin' ? 'role-admin' : 'role-user';
@@ -10408,6 +10449,7 @@ setupSelectQuickSearch('batch_hospital_search', 'batch_hospital_id');
             const daysStatus = acctGetDaysStatus(allowedDays, usedDays);
             const totalPaid = parseFloat(u.total_paid || 0).toFixed(2);
             const payCount = parseInt(u.payment_count || 0);
+            const whatsappHref = buildWhatsAppLink(u.patient_phone || '', u.linked_patient_name || u.display_name || '');
 
             let expiryHtml = '';
             if (expiry) {
@@ -10450,6 +10492,7 @@ setupSelectQuickSearch('batch_hospital_search', 'batch_hospital_id');
                             <span class="acct-info-label">المريض:</span>
                             <span class="acct-info-val">${patientHtml}</span>
                         </div>
+                        ${u.patient_phone ? `<div class="acct-info-row"><i class="bi bi-telephone-fill"></i><span class="acct-info-label">الجوال:</span><span class="acct-info-val">${htmlspecialchars(u.patient_phone || '')}</span>${whatsappHref ? `<a class="btn btn-sm btn-success ms-2" href="${whatsappHref}" target="_blank" rel="noopener" title="فتح واتساب للمريض"><i class="bi bi-whatsapp"></i> واتساب</a>` : ''}</div>` : ''}
                         ${daysHtml}
                         <div class="d-flex flex-wrap gap-2 align-items-center mt-2">
                             <span class="acct-payment-badge"><i class="bi bi-cash-coin"></i> ${totalPaid} ريال (${payCount} عملية)</span>
@@ -10517,6 +10560,7 @@ setupSelectQuickSearch('batch_hospital_search', 'batch_hospital_id');
                     (u.username||'').toLowerCase().includes(s) ||
                     (u.display_name||'').toLowerCase().includes(s) ||
                     (u.linked_patient_name||'').toLowerCase().includes(s) ||
+                    (u.patient_phone||'').includes(s) ||
                     (u.patient_identity||'').includes(s)
                 );
             }
@@ -10536,17 +10580,40 @@ setupSelectQuickSearch('batch_hospital_search', 'batch_hospital_id');
                 box.innerHTML = '<div class="text-center py-4 text-muted"><i class="bi bi-inbox" style="font-size:36px;opacity:.35"></i><p>لا توجد إجازات لهذا المريض.</p></div>';
                 return;
             }
-            box.innerHTML = `<div class="table-responsive"><table class="table table-sm align-middle"><thead><tr><th>رمز الخدمة</th><th>المستشفى</th><th>الطبيب</th><th>البداية</th><th>النهاية</th><th>الأيام</th><th>الدفع</th><th>المبلغ</th></tr></thead><tbody>${leaves.map(lv => `
+            box.innerHTML = `<div class="table-responsive"><table class="table table-sm align-middle text-center"><thead><tr><th><i class="bi bi-check2-square"></i></th><th>رمز الخدمة</th><th>المستشفى</th><th>الطبيب</th><th>تاريخ الإصدار</th><th>البداية</th><th>النهاية</th><th>الأيام</th><th>الدفع</th><th>المبلغ</th><th>تنزيل</th></tr></thead><tbody>${leaves.map(lv => `
                 <tr>
+                    <td><input class="form-check-input acct-leave-check" type="checkbox" value="${lv.id}" data-code="${htmlspecialchars(lv.service_code || '')}"></td>
                     <td><span class="badge bg-light text-dark border">${htmlspecialchars(lv.service_code || '-')}</span></td>
                     <td>${htmlspecialchars(lv.hospital_name || lv.hospital_name_ar || '-')}</td>
                     <td>${htmlspecialchars(lv.doctor_name || '-')} <small class="text-muted">${htmlspecialchars(lv.doctor_title || '')}</small></td>
+                    <td>${htmlspecialchars(lv.issue_date || '')}</td>
                     <td>${htmlspecialchars(lv.start_date || '')}</td>
                     <td>${htmlspecialchars(lv.end_date || '')}</td>
                     <td>${parseInt(lv.days_count || 0)}</td>
                     <td>${lv.is_paid == 1 ? '<span class="badge bg-success">مدفوعة</span>' : '<span class="badge bg-danger">غير مدفوعة</span>'}</td>
                     <td>${parseFloat(lv.payment_amount || 0).toFixed(2)}</td>
+                    <td><a class="btn btn-sm btn-outline-success" href="${REQUEST_URL}?action=generate_pdf&leave_id=${encodeURIComponent(lv.id)}&pdf_mode=download&csrf_token=${encodeURIComponent(CSRF_TOKEN)}" target="_blank" rel="noopener"><i class="bi bi-download"></i></a></td>
                 </tr>`).join('')}</tbody></table></div>`;
+        }
+
+        function getCheckedAccountLeaveIds() {
+            return Array.from(document.querySelectorAll('#acctLeavesList .acct-leave-check:checked')).map(cb => cb.value).filter(Boolean);
+        }
+
+        function downloadAccountLeavesByIds(ids) {
+            if (!ids.length) { showToast('اختر إجازة واحدة على الأقل للتنزيل.', 'warning'); return; }
+            ids.forEach((id, index) => {
+                window.setTimeout(() => {
+                    const a = document.createElement('a');
+                    a.href = `${REQUEST_URL}?action=generate_pdf&leave_id=${encodeURIComponent(id)}&pdf_mode=download&csrf_token=${encodeURIComponent(CSRF_TOKEN)}`;
+                    a.target = '_blank';
+                    a.rel = 'noopener';
+                    document.body.appendChild(a);
+                    a.click();
+                    a.remove();
+                }, index * 450);
+            });
+            showToast(`بدأ تنزيل ${ids.length} ملف PDF. إذا منع المتصفح بعض الملفات اسمح بالنوافذ المنبثقة لهذا الموقع.`, 'info');
         }
 
         function renderAcctPayments() {
@@ -10979,6 +11046,15 @@ setupSelectQuickSearch('batch_hospital_search', 'batch_hospital_id');
                 confirmModal.show();
             }
         });
+
+        document.getElementById('acctSelectAllLeaves')?.addEventListener('click', () => {
+            const checks = Array.from(document.querySelectorAll('#acctLeavesList .acct-leave-check'));
+            if (!checks.length) return;
+            const shouldCheck = checks.some(cb => !cb.checked);
+            checks.forEach(cb => { cb.checked = shouldCheck; });
+        });
+        document.getElementById('acctDownloadSelectedLeaves')?.addEventListener('click', () => downloadAccountLeavesByIds(getCheckedAccountLeaveIds()));
+        document.getElementById('acctDownloadAllLeaves')?.addEventListener('click', () => downloadAccountLeavesByIds((acctCurrentRecords.leaves || []).map(lv => String(lv.id)).filter(Boolean)));
 
         document.getElementById('acctPaymentStatusFilter')?.addEventListener('change', renderAcctPayments);
 
