@@ -1409,7 +1409,7 @@ function handleGeneratePdf($pdo, $leave_id, $pdfMode = 'preview') {
 
 
     // ==================== DOWNLOAD MODE (WeasyPrint) ====================
-if ($pdfMode === 'download') {
+if ($pdfMode === 'download' || $pdfMode === 'file') {
     // Build full HTML with embedded SVGs/PNGs and Fonts as absolute URLs
     $baseUrl = (isset($_SERVER['HTTPS']) && $_SERVER['HTTPS'] === 'on' ? 'https' : 'http') . '://' . $_SERVER['HTTP_HOST'] . dirname($_SERVER['SCRIPT_NAME']) . '/';
     
@@ -1540,19 +1540,22 @@ if ($pdfMode === 'download') {
     $output = shell_exec($cmd);
     
     if (file_exists($tmpPdf) && filesize($tmpPdf) > 0) {
+        @unlink($tmpHtml);
+        if ($pdfMode === 'file') {
+            return $tmpPdf;
+        }
         header('Content-Type: application/pdf');
         header('Content-Disposition: attachment; filename="sickLeaves.pdf"');
         header('Content-Length: ' . filesize($tmpPdf));
         header('Cache-Control: no-cache, no-store, must-revalidate');
         readfile($tmpPdf);
-        @unlink($tmpHtml);
         @unlink($tmpPdf);
         exit;
     } else {
         @unlink($tmpHtml);
         error_log('WeasyPrint Error: ' . $output);
     }
-    return;
+    return null;
 }
     // ==================== PREVIEW MODE ====================
   header('Content-Type: text/html; charset=utf-8');
@@ -1731,6 +1734,107 @@ if (isset($_GET['action']) && $_GET['action'] === 'health') {
     exit;
 }
 
+
+function normalizeSaudiWhatsAppNumber(?string $phone): string {
+    $digits = preg_replace('/\D+/', '', (string)$phone);
+    if ($digits === '') return '';
+    if (strpos($digits, '00') === 0) $digits = substr($digits, 2);
+    if (strpos($digits, '966') === 0) return $digits;
+    if (strpos($digits, '0') === 0) return '966' . substr($digits, 1);
+    if (strlen($digits) === 9 && $digits[0] === '5') return '966' . $digits;
+    return $digits;
+}
+
+function safeDownloadName(string $name, string $fallback = 'file'): string {
+    $name = trim(preg_replace('/[^\p{Arabic}\p{L}\p{N}_\-\.]+/u', '-', $name), '-.');
+    return $name !== '' ? mb_substr($name, 0, 120, 'UTF-8') : $fallback;
+}
+
+function handleBulkPatientLeavesDownload(PDO $pdo, int $accountUserId, array $leaveIds): void {
+    if ($accountUserId <= 0) {
+        http_response_code(400);
+        echo 'حساب غير صالح.';
+        exit;
+    }
+
+    if (!class_exists('ZipArchive')) {
+        http_response_code(500);
+        echo 'خدمة ضغط الملفات ZIP غير مفعّلة على الخادم.';
+        exit;
+    }
+
+    $acctStmt = $pdo->prepare("SELECT pa.patient_id, COALESCE(p.name_ar, p.name, 'patient') AS patient_name FROM patient_accounts pa LEFT JOIN patients p ON p.id = pa.patient_id WHERE pa.account_user_id = ? LIMIT 1");
+    $acctStmt->execute([$accountUserId]);
+    $account = $acctStmt->fetch();
+    if (!$account || intval($account['patient_id']) <= 0) {
+        http_response_code(404);
+        echo 'الحساب غير مرتبط بمريض.';
+        exit;
+    }
+
+    $patientId = intval($account['patient_id']);
+    $params = [$patientId];
+    $where = 'sl.patient_id = ? AND sl.deleted_at IS NULL';
+    $leaveIds = array_values(array_unique(array_filter(array_map('intval', $leaveIds), fn($id) => $id > 0)));
+    if ($leaveIds) {
+        $placeholders = implode(',', array_fill(0, count($leaveIds), '?'));
+        $where .= " AND sl.id IN ($placeholders)";
+        $params = array_merge($params, $leaveIds);
+    }
+
+    $stmt = $pdo->prepare("SELECT sl.id, sl.service_code, sl.issue_date, sl.start_date, sl.end_date FROM sick_leaves sl WHERE $where ORDER BY sl.issue_date DESC, sl.created_at DESC, sl.id DESC");
+    $stmt->execute($params);
+    $leaves = $stmt->fetchAll();
+    if (!$leaves) {
+        http_response_code(404);
+        echo 'لا توجد إجازات مطابقة للتنزيل.';
+        exit;
+    }
+
+    $zipPath = '/tmp/patient_leaves_' . uniqid('', true) . '.zip';
+    $zip = new ZipArchive();
+    if ($zip->open($zipPath, ZipArchive::CREATE | ZipArchive::OVERWRITE) !== true) {
+        http_response_code(500);
+        echo 'تعذّر إنشاء ملف التنزيل.';
+        exit;
+    }
+
+    $tempPdfs = [];
+    $addedCount = 0;
+    foreach ($leaves as $idx => $leave) {
+        $pdfPath = handleGeneratePdf($pdo, intval($leave['id']), 'file');
+        if (!$pdfPath || !is_file($pdfPath)) {
+            continue;
+        }
+        $tempPdfs[] = $pdfPath;
+        $fileName = sprintf('%02d-%s-%s.pdf', $idx + 1, safeDownloadName((string)($leave['service_code'] ?? ''), 'leave'), safeDownloadName((string)($leave['start_date'] ?? ''), 'date'));
+        if ($zip->addFile($pdfPath, $fileName)) {
+            $addedCount++;
+        }
+    }
+    $zip->close();
+
+    foreach ($tempPdfs as $pdfPath) {
+        @unlink($pdfPath);
+    }
+
+    if ($addedCount === 0 || !is_file($zipPath) || filesize($zipPath) === 0) {
+        @unlink($zipPath);
+        http_response_code(500);
+        echo 'تعذّر تجهيز ملفات PDF.';
+        exit;
+    }
+
+    $downloadName = 'sick-leaves-' . safeDownloadName((string)$account['patient_name'], 'patient') . '-' . date('Ymd-His') . '.zip';
+    header('Content-Type: application/zip');
+    header('Content-Disposition: attachment; filename="' . rawurlencode($downloadName) . '"; filename*=UTF-8\'\'' . rawurlencode($downloadName));
+    header('Content-Length: ' . filesize($zipPath));
+    header('Cache-Control: no-cache, no-store, must-revalidate');
+    readfile($zipPath);
+    @unlink($zipPath);
+    exit;
+}
+
 // ======================== معالجة تسجيل الدخول والخروج ========================
 if (isset($_POST['action']) && $_POST['action'] === 'login') {
     header('Content-Type: application/json; charset=utf-8');
@@ -1827,6 +1931,27 @@ if (isset($_GET['action']) && $_GET['action'] === 'generate_pdf') {
     exit;
 }
 
+if (isset($_GET['action']) && $_GET['action'] === 'bulk_download_patient_leaves') {
+    if (!is_logged_in()) {
+        header('Location: ' . $_SERVER['SCRIPT_NAME']);
+        exit;
+    }
+    if (($_SESSION['admin_role'] ?? 'user') !== 'admin') {
+        http_response_code(403);
+        echo 'ليس لديك صلاحية.';
+        exit;
+    }
+    if (!verify_csrf($_GET['csrf_token'] ?? '')) {
+        http_response_code(403);
+        echo 'خطأ في التحقق من الأمان.';
+        exit;
+    }
+    $accountUserId = intval($_GET['user_id'] ?? 0);
+    $leaveIdsRaw = trim((string)($_GET['leave_ids'] ?? ''));
+    $leaveIds = $leaveIdsRaw === '' ? [] : preg_split('/\s*,\s*/', $leaveIdsRaw);
+    handleBulkPatientLeavesDownload($pdo, $accountUserId, $leaveIds ?: []);
+}
+
 // ======================== معالجة طلبات AJAX عبر GET ========================
 $_GET_AJAX_ACTIONS = ['fetch_accounts_full', 'get_patient_account', 'get_hospital_logo', 'fetch_notifications', 'get_unread_count', 'fetch_user_notifications'];
 if (isset($_GET['action']) && in_array($_GET['action'], $_GET_AJAX_ACTIONS) && !isset($_POST['action'])) {
@@ -1862,7 +1987,7 @@ if (isset($_GET['action']) && in_array($_GET['action'], $_GET_AJAX_ACTIONS) && !
                 SELECT u.id, u.username, u.display_name, 'patient' AS role, u.is_active, u.created_at,
                        pa.patient_id AS linked_patient_id, pa.allowed_days AS patient_allowed_days,
                        pa.expiry_date, pa.notes AS account_notes,
-                       p.name_ar AS linked_patient_name, p.identity_number AS patient_identity,
+                       p.name_ar AS linked_patient_name, p.identity_number AS patient_identity, p.phone AS patient_phone,
                        COALESCE((SELECT SUM(amount) FROM account_payments WHERE COALESCE(account_user_id, user_id) = u.id AND is_paid = 1), 0) AS total_paid,
                        COALESCE((SELECT COUNT(*) FROM account_payments WHERE COALESCE(account_user_id, user_id) = u.id), 0) AS payment_count,
                        COALESCE((SELECT COUNT(*) FROM sick_leaves sl WHERE sl.patient_id = pa.patient_id AND sl.deleted_at IS NULL AND sl.created_by_user_id = u.id), 0) AS portal_leave_count,
@@ -3774,7 +3899,7 @@ if (isset($_POST['action']) && $_POST['action'] !== 'login' && $_POST['action'] 
                 SELECT u.id, u.username, u.display_name, 'patient' AS role, u.is_active, u.created_at,
                        pa.patient_id AS linked_patient_id, pa.allowed_days AS patient_allowed_days,
                        pa.expiry_date, pa.notes AS account_notes,
-                       p.name_ar AS linked_patient_name, p.identity_number AS patient_identity,
+                       p.name_ar AS linked_patient_name, p.identity_number AS patient_identity, p.phone AS patient_phone,
                        COALESCE((SELECT SUM(amount) FROM account_payments WHERE COALESCE(account_user_id, user_id) = u.id AND is_paid = 1), 0) AS total_paid,
                        COALESCE((SELECT COUNT(*) FROM account_payments WHERE COALESCE(account_user_id, user_id) = u.id), 0) AS payment_count,
                        COALESCE((SELECT COUNT(*) FROM sick_leaves sl WHERE sl.patient_id = pa.patient_id AND sl.deleted_at IS NULL AND sl.created_by_user_id = u.id), 0) AS portal_leave_count,
@@ -10395,6 +10520,26 @@ setupSelectQuickSearch('batch_hospital_search', 'batch_hospital_id');
             return { cls: 'ok', pct, remaining };
         }
 
+        function acctNormalizeWhatsAppPhone(phone) {
+            let digits = String(phone || '').replace(/\D+/g, '');
+            if (!digits) return '';
+            if (digits.startsWith('00')) digits = digits.slice(2);
+            if (digits.startsWith('966')) return digits;
+            if (digits.startsWith('0')) return '966' + digits.slice(1);
+            if (digits.length === 9 && digits.startsWith('5')) return '966' + digits;
+            return digits;
+        }
+
+        function acctBulkDownloadUrl(userId, leaveIds = []) {
+            const params = new URLSearchParams({
+                action: 'bulk_download_patient_leaves',
+                user_id: userId,
+                csrf_token: CSRF_TOKEN
+            });
+            if (leaveIds.length > 0) params.set('leave_ids', leaveIds.join(','));
+            return REQUEST_URL + '?' + params.toString();
+        }
+
         function renderAccountCard(u) {
             const isActive = u.is_active == 1;
             const roleClass = u.role === 'admin' ? 'role-admin' : 'role-user';
@@ -10408,6 +10553,11 @@ setupSelectQuickSearch('batch_hospital_search', 'batch_hospital_id');
             const daysStatus = acctGetDaysStatus(allowedDays, usedDays);
             const totalPaid = parseFloat(u.total_paid || 0).toFixed(2);
             const payCount = parseInt(u.payment_count || 0);
+            const whatsappPhone = acctNormalizeWhatsAppPhone(u.patient_phone || '');
+            const whatsappMessage = encodeURIComponent(`مرحباً ${u.linked_patient_name || u.display_name || ''}`.trim());
+            const whatsappHtml = whatsappPhone
+                ? `<a class="btn btn-sm btn-success" href="https://wa.me/${whatsappPhone}?text=${whatsappMessage}" target="_blank" rel="noopener" title="فتح واتساب على رقم المريض"><i class="bi bi-whatsapp"></i> واتساب</a>`
+                : `<button class="btn btn-sm btn-outline-secondary" disabled title="لا يوجد رقم جوال محفوظ للمريض"><i class="bi bi-whatsapp"></i> لا يوجد رقم</button>`;
 
             let expiryHtml = '';
             if (expiry) {
@@ -10450,6 +10600,7 @@ setupSelectQuickSearch('batch_hospital_search', 'batch_hospital_id');
                             <span class="acct-info-label">المريض:</span>
                             <span class="acct-info-val">${patientHtml}</span>
                         </div>
+                        ${u.patient_phone ? `<div class="acct-info-row"><i class="bi bi-telephone-fill"></i><span class="acct-info-label">الجوال:</span><span class="acct-info-val" dir="ltr">${htmlspecialchars(u.patient_phone)}</span></div>` : ''}
                         ${daysHtml}
                         <div class="d-flex flex-wrap gap-2 align-items-center mt-2">
                             <span class="acct-payment-badge"><i class="bi bi-cash-coin"></i> ${totalPaid} ريال (${payCount} عملية)</span>
@@ -10461,6 +10612,7 @@ setupSelectQuickSearch('batch_hospital_search', 'batch_hospital_id');
                         ${u.account_notes ? `<div class="mt-2 text-muted small"><i class="bi bi-sticky"></i> ${htmlspecialchars(u.account_notes)}</div>` : ''}
                     </div>
                     <div class="acct-card-actions">
+                        ${whatsappHtml}
                         <button class="btn btn-sm btn-gradient acct-btn-add-days" data-id="${u.id}" data-name="${htmlspecialchars(u.display_name)}" data-username="${htmlspecialchars(u.username)}" title="إضافة أيام">
                             <i class="bi bi-calendar-plus"></i> إضافة أيام
                         </button>
@@ -10527,7 +10679,7 @@ setupSelectQuickSearch('batch_hospital_search', 'batch_hospital_id');
             grid.innerHTML = filtered.map(renderAccountCard).join('');
         }
 
-        let acctCurrentRecords = { leaves: [], payments: [] };
+        let acctCurrentRecords = { userId: 0, leaves: [], payments: [] };
 
         function renderAcctLeaves(leaves) {
             const box = document.getElementById('acctLeavesList');
@@ -10536,17 +10688,59 @@ setupSelectQuickSearch('batch_hospital_search', 'batch_hospital_id');
                 box.innerHTML = '<div class="text-center py-4 text-muted"><i class="bi bi-inbox" style="font-size:36px;opacity:.35"></i><p>لا توجد إجازات لهذا المريض.</p></div>';
                 return;
             }
-            box.innerHTML = `<div class="table-responsive"><table class="table table-sm align-middle"><thead><tr><th>رمز الخدمة</th><th>المستشفى</th><th>الطبيب</th><th>البداية</th><th>النهاية</th><th>الأيام</th><th>الدفع</th><th>المبلغ</th></tr></thead><tbody>${leaves.map(lv => `
+            const totalDays = leaves.reduce((sum, lv) => sum + parseInt(lv.days_count || 0, 10), 0);
+            const totalAmount = leaves.reduce((sum, lv) => sum + parseFloat(lv.payment_amount || 0), 0);
+            box.innerHTML = `
+                <div class="d-flex justify-content-between align-items-center flex-wrap gap-2 mb-3">
+                    <div class="small text-muted">
+                        <i class="bi bi-list-check"></i> ${leaves.length} إجازة — ${totalDays} يوم — إجمالي المبالغ ${totalAmount.toFixed(2)} ريال
+                    </div>
+                    <div class="d-flex gap-2 flex-wrap">
+                        <button type="button" class="btn btn-sm btn-outline-primary" id="acctSelectAllLeaves"><i class="bi bi-check2-square"></i> تحديد الكل</button>
+                        <button type="button" class="btn btn-sm btn-outline-secondary" id="acctClearLeavesSelection"><i class="bi bi-square"></i> إلغاء التحديد</button>
+                        <button type="button" class="btn btn-sm btn-gradient" id="acctDownloadSelectedLeaves"><i class="bi bi-file-earmark-zip"></i> تنزيل المحددة ZIP</button>
+                        <button type="button" class="btn btn-sm btn-success" id="acctDownloadAllLeaves"><i class="bi bi-download"></i> تنزيل الكل ZIP</button>
+                    </div>
+                </div>
+                <div class="table-responsive"><table class="table table-sm table-hover align-middle text-center">
+                    <thead><tr><th style="width:42px"><input class="form-check-input" type="checkbox" id="acctLeavesMasterCheck"></th><th>رمز الخدمة</th><th>المستشفى</th><th>الطبيب</th><th>تاريخ الإصدار</th><th>البداية</th><th>النهاية</th><th>الأيام</th><th>النوع</th><th>الدفع</th><th>المبلغ</th><th>تنزيل</th></tr></thead>
+                    <tbody>${leaves.map(lv => `
                 <tr>
+                    <td><input class="form-check-input acct-leave-check" type="checkbox" value="${lv.id}"></td>
                     <td><span class="badge bg-light text-dark border">${htmlspecialchars(lv.service_code || '-')}</span></td>
                     <td>${htmlspecialchars(lv.hospital_name || lv.hospital_name_ar || '-')}</td>
-                    <td>${htmlspecialchars(lv.doctor_name || '-')} <small class="text-muted">${htmlspecialchars(lv.doctor_title || '')}</small></td>
+                    <td>${htmlspecialchars(lv.doctor_name || '-')} <small class="text-muted d-block">${htmlspecialchars(lv.doctor_title || '')}</small></td>
+                    <td>${htmlspecialchars(lv.issue_date || '')}</td>
                     <td>${htmlspecialchars(lv.start_date || '')}</td>
                     <td>${htmlspecialchars(lv.end_date || '')}</td>
-                    <td>${parseInt(lv.days_count || 0)}</td>
+                    <td>${parseInt(lv.days_count || 0, 10)}</td>
+                    <td>${lv.is_companion == 1 ? '<span class="badge bg-info text-dark">مرافق</span>' : '<span class="badge bg-primary">أساسي</span>'}</td>
                     <td>${lv.is_paid == 1 ? '<span class="badge bg-success">مدفوعة</span>' : '<span class="badge bg-danger">غير مدفوعة</span>'}</td>
                     <td>${parseFloat(lv.payment_amount || 0).toFixed(2)}</td>
+                    <td><a class="btn btn-sm btn-outline-success" href="${REQUEST_URL}?action=generate_pdf&leave_id=${encodeURIComponent(lv.id)}&pdf_mode=download&csrf_token=${encodeURIComponent(CSRF_TOKEN)}" target="_blank" rel="noopener"><i class="bi bi-file-earmark-pdf"></i></a></td>
                 </tr>`).join('')}</tbody></table></div>`;
+
+            const checks = () => Array.from(box.querySelectorAll('.acct-leave-check'));
+            const selectedIds = () => checks().filter(ch => ch.checked).map(ch => ch.value);
+            const setAll = (checked) => {
+                checks().forEach(ch => { ch.checked = checked; });
+                const master = box.querySelector('#acctLeavesMasterCheck');
+                if (master) master.checked = checked;
+            };
+            box.querySelector('#acctSelectAllLeaves')?.addEventListener('click', () => setAll(true));
+            box.querySelector('#acctClearLeavesSelection')?.addEventListener('click', () => setAll(false));
+            box.querySelector('#acctLeavesMasterCheck')?.addEventListener('change', (e) => setAll(e.target.checked));
+            box.querySelector('#acctDownloadSelectedLeaves')?.addEventListener('click', () => {
+                const ids = selectedIds();
+                if (ids.length === 0) {
+                    showToast('حدد إجازة واحدة على الأقل للتنزيل.', 'warning');
+                    return;
+                }
+                window.location.href = acctBulkDownloadUrl(acctCurrentRecords.userId, ids);
+            });
+            box.querySelector('#acctDownloadAllLeaves')?.addEventListener('click', () => {
+                window.location.href = acctBulkDownloadUrl(acctCurrentRecords.userId, []);
+            });
         }
 
         function renderAcctPayments() {
@@ -10927,7 +11121,7 @@ setupSelectQuickSearch('batch_hospital_search', 'batch_hospital_id');
 
                 const data = await sendAjaxRequest('account_fetch_records', { user_id: uid });
                 if (data.success) {
-                    acctCurrentRecords = { leaves: data.leaves || [], payments: data.payments || [] };
+                    acctCurrentRecords = { userId: parseInt(uid, 10) || 0, leaves: data.leaves || [], payments: data.payments || [] };
                     renderAcctLeaves(acctCurrentRecords.leaves);
                     renderAcctPayments();
                 }
