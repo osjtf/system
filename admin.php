@@ -1983,6 +1983,24 @@ if (isset($_GET['action']) && $_GET['action'] === 'bulk_download_patient_leaves'
     handleBulkPatientLeavesDownload($pdo, $accountUserId, $leaveIds ?: []);
 }
 
+if (isset($_GET['action']) && $_GET['action'] === 'shared_patient_leaves') {
+    $token = preg_replace('/[^a-f0-9]/', '', strtolower((string)($_GET['token'] ?? '')));
+    if (strlen($token) !== 48) {
+        http_response_code(404);
+        echo 'رابط المشاركة غير صالح.';
+        exit;
+    }
+    $stmt = $pdo->prepare("SELECT setting_value FROM app_settings WHERE setting_key = ? LIMIT 1");
+    $stmt->execute(['patient_leaves_share_' . $token]);
+    $payload = json_decode((string)($stmt->fetchColumn() ?: ''), true);
+    if (!$payload || time() > intval($payload['expires_at'] ?? 0)) {
+        http_response_code(410);
+        echo 'انتهت صلاحية رابط المشاركة.';
+        exit;
+    }
+    handleBulkPatientLeavesDownload($pdo, intval($payload['user_id'] ?? 0), $payload['leave_ids'] ?? []);
+}
+
 // ======================== معالجة طلبات AJAX عبر GET ========================
 $_GET_AJAX_ACTIONS = ['fetch_accounts_full', 'get_patient_account', 'get_hospital_logo', 'get_default_hospital_logo', 'fetch_notifications', 'get_unread_count', 'fetch_user_notifications'];
 if (isset($_GET['action']) && in_array($_GET['action'], $_GET_AJAX_ACTIONS) && !isset($_POST['action'])) {
@@ -4090,6 +4108,37 @@ if (isset($_POST['action']) && $_POST['action'] !== 'login' && $_POST['action'] 
                 exit;
             }
             echo json_encode(['success'=>true,'message'=>"تم خصم {$days} يوم بنجاح من رصيد الحساب.",'stats'=>getStats($pdo)]);
+            break;
+
+        case 'create_patient_leaves_whatsapp_share':
+            if ($_SESSION['admin_role'] !== 'admin') { echo json_encode(['success'=>false,'message'=>'ليس لديك صلاحية.']); exit; }
+            $uid = intval($_POST['user_id'] ?? 0);
+            $leaveIdsRaw = trim((string)($_POST['leave_ids'] ?? ''));
+            $leaveIds = $leaveIdsRaw === '' ? [] : array_values(array_unique(array_filter(array_map('intval', preg_split('/\s*,\s*/', $leaveIdsRaw)), fn($id) => $id > 0)));
+            if ($uid <= 0 || !$leaveIds) { echo json_encode(['success'=>false,'message'=>'حدد إجازة واحدة على الأقل للمشاركة.']); exit; }
+            $acctStmt = $pdo->prepare("SELECT pa.patient_id, COALESCE(p.name_ar, p.name, u.display_name, 'مريض') AS patient_name, p.phone AS patient_phone FROM patient_accounts pa LEFT JOIN patients p ON p.id = pa.patient_id LEFT JOIN patient_portal_users u ON u.id = pa.account_user_id WHERE pa.account_user_id = ? LIMIT 1");
+            $acctStmt->execute([$uid]);
+            $acct = $acctStmt->fetch();
+            if (!$acct || intval($acct['patient_id'] ?? 0) <= 0) { echo json_encode(['success'=>false,'message'=>'الحساب غير مرتبط بمريض.']); exit; }
+            $placeholders = implode(',', array_fill(0, count($leaveIds), '?'));
+            $validStmt = $pdo->prepare("SELECT id FROM sick_leaves WHERE patient_id = ? AND deleted_at IS NULL AND id IN ($placeholders)");
+            $validStmt->execute(array_merge([intval($acct['patient_id'])], $leaveIds));
+            $validIds = array_map('intval', $validStmt->fetchAll(PDO::FETCH_COLUMN));
+            if (!$validIds) { echo json_encode(['success'=>false,'message'=>'لا توجد إجازات صالحة للمشاركة.']); exit; }
+            $token = bin2hex(random_bytes(24));
+            $expiresAt = time() + (7 * 24 * 60 * 60);
+            $pdo->prepare("REPLACE INTO app_settings (setting_key, setting_value, updated_at) VALUES (?, ?, NOW())")
+                ->execute(['patient_leaves_share_' . $token, json_encode(['user_id'=>$uid,'leave_ids'=>$validIds,'expires_at'=>$expiresAt], JSON_UNESCAPED_UNICODE)]);
+            $scheme = (!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off') ? 'https' : 'http';
+            $baseUrl = $scheme . '://' . ($_SERVER['HTTP_HOST'] ?? '') . ($_SERVER['SCRIPT_NAME'] ?? '');
+            $downloadUrl = $baseUrl . '?action=shared_patient_leaves&token=' . $token;
+            $phone = normalizeSaudiWhatsAppNumber($acct['patient_phone'] ?? '');
+            if ($phone === '') { echo json_encode(['success'=>false,'message'=>'لا يوجد رقم واتساب محفوظ لهذا المريض.']); exit; }
+            $message = "مرحباً " . trim((string)($acct['patient_name'] ?? '')) . "،
+تم تجهيز ملفات الإجازات المرضية المحددة بصيغة PDF داخل ملف ZIP.
+رابط التحميل صالح لمدة 7 أيام:
+" . $downloadUrl;
+            echo json_encode(['success'=>true,'whatsapp_url'=>'https://wa.me/' . $phone . '?text=' . rawurlencode($message),'download_url'=>$downloadUrl,'count'=>count($validIds),'message'=>'تم تجهيز رابط واتساب للإجازات المحددة.']);
             break;
 
         case 'account_fetch_records':
@@ -10786,6 +10835,7 @@ setupSelectQuickSearch('batch_hospital_search', 'batch_hospital_id');
                         <button type="button" class="btn btn-sm btn-outline-primary" id="acctSelectAllLeaves"><i class="bi bi-check2-square"></i> تحديد الكل</button>
                         <button type="button" class="btn btn-sm btn-outline-secondary" id="acctClearLeavesSelection"><i class="bi bi-square"></i> إلغاء التحديد</button>
                         <button type="button" class="btn btn-sm btn-gradient" id="acctDownloadSelectedLeaves"><i class="bi bi-file-earmark-zip"></i> تنزيل المحددة ZIP</button>
+                        <button type="button" class="btn btn-sm btn-success" id="acctShareSelectedLeavesWhatsApp"><i class="bi bi-whatsapp"></i> مشاركة المحددة واتساب</button>
                         <button type="button" class="btn btn-sm btn-success" id="acctDownloadAllLeaves"><i class="bi bi-download"></i> تنزيل الكل ZIP</button>
                     </div>
                 </div>
@@ -10824,6 +10874,34 @@ setupSelectQuickSearch('batch_hospital_search', 'batch_hospital_id');
                     return;
                 }
                 window.location.href = acctBulkDownloadUrl(acctCurrentRecords.userId, ids);
+            });
+            box.querySelector('#acctShareSelectedLeavesWhatsApp')?.addEventListener('click', async (e) => {
+                const ids = selectedIds();
+                if (ids.length === 0) {
+                    showToast('حدد إجازة واحدة على الأقل للمشاركة عبر واتساب.', 'warning');
+                    return;
+                }
+                const btn = e.currentTarget;
+                const original = btn.innerHTML;
+                btn.disabled = true;
+                btn.innerHTML = '<span class="spinner-border spinner-border-sm"></span> تجهيز الرابط...';
+                try {
+                    const result = await sendAjaxRequest('create_patient_leaves_whatsapp_share', {
+                        user_id: acctCurrentRecords.userId,
+                        leave_ids: ids.join(',')
+                    });
+                    if (result.success && result.whatsapp_url) {
+                        window.open(result.whatsapp_url, '_blank', 'noopener');
+                        showToast(`تم تجهيز رابط واتساب يحتوي ${result.count || ids.length} ملف PDF محدد.`, 'success');
+                    } else {
+                        showToast(result.message || 'تعذّر تجهيز مشاركة واتساب.', 'error');
+                    }
+                } catch (err) {
+                    showToast('تعذّر تجهيز مشاركة واتساب.', 'error');
+                } finally {
+                    btn.disabled = false;
+                    btn.innerHTML = original;
+                }
             });
             box.querySelector('#acctDownloadAllLeaves')?.addEventListener('click', () => {
                 window.location.href = acctBulkDownloadUrl(acctCurrentRecords.userId, []);
