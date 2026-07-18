@@ -204,34 +204,26 @@ function checkPatientActive(PDO $pdo): bool {
 
 function gregorianToHijriUser($gYear, $gMonth, $gDay) {
     $gYear = (int)$gYear; $gMonth = (int)$gMonth; $gDay = (int)$gDay;
-    $a = intval((14 - $gMonth) / 12);
-    $y = $gYear + 4800 - $a;
-    $m = $gMonth + 12 * $a - 3;
-    $jdn = $gDay + intval((153 * $m + 2) / 5) + 365 * $y + intval($y / 4) - intval($y / 100) + intval($y / 400) - 32045;
-    $epoch = 1948440;
-    $days = $jdn - $epoch;
-    $hYear = intval(floor(($days - 1) / 354.36667) + 1);
-    $leapYears = [2, 5, 7, 10, 13, 16, 18, 21, 24, 26, 29];
-    $hijriYearStart = function($year) use ($epoch, $leapYears) {
-        $y2 = $year - 1;
-        $cycle = intval($y2 / 30);
-        $yearInCycle = $y2 % 30;
-        $leapCount = 0;
-        foreach ($leapYears as $ly) { if ($ly <= $yearInCycle) $leapCount++; }
-        return $epoch + $cycle * 10631 + $yearInCycle * 354 + $leapCount;
-    };
-    while ($hijriYearStart($hYear + 1) <= $jdn) $hYear++;
-    while ($hijriYearStart($hYear) > $jdn) $hYear--;
-    $dayOfYear = $jdn - $hijriYearStart($hYear) + 1;
-    $isLeap = in_array($hYear % 30, $leapYears);
-    $hMonth = 1; $remaining = $dayOfYear;
-    for ($mn = 1; $mn <= 12; $mn++) {
-        $md = ($mn % 2 == 1) ? 30 : 29;
-        if ($mn == 12 && $isLeap) $md = 30;
-        if ($remaining <= $md) { $hMonth = $mn; $hDay = $remaining; break; }
-        $remaining -= $md;
+    if (!checkdate($gMonth, $gDay, $gYear)) return ['year' => 0, 'month' => 0, 'day' => 0];
+
+    // Use Saudi Arabia's official Umm al-Qura calendar instead of the tabular
+    // approximation, which can be off by a day when rendering leave dates.
+    if (class_exists('IntlDateFormatter')) {
+        $date = new DateTimeImmutable(sprintf('%04d-%02d-%02d 12:00:00', $gYear, $gMonth, $gDay), new DateTimeZone('Asia/Riyadh'));
+        $formatter = new IntlDateFormatter('en_US@calendar=islamic-umalqura', IntlDateFormatter::NONE, IntlDateFormatter::NONE, 'Asia/Riyadh', IntlDateFormatter::TRADITIONAL, 'd-M-y');
+        $formatted = $formatter->format($date);
+        if (is_string($formatted) && preg_match('/^(\d{1,2})-(\d{1,2})-(\d{4})$/', $formatted, $m)) {
+            return ['year' => (int)$m[3], 'month' => (int)$m[2], 'day' => (int)$m[1]];
+        }
     }
-    return ['year' => $hYear, 'month' => $hMonth, 'day' => $hDay ?? $remaining];
+
+    // Keep a deterministic fallback for servers without the intl extension.
+    $a = intdiv(14 - $gMonth, 12); $y = $gYear + 4800 - $a; $m = $gMonth + 12 * $a - 3;
+    $jdn = $gDay + intdiv(153 * $m + 2, 5) + 365 * $y + intdiv($y, 4) - intdiv($y, 100) + intdiv($y, 400) - 32045;
+    $year = (int)floor((30 * ($jdn - 1948439) + 10646) / 10631);
+    $month = min(12, (int)ceil(($jdn - (29 + (int)floor(($year - 1) * 354 + (3 + 11 * $year) / 30 + 1948439.5))) / 29.5) + 1);
+    $day = $jdn - ((int)floor(29.5 * ($month - 1)) + ($year - 1) * 354 + (int)floor((3 + 11 * $year) / 30) + 1948439) + 1;
+    return ['year' => $year, 'month' => $month, 'day' => (int)$day];
 }
 
 function toHijriStrUser($d) {
