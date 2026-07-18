@@ -18,7 +18,7 @@ header_remove('Server');
 
 date_default_timezone_set('Asia/Riyadh');
 
-const PATIENT_TUTORIAL_URL = 'https://sehaa.up.railway.app/r.php';
+const PATIENT_TUTORIAL_URL = 'https://patsa.up.railway.app/r.php';
 
 header('X-Frame-Options: DENY');
 header('X-Content-Type-Options: nosniff');
@@ -79,6 +79,35 @@ try {
 
 $pdo->exec("SET time_zone = '+03:00'");
 try { $pdo->exec("ALTER TABLE hospitals ADD COLUMN deleted_at DATETIME NULL"); } catch (Throwable $e) {}
+$pdo->exec("CREATE TABLE IF NOT EXISTS app_settings (
+    setting_key VARCHAR(100) PRIMARY KEY,
+    setting_value LONGTEXT,
+    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci");
+try {
+    $pdo->exec("ALTER TABLE app_settings MODIFY setting_value LONGTEXT");
+} catch (Throwable $e) {
+}
+
+function patientGetSetting(PDO $pdo, string $key, ?string $default = null): ?string {
+    $stmt = $pdo->prepare("SELECT setting_value FROM app_settings WHERE setting_key = ?");
+    $stmt->execute([$key]);
+    $value = $stmt->fetchColumn();
+    return $value === false ? $default : (string)$value;
+}
+
+function patientGetDefaultHospitalLogoSettings(PDO $pdo): array {
+    $json = patientGetSetting($pdo, 'default_hospital_logo', '');
+    $data = $json ? json_decode($json, true) : [];
+    if (!is_array($data)) $data = [];
+    return [
+        'logo_data' => (string)($data['logo_data'] ?? ''),
+        'logo_url' => (string)($data['logo_url'] ?? ''),
+        'logo_scale' => isset($data['logo_scale']) ? (float)$data['logo_scale'] : 1.0,
+        'logo_offset_x' => isset($data['logo_offset_x']) ? (float)$data['logo_offset_x'] : 0.0,
+        'logo_offset_y' => isset($data['logo_offset_y']) ? (float)$data['logo_offset_y'] : 0.0,
+    ];
+}
 
 
 // بوابة المرضى تستخدم جدولاً مستقلاً بالكامل عن مستخدمي لوحة التحكم.
@@ -593,8 +622,8 @@ if ($action === 'generate_pdf' && isPatientLoggedIn()) {
     $natEn     = htmlspecialchars($lv['p_nationality_en'] ?? '', ENT_QUOTES);
     $empArRaw  = $lv['p_employer_ar'] ?? $lv['employer_ar'] ?? '';
     $empEnRaw  = $lv['p_employer_en'] ?? $lv['employer_en'] ?? '';
-    $empAr     = htmlspecialchars($empArRaw !== '' ? $empArRaw : 'الى من يهمه الامر', ENT_QUOTES);
-    $empEn     = htmlspecialchars($empEnRaw !== '' ? $empEnRaw : 'To Whom It May Concern', ENT_QUOTES);
+    $empAr     = htmlspecialchars($empArRaw, ENT_QUOTES);
+    $empEn     = htmlspecialchars($empEnRaw, ENT_QUOTES);
     $docNameAr = htmlspecialchars($lv['d_name_ar'] ?? '', ENT_QUOTES);
     $docNameEn = strtoupper(htmlspecialchars($lv['d_name_en'] ?? '', ENT_QUOTES));
     $docTitleAr = htmlspecialchars($lv['d_title_ar'] ?? '', ENT_QUOTES);
@@ -606,18 +635,27 @@ if ($action === 'generate_pdf' && isPatientLoggedIn()) {
     $hospLogoData = $lv['h_logo_data'] ?? '';
     $hospLogoUrl  = $lv['h_logo_url'] ?? '';
     $hospLogoPath = $lv['h_logo_path'] ?? '';
+    $defaultLogoSettings = patientGetDefaultHospitalLogoSettings($pdo);
     $defaultLogo  = 'https://ar.wikipedia.org/wiki/%D9%85%D9%84%D9%81:Saudi_Ministry_of_Health_Logo.svg';
     $logoSrc = $defaultLogo;
+    $usingDefaultLogo = true;
     if (!empty($hospLogoData) && strpos($hospLogoData, 'data:image/') === 0) {
         $logoSrc = $hospLogoData;
+        $usingDefaultLogo = false;
     } elseif ($hospLogoPath && strpos($hospLogoPath, 'http') === 0) {
         $logoSrc = $hospLogoPath;
+        $usingDefaultLogo = false;
     } elseif ($hospLogoUrl && strpos($hospLogoUrl, 'http') === 0) {
         $logoSrc = $hospLogoUrl;
+        $usingDefaultLogo = false;
+    } elseif (!empty($defaultLogoSettings['logo_data']) && strpos($defaultLogoSettings['logo_data'], 'data:image/') === 0) {
+        $logoSrc = $defaultLogoSettings['logo_data'];
+    } elseif (!empty($defaultLogoSettings['logo_url']) && strpos($defaultLogoSettings['logo_url'], 'http') === 0) {
+        $logoSrc = $defaultLogoSettings['logo_url'];
     }
-    $hLogoScale = floatval($lv['h_logo_scale'] ?? 1);
-    $hLogoOffX  = floatval($lv['h_logo_offset_x'] ?? 0);
-    $hLogoOffY  = floatval($lv['h_logo_offset_y'] ?? 0);
+    $hLogoScale = $usingDefaultLogo ? floatval($defaultLogoSettings['logo_scale'] ?? 1) : floatval($lv['h_logo_scale'] ?? 1);
+    $hLogoOffX  = $usingDefaultLogo ? floatval($defaultLogoSettings['logo_offset_x'] ?? 0) : floatval($lv['h_logo_offset_x'] ?? 0);
+    $hLogoOffY  = $usingDefaultLogo ? floatval($defaultLogoSettings['logo_offset_y'] ?? 0) : floatval($lv['h_logo_offset_y'] ?? 0);
     $logoTransform = "transform: translate({$hLogoOffX}px, {$hLogoOffY}px) scale({$hLogoScale});";
     $hospLogoHtml = '<div style="width:120px;height:120px;overflow:hidden;position:relative;"><img src="' . htmlspecialchars($logoSrc) . '" alt="Hospital Logo" style="width:100%;height:100%;object-fit:contain;position:absolute;top:0;left:0;' . $logoTransform . '" /></div>';
 
@@ -698,8 +736,8 @@ if ($action === 'generate_pdf' && isPatientLoggedIn()) {
         $pdfHtml .= '</style></head><body>';
 
         $pdfHtml .= '<div class="group1-container1"><div class="group1-thq-group1-elm">';
-        $pdfHtml .= '<div class="top-right-placeholder"><img src="' . $baseUrl . 'sehalogoright.png" style="width:100%;height:100%"/></div>';
-        $pdfHtml .= '<div class="top-left-placeholder"><img src="' . $baseUrl . 'sehalogoleft.png" style="width:100%;height:100%"/></div>';
+        $pdfHtml .= '<div class="top-right-placeholder"><img src="' . $baseUrl . 'upright.png" style="width:100%;height:100%"/></div>';
+        $pdfHtml .= '<div class="top-left-placeholder"><img src="' . $baseUrl . 'upleft.png" style="width:100%;height:100%"/></div>';
         $pdfHtml .= '<div class="bottom-right-placeholder"><img src="' . $baseUrl . 'bottomright.png" style="width:100%;height:100%"/></div>';
         $pdfHtml .= '<div class="group1-thq-staticinfo-elm">';
         $pdfHtml .= '<div class="header-placeholder"><img src="' . $baseUrl . 'header.png" style="width:100%;height:100%"/></div>';
@@ -707,8 +745,8 @@ if ($action === 'generate_pdf' && isPatientLoggedIn()) {
         $pdfHtml .= '<span class="group1-thq-text-elm44">Kingdom of Saudi Arabia</span>';
         $pdfHtml .= '<div class="placeholder-136"><img src="' . $baseUrl . 'qr.svg" style="width:103.9px;height:103.9px"/></div>';
         $pdfHtml .= '<span class="group1-thq-text-elm36" dir="rtl">للتحقق من بيانات التقرير يرجى التأكد من زيارة موقع منصة صحة<br/>الرسمي</span>';
-        $pdfHtml .= '<span class="group1-thq-text-elm39">To check the report please visit Seha\'s official website</span>';
-        $pdfHtml .= '<span class="group1-thq-text-elm40"><a href="https://seha-sa-inquiries-slenquiry.up.railway.app/" target="_blank">www.seha.sa/#/inquiries/slenquiry</a></span>';
+        $pdfHtml .= '<span class="group1-thq-text-elm39">To check the report please visit Sahe\'s official website</span>';
+        $pdfHtml .= '<span class="group1-thq-text-elm40"><a href="https://sahe-sa.up.railway.app/" target="_blank">www.sahe.sa/#/inquiries/slenquiry</a></span>';
         $pdfHtml .= '</div>';
         $pdfHtml .= '<table class="info-table" cellpadding="0" cellspacing="0"><tbody>';
         $pdfHtml .= '<tr><td class="en-title">Leave ID</td><td class="data-cell" colspan="2">' . $sc . '</td><td class="ar-title">رمز الإجازة</td></tr>';
@@ -820,8 +858,8 @@ function downloadPDF(){var b=document.getElementById('btnDownloadPDF');b.textCon
   <button class="download-btn" style="background:#64748b;box-shadow:none" onclick="history.back()">رجوع</button>
 </div>
 <div class="group1-container1"><div class="group1-thq-group1-elm" id="report-content">
-  <div class="top-right-placeholder"><img src="<?= $baseUrl ?>sehalogoright.png" style="width:100%;height:100%" onerror="this.style.display='none'"/></div>
-  <div class="top-left-placeholder"><img src="<?= $baseUrl ?>sehalogoleft.png" style="width:100%;height:100%" onerror="this.style.display='none'"/></div>
+  <div class="top-right-placeholder"><img src="<?= $baseUrl ?>upright.png" style="width:100%;height:100%" onerror="this.style.display='none'"/></div>
+  <div class="top-left-placeholder"><img src="<?= $baseUrl ?>upleft.png" style="width:100%;height:100%" onerror="this.style.display='none'"/></div>
   <div class="bottom-right-placeholder"><img src="<?= $baseUrl ?>bottomright.png" style="width:100%;height:100%" onerror="this.style.display='none'"/></div>
   <div class="group1-thq-staticinfo-elm">
     <div class="header-placeholder"><img src="<?= $baseUrl ?>header.png" style="width:100%;height:100%" onerror="this.style.display='none'"/></div>
@@ -829,8 +867,8 @@ function downloadPDF(){var b=document.getElementById('btnDownloadPDF');b.textCon
     <span class="group1-thq-text-elm44">Kingdom of Saudi Arabia</span>
     <div class="placeholder-136"><img src="<?= $baseUrl ?>qr.svg" style="width:103.9px;height:103.9px" onerror="this.style.display='none'"/></div>
     <span class="group1-thq-text-elm36" dir="rtl">للتحقق من بيانات التقرير يرجى التأكد من زيارة موقع منصة صحة<br/>الرسمي</span>
-    <span class="group1-thq-text-elm39">To check the report please visit Seha's official website</span>
-    <span class="group1-thq-text-elm40"><a href="https://seha-sa-inquiries-slenquiry.up.railway.app/" target="_blank">www.seha.sa/#/inquiries/slenquiry</a></span>
+    <span class="group1-thq-text-elm39">To check the report please visit Sahe's official website</span>
+    <span class="group1-thq-text-elm40"><a href="https://sahe-sa.up.railway.app/" target="_blank">www.sahe.sa/#/inquiries/slenquiry</a></span>
   </div>
   <table class="info-table" cellpadding="0" cellspacing="0"><tbody>
     <tr><td class="en-title">Leave ID</td><td class="data-cell" colspan="2"><?= $sc ?></td><td class="ar-title">رمز الإجازة</td></tr>
@@ -904,17 +942,17 @@ if (isPatientLoggedIn()) {
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <meta name="robots" content="noindex, nofollow">
-<title>صحة - Seha</title>
+<title>صحة - Sahe</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Cairo:wght@300;400;500;600;700;800;900&family=Inter:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css" crossorigin="anonymous" referrerpolicy="no-referrer">
 <script>
-(function(){var t=localStorage.getItem('seha-theme')||'light';document.documentElement.setAttribute('data-theme',t)})();
+(function(){var t=localStorage.getItem('sahe-theme')||'light';document.documentElement.setAttribute('data-theme',t)})();
 </script>
 <style>
 /* ═══════════════════════════════════════════════════════════════
-   SEHA PATIENT PORTAL - Ultra Modern Design System
+   Sahe PATIENT PORTAL - Ultra Modern Design System
    ═══════════════════════════════════════════════════════════════ */
 
 :root {
@@ -1571,7 +1609,7 @@ body {
   <div class="login-card">
     <div class="login-logo"><i class="fas fa-hospital-user"></i></div>
     <h2>صحة</h2>
-    <p class="subtitle">Seha</p>
+    <p class="subtitle"></p>
     <?php if (!empty($loginError)): ?>
       <div class="login-alert"><i class="fas fa-exclamation-circle"></i> <?= htmlspecialchars($loginError) ?></div>
     <?php endif; ?>
@@ -1614,7 +1652,7 @@ body {
 <nav class="navbar">
   <div class="nav-brand">
     <div class="nav-brand-icon"><i class="fas fa-heartbeat"></i></div>
-    <div class="nav-brand-text">صحة<small>Seha</small></div>
+    <div class="nav-brand-text">صحة<small></small></div>
   </div>
   <div class="nav-actions">
     <div class="nav-user-badge">
@@ -1863,12 +1901,12 @@ function toggleTheme() {
   const current = html.getAttribute('data-theme');
   const next = current === 'dark' ? 'light' : 'dark';
   html.setAttribute('data-theme', next);
-  localStorage.setItem('seha-theme', next);
+  localStorage.setItem('sahe-theme', next);
   const icon = document.querySelector('#btnThemeToggle i');
   if (icon) icon.className = next === 'dark' ? 'fas fa-sun' : 'fas fa-moon';
 }
 (function(){
-  const t = localStorage.getItem('seha-theme') || 'light';
+  const t = localStorage.getItem('sahe-theme') || 'light';
   const icon = document.querySelector('#btnThemeToggle i');
   if (icon) icon.className = t === 'dark' ? 'fas fa-sun' : 'fas fa-moon';
 })();
