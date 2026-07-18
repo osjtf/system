@@ -721,63 +721,26 @@ function downloadLogoFromUrl(string $url): ?string {
 }
 
 function gregorianToHijri($gYear, $gMonth, $gDay) {
-    // Tabular Islamic Calendar conversion (accurate to ±1-2 days)
     $gYear = (int)$gYear; $gMonth = (int)$gMonth; $gDay = (int)$gDay;
-    
-    // Step 1: Gregorian to Julian Day Number
-    $a = intval((14 - $gMonth) / 12);
-    $y = $gYear + 4800 - $a;
-    $m = $gMonth + 12 * $a - 3;
-    $jdn = $gDay + intval((153 * $m + 2) / 5) + 365 * $y + intval($y / 4) - intval($y / 100) + intval($y / 400) - 32045;
-    
-    // Step 2: JDN to Hijri using tabular Islamic calendar
-    $epoch = 1948440;
-    $days = $jdn - $epoch;
-    
-    // Approximate year
-    $hYear = intval(floor(($days - 1) / 354.36667) + 1);
-    
-    // Leap years in 30-year cycle
-    $leapYears = [2, 5, 7, 10, 13, 16, 18, 21, 24, 26, 29];
-    
-    // Calculate start of Hijri year
-    $hijriYearStart = function($year) use ($epoch, $leapYears) {
-        $y2 = $year - 1;
-        $cycle = intval($y2 / 30);
-        $yearInCycle = $y2 % 30;
-        $leapCount = 0;
-        foreach ($leapYears as $ly) {
-            if ($ly <= $yearInCycle) $leapCount++;
+    if (!checkdate($gMonth, $gDay, $gYear)) return ['year' => 0, 'month' => 0, 'day' => 0];
+
+    // Umm al-Qura is Saudi Arabia's official Hijri calendar and prevents arithmetic-calendar drift.
+    if (class_exists('IntlDateFormatter')) {
+        $date = new DateTimeImmutable(sprintf('%04d-%02d-%02d 12:00:00', $gYear, $gMonth, $gDay), new DateTimeZone('Asia/Riyadh'));
+        $formatter = new IntlDateFormatter('en_US@calendar=islamic-umalqura', IntlDateFormatter::NONE, IntlDateFormatter::NONE, 'Asia/Riyadh', IntlDateFormatter::TRADITIONAL, 'd-M-y');
+        $formatted = $formatter->format($date);
+        if (is_string($formatted) && preg_match('/^(\d{1,2})-(\d{1,2})-(\d{4})$/', $formatted, $m)) {
+            return ['year' => (int)$m[3], 'month' => (int)$m[2], 'day' => (int)$m[1]];
         }
-        return $epoch + $cycle * 10631 + $yearInCycle * 354 + $leapCount;
-    };
-    
-    // Adjust year
-    while ($hijriYearStart($hYear + 1) <= $jdn) $hYear++;
-    while ($hijriYearStart($hYear) > $jdn) $hYear--;
-    
-    // Day of year
-    $dayOfYear = $jdn - $hijriYearStart($hYear) + 1;
-    
-    // Determine if leap year
-    $isLeap = in_array($hYear % 30, $leapYears);
-    
-    // Calculate month and day
-    $hMonth = 1;
-    $hDay = $dayOfYear;
-    $remaining = $dayOfYear;
-    for ($monthNum = 1; $monthNum <= 12; $monthNum++) {
-        $monthDays = ($monthNum % 2 == 1) ? 30 : 29;
-        if ($monthNum == 12 && $isLeap) $monthDays = 30;
-        if ($remaining <= $monthDays) {
-            $hMonth = $monthNum;
-            $hDay = $remaining;
-            break;
-        }
-        $remaining -= $monthDays;
     }
-    
-    return ['year' => $hYear, 'month' => $hMonth, 'day' => $hDay];
+
+    // Compatibility fallback for hosts without ext-intl.
+    $a = intdiv(14 - $gMonth, 12); $y = $gYear + 4800 - $a; $m = $gMonth + 12 * $a - 3;
+    $jdn = $gDay + intdiv(153 * $m + 2, 5) + 365 * $y + intdiv($y, 4) - intdiv($y, 100) + intdiv($y, 400) - 32045;
+    $year = (int)floor((30 * ($jdn - 1948439) + 10646) / 10631);
+    $month = min(12, (int)ceil(($jdn - (29 + (int)floor(($year - 1) * 354 + (3 + 11 * $year) / 30 + 1948439.5))) / 29.5) + 1);
+    $day = $jdn - ((int)floor(29.5 * ($month - 1)) + ($year - 1) * 354 + (int)floor((3 + 11 * $year) / 30) + 1948439) + 1;
+    return ['year' => $year, 'month' => $month, 'day' => (int)$day];
 }
 
 function getHijriMonthName($month) {
@@ -4944,6 +4907,8 @@ if (!in_array($uiDataViewMode, ['table','compact','cards','zebra','glass','minim
         }
 
         /* ═══════════════ البطاقات الإحصائية ═══════════════ */
+        .stats-toggle-bar { margin: 0 0 14px; }
+        .stats-grid.is-collapsed { display: none; }
         .stats-grid {
             display: grid;
             grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
@@ -6485,7 +6450,8 @@ if (!in_array($uiDataViewMode, ['table','compact','cards','zebra','glass','minim
 
 <div class="container-fluid p-3">
     <!-- ======================== البطاقات الإحصائية ======================== -->
-    <div class="stats-grid" id="statsGrid">
+    <div class="stats-toggle-bar"><button type="button" class="btn btn-outline-primary btn-sm" id="toggleStatsGrid" aria-expanded="false" aria-controls="statsGrid"><i class="bi bi-eye"></i> <span>إظهار الإحصائيات</span></button></div>
+    <div class="stats-grid is-collapsed" id="statsGrid" aria-hidden="true">
         <div class="stat-card">
             <div class="stat-icon"><i class="bi bi-file-earmark-medical"></i></div>
             <div class="stat-value" id="stat-total"><?php echo $stats['total']; ?></div>
@@ -9547,6 +9513,18 @@ setupSelectQuickSearch('acctNewLinkPatientSearch', 'acctNewLinkPatient');
     // أضف هذا السطر لربط حقل البحث الجديد بقائمة المستشفيات في نموذج الدفعة
 setupSelectQuickSearch('batch_hospital_search', 'batch_hospital_id');
 
+    // Cover every remaining database-backed selector, including modal controls added later.
+    const knownSearchableSelects = new Set(['patient_select', 'doctor_select', 'dup_doctor_select', 'doctor_id_edit', 'hospital_id', 'edit_doctor_hospital_id', 'hospital_id_edit', 'acct_leave_hospital_id', 'acctNewLinkPatient', 'batch_hospital_id', 'dup_hospital_select']);
+    document.querySelectorAll('select[id]').forEach(select => {
+        if (!/(hospital|doctor|patient|user|chatPeer)/i.test(select.id) || knownSearchableSelects.has(select.id)) return;
+        const input = document.createElement('input');
+        input.type = 'search'; input.id = select.id + '__search'; input.className = 'form-control form-control-sm mb-2';
+        input.placeholder = 'بحث سريع في الخيارات...'; input.autocomplete = 'off';
+        select.before(input);
+        setupSelectQuickSearch(input.id, select.id);
+        select.addEventListener('focus', () => refreshSelectQuickSearchData(select.id));
+    });
+
     const quickPatientModalEl = document.getElementById('quickPatientModal');
     const quickDoctorModalEl = document.getElementById('quickDoctorModal');
     const quickPatientModal = quickPatientModalEl ? new bootstrap.Modal(quickPatientModalEl) : null;
@@ -11273,6 +11251,7 @@ setupSelectQuickSearch('batch_hospital_search', 'batch_hospital_id');
                         document.getElementById('acctLinkNotes').value = u.account_notes || '';
                     }
                 }
+                refreshSelectQuickSearchData('acctLinkPatientId');
                 acctLinkPatientModal.show();
             }
 
@@ -12078,6 +12057,7 @@ setupSelectQuickSearch('batch_hospital_search', 'batch_hospital_id');
             (currentTableData.hospitals || []).forEach(h => {
                 sel.innerHTML += `<option value="${h.id}">${htmlspecialchars(h.name_ar || '')}</option>`;
             });
+            refreshSelectQuickSearchData('batchPayHospitalSelect');
         }
     });
 
@@ -12408,6 +12388,13 @@ setupSelectQuickSearch('batch_hospital_search', 'batch_hospital_id');
     // ====== التحميل الأولي ======
     applyAllCurrentFilters();
     refreshSensitiveValuesMask();
+    const statsGrid = document.getElementById('statsGrid');
+    document.getElementById('toggleStatsGrid')?.addEventListener('click', (e) => {
+        const hidden = statsGrid?.classList.toggle('is-collapsed');
+        statsGrid?.setAttribute('aria-hidden', hidden ? 'true' : 'false');
+        e.currentTarget.setAttribute('aria-expanded', hidden ? 'false' : 'true');
+        e.currentTarget.innerHTML = hidden ? '<i class="bi bi-eye"></i> <span>إظهار الإحصائيات</span>' : '<i class="bi bi-eye-slash"></i> <span>إخفاء الإحصائيات</span>';
+    });
     document.getElementById('toggleSensitiveAmounts')?.addEventListener('click', (e) => {
         const paidEl = document.getElementById('stat-paid-amount');
         const unpaidEl = document.getElementById('stat-unpaid-amount');
@@ -12448,7 +12435,9 @@ setupSelectQuickSearch('batch_hospital_search', 'batch_hospital_id');
             document.getElementById('quick_doctor_hospital_id'),
             document.getElementById('dup_hospital_id'),
             document.getElementById('hospital_id_edit'),
-            document.getElementById('dup_hospital_select')
+            document.getElementById('dup_hospital_select'),
+            document.getElementById('acct_leave_hospital_id'),
+            document.getElementById('batchPayHospitalSelect')
         ];
         const seen = new Set();
         selects.forEach(sel => {
@@ -13037,7 +13026,7 @@ setupSelectQuickSearch('batch_hospital_search', 'batch_hospital_id');
             const sel = document.getElementById(id);
             if (!sel) return;
             const current = sel.value;
-            const required = ['hospital_id', 'dup_hospital_id', 'hospital_id_edit', 'dup_hospital_select'].includes(id);
+            const required = ['hospital_id', 'dup_hospital_id', 'hospital_id_edit', 'dup_hospital_select', 'acct_leave_hospital_id'].includes(id);
             sel.innerHTML = required ? '<option value="">-- اختر مستشفى --</option>' : '<option value="">المستشفى (اختياري)</option>';
             hospitalRows.forEach(h => {
                 const opt = document.createElement('option');
