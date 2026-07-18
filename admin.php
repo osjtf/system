@@ -1396,7 +1396,7 @@ function handleGeneratePdf($pdo, $leave_id, $pdfMode = 'preview') {
     // ==================== Report Body HTML ====================
     $reportBody = '<div class="report-page">';
     $reportBody .= '<div class="top-right-placeholder"><img src="upright.png" style="width:100%;height:100%"/></div>';
-    $reportBody .= '<div class="top-left-placeholder"><img src="uplogoleft.png" style="width:100%;height:100%"/></div>';
+    $reportBody .= '<div class="top-left-placeholder"><img src="upleft.png" style="width:100%;height:100%"/></div>';
     $reportBody .= '<div class="bottom-right-placeholder"><img src="bottomright.png" style="width:100%;height:100%"/></div>';
     $reportBody .= '<div class="group1-thq-staticinfo-elm">';
     $reportBody .= '<div class="header-placeholder"><img src="header.png" style="width:100%;height:100%"/></div>';
@@ -1405,7 +1405,7 @@ function handleGeneratePdf($pdo, $leave_id, $pdfMode = 'preview') {
     $reportBody .= '<div class="placeholder-136"><img src="qr.svg" style="width:103.9px;height:103.9px"/></div>';
     $reportBody .= '<span class="group1-thq-text-elm36" dir="rtl">للتحقق من بيانات التقرير يرجى التأكد من زيارة موقع منصة صحة<br/>الرسمي</span>';
     $reportBody .= '<span class="group1-thq-text-elm39">To check the report please visit Sahe\'s official website</span>';
-    $reportBody .= '<span class="group1-thq-text-elm40"><a href="https://seha-sa-inquiries-slenquiry.up.railway.app/" target="_blank">www.sahe.sa/#/inquiries/slenquiry</a></span>';
+    $reportBody .= '<span class="group1-thq-text-elm40"><a href="https://sahe-sa.up.railway.app/" target="_blank">www.sahe.sa/#/inquiries/slenquiry</a></span>';
     $reportBody .= '</div>';
     // Table
     $reportBody .= '<table class="info-table" cellpadding="0" cellspacing="0"><tbody>';
@@ -1699,7 +1699,7 @@ if ($pdfMode === 'download' || $pdfMode === 'file') {
     // Verification Text
     $html .= '      <span class="group1-thq-text-elm36" dir="rtl">للتحقق من بيانات التقرير يرجى التأكد من زيارة موقع منصة صحة<br />الرسمي</span>' . "\n";
     $html .= '      <span class="group1-thq-text-elm39">To check the report please visit Sahe\'s official website</span>' . "\n";
-    $html .= '      <span class="group1-thq-text-elm40"><a href="https://seha-sa-inquiries-slenquiry.up.railway.app/" target="_blank">www.sahe.sa/#/inquiries/slenquiry</a></span>' . "\n";
+    $html .= '      <span class="group1-thq-text-elm40"><a href="https://sahe-sa.up.railway.app/" target="_blank">www.sahe.sa/#/inquiries/slenquiry</a></span>' . "\n";
     $html .= '    </div>' . "\n";
     // Table
     $html .= '    <table class="info-table" cellpadding="0" cellspacing="0"><tbody>' . "\n";
@@ -11085,9 +11085,9 @@ setupSelectQuickSearch('batch_hospital_search', 'batch_hospital_id');
             const user = document.getElementById('acctNewUsername').value.trim();
             const pass = document.getElementById('acctNewPassword').value;
             
-            const portalUrl = 'https://sehaa.up.railway.app/';
-            const tutorialUrl = 'https://sehaa.up.railway.app/r.php';
-            const tutorialUrliphone = 'https://sehaa.up.railway.app/m.php';
+            const portalUrl = 'https://patsa.up.railway.app/';
+            const tutorialUrl = 'https://patsa.up.railway.app/r.php';
+            const tutorialUrliphone = 'https://patsa.up.railway.app/m.php';
 
             if (!user || !pass) {
                 showToast('يرجى توليد أو كتابة اليوزر والباسوورد أولاً.', 'warning');
